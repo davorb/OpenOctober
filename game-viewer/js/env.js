@@ -3,6 +3,7 @@
 // keyframe to this one over InterpolationTime minutes. A keyframe holds the planets (sun + moons: light colour, intensity, orbit rotation),
 // atmosphere (ambient light, cloud colour/cover), and the global linear fog (colour, start/end as fraction of view distance).
 import * as THREE from 'three';
+import { addLightUniforms } from './lights.js';
 
 const lerp = (a, b, k) => a + (b - a) * k;
 const lerpArr = (a, b, k) => a && b ? a.map((v, i) => lerp(v, b[i], k)) : (b || a);
@@ -38,6 +39,8 @@ export class Environment {
       uTime: { value: 0 }, uViewDist: { value: 3000 },
       uWind: { value: new THREE.Vector3(0, 0, 0) },
     };
+    this.u.uShadowMap = { value: null }; this.u.uShadowMat = { value: new THREE.Matrix4() }; this.u.uShadowOn = { value: 0 }; this.u.uShadowTexel = { value: 1 / 2048 };
+    addLightUniforms(this.u);
     this.state = {};
   }
   setConfig(n) { this.config = n; }

@@ -25,18 +25,28 @@ self.onmessage = async ({ data: { id, url } }) => {
       const ix = acc(p.indices).arr;
       return { index: small ? Uint16Array.from(ix) : ix, ...mesh.extras.groups[i] };
     });
-    // coarse height grid (max y per 8 m cell, holes filled from neighbours) for camera clamping / altitude queries
-    const G = 128, cell = 1024 / G, hg = new Float32Array((G + 1) * (G + 1)).fill(-1e9);
-    for (let i = 0; i < pos.count; i++) {
-      const gx = Math.round((pos.arr[i * 3] + 512) / cell), gz = Math.round((pos.arr[i * 3 + 2] + 512) / cell);
-      if (gx < 0 || gz < 0 || gx > G || gz > G) continue;
-      const k = gz * (G + 1) + gx; if (pos.arr[i * 3 + 1] > hg[k]) hg[k] = pos.arr[i * 3 + 1];
+    // 4 m height grid, rasterised from the actual triangles (used for walking, ground clamping and altitude queries)
+    const G = 256, cell = 1024 / G, W = G + 1, hg = new Float32Array(W * W).fill(-1e9), P = pos.arr;
+    for (const g of groups) {
+      const ix = g.index;
+      for (let t = 0; t < ix.length; t += 3) {
+        const a = ix[t] * 3, b = ix[t + 1] * 3, c = ix[t + 2] * 3;
+        const ax = (P[a] + 512) / cell, az = (P[a + 2] + 512) / cell, bx = (P[b] + 512) / cell, bz = (P[b + 2] + 512) / cell, cx = (P[c] + 512) / cell, cz = (P[c + 2] + 512) / cell;
+        const x0 = Math.max(0, Math.ceil(Math.min(ax, bx, cx))), x1 = Math.min(G, Math.floor(Math.max(ax, bx, cx)));
+        const z0 = Math.max(0, Math.ceil(Math.min(az, bz, cz))), z1 = Math.min(G, Math.floor(Math.max(az, bz, cz)));
+        const den = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz); if (Math.abs(den) < 1e-9) continue;
+        for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) {
+          const l1 = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / den, l2 = ((cz - az) * (x - cx) + (ax - cx) * (z - cz)) / den, l3 = 1 - l1 - l2;
+          if (l1 < -1e-4 || l2 < -1e-4 || l3 < -1e-4) continue;
+          const y = l1 * P[a + 1] + l2 * P[b + 1] + l3 * P[c + 1], k = z * W + x; if (y > hg[k]) hg[k] = y;
+        }
+      }
     }
     for (let pass = 0; pass < 12; pass++) {
       let holes = 0; const src = hg.slice();
       for (let z = 0; z <= G; z++) for (let x = 0; x <= G; x++) {
-        const k = z * (G + 1) + x; if (src[k] > -1e8) continue; let sum = 0, n = 0;
-        for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, zz = z + dz; if (xx < 0 || zz < 0 || xx > G || zz > G) continue; const v = src[zz * (G + 1) + xx]; if (v > -1e8) { sum += v; n++; } }
+        const k = z * W + x; if (src[k] > -1e8) continue; let sum = 0, n = 0;
+        for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, zz = z + dz; if (xx < 0 || zz < 0 || xx > G || zz > G) continue; const v = src[zz * W + xx]; if (v > -1e8) { sum += v; n++; } }
         if (n) hg[k] = sum / n; else holes++;
       }
       if (!holes) break;

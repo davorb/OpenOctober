@@ -45,12 +45,24 @@ const cache = new Map();
 function fragment(N) {
   if (cache.has(N)) return cache.get(N);
   let s = `
+#include <packing>
 ${fogUniforms}${fogFn}
 uniform sampler2D tDetail; uniform float uFade; uniform float uTile; uniform float uHB_sharp; uniform float uHB_bias;
 uniform vec3 uSunDir; uniform vec3 uAmbSky; uniform vec3 uAmbGround; uniform vec3 uMoonDir[3]; uniform vec3 uMoonColor[3];
 uniform float uSlot[${N}];
+uniform sampler2D uShadowMap; uniform mat4 uShadowMat; uniform float uShadowOn; uniform float uShadowTexel;
+uniform vec3 uDynW[16]; uniform vec3 uDynCol[16]; uniform float uDynRad[16];
 ${Array.from({ length: N }, (_, i) => `uniform sampler2D tD${i}; uniform sampler2D tN${i}; uniform float uHasN${i};`).join('\n')}
 varying vec3 vWorld; varying vec3 vN; varying vec4 vW0; varying vec4 vW1; varying vec3 vView;
+float shadowAt(vec3 wp, vec3 n) {
+  if (uShadowOn < 0.5) return 1.0;
+  vec3 q = (uShadowMat * vec4(wp + n * 0.7, 1.0)).xyz;
+  if (q.x <= 0.0 || q.x >= 1.0 || q.y <= 0.0 || q.y >= 1.0 || q.z >= 1.0) return 1.0;
+  float s = 0.0;
+  for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) s += step(q.z - 0.0005, unpackRGBAToDepth(texture2D(uShadowMap, q.xy + vec2(float(x), float(y)) * uShadowTexel)));
+  float edge = smoothstep(0.0, 0.1, min(min(q.x, 1.0 - q.x), min(q.y, 1.0 - q.y)));
+  return mix(1.0, s / 9.0, edge);
+}
 float slotW(float s) { int i = int(s + 0.5); return i < 4 ? vW0[i] : vW1[i - 4]; }
 void main() {
   vec3 n = normalize(vN);
@@ -99,8 +111,9 @@ void main() {
   float aoStrength = 0.65 * mix(0.35, 1.0, smoothstep(0.0, 0.2588, sunH));
   float aoT = mix(1.0, aoB, aoStrength);
   vec3 amb = mix(uAmbGround, uAmbSky, nn.y * 0.5 + 0.5) * aoT;
-  vec3 lit = uSunColor * max(dot(nn, uSunDir), 0.0) * smoothstep(-0.05, 0.12, uSunDir.y + 0.04);
+  vec3 lit = uSunColor * max(dot(nn, uSunDir), 0.0) * smoothstep(-0.05, 0.12, uSunDir.y + 0.04) * shadowAt(vWorld, n);
   for (int m = 0; m < 3; m++) lit += uMoonColor[m] * max(dot(nn, uMoonDir[m]), 0.0);
+  for (int i = 0; i < 16; i++) { if (uDynRad[i] <= 0.0) continue; vec3 d = uDynW[i] - vWorld; float dd = length(d); float att = clamp(1.0 - dd / uDynRad[i], 0.0, 1.0); lit += uDynCol[i] * att * att * (max(dot(nn, d / dd), 0.0) * 0.8 + 0.2); }
   col *= (lit + amb) * 1.6;
   col = dfFog(col, vView, uFade);
   gl_FragColor = vec4(col, 1.0);
@@ -144,7 +157,7 @@ export function buildTerrain(data, tex, env, fade) {
     geo.setIndex(new THREE.BufferAttribute(grp.index, 1));
     geo.boundingBox = box; geo.boundingSphere = sphere;
     const m = new THREE.Mesh(geo, makeTerrainMaterial(grp, tex, env, fade));
-    m.matrixAutoUpdate = false; m.frustumCulled = true;
+    m.matrixAutoUpdate = false; m.frustumCulled = true; m.castShadow = true;
     g.add(m); geos.push(geo);
   }
   g.position.set(...data.translation); g.updateMatrixWorld(true);

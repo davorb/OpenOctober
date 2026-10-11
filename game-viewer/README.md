@@ -6,8 +6,9 @@ objects, water, day/night sky from the game's environment keyframes, and the mus
 ```
 node serve.js 8080        # http://localhost:8080/   (Chrome/Chromium; needs S3TC textures + Ogg)
 ```
+Two modes, toggled with **G** (or the on-screen mode button): **Fly** (free camera) and **Walk** (gravity 9.81 m/s², collision with terrain, buildings, rocks and tree trunks, steps up ledges, swims; **Space** jumps; speeds from the game's `r_Player Races` entry (walk 2.5 / run 3.7 / sprint 5.5 m/s) × `PLAYER_SCALE` 1.5, because the architecture is ~1.5–2× human scale; W runs, **Shift** sprints, **Ctrl** walks. Change `PLAYER_SCALE` in `js/collision.js` to resize the player).
 Controls: **WASD** fly, **Shift** ×5, **Ctrl** ×0.2, **Space/E** up, **C/Q** down, **wheel** base speed, **T** pause time, **[ ]** ±30 min,
-**V** atmosphere preset, **M** music, **N** noclip, **O** performance panel (presets + view/object distance + render scale), **H** help.
+**V** atmosphere preset, **M** music, **N** noclip, **O** performance panel (presets + view/object distance + render scale + shadows + dynamic lights; default Medium), **H** help.
 URL params: `?x=&z=&y=` (game coords), `?yaw=&pitch=`, `?t=` (minutes of day), `?view=`, `?obj=`, `?env=cc_ork`.
 
 ## Where the data comes from
@@ -28,3 +29,7 @@ self-training) and `tools/decrypt_all.js` writes the plain files to `data/`. ~0.
 
 Not done: the deep parts (>~40 KB) of the longest shader files decode poorly, so cascaded shadows, parallax and dynamic lights aren't ported;
 grass/vegetation placement (`export/veg`) and the Java/native `classes` aren't decoded; music day-part boundaries follow the clear-sky keyframes.
+
+## Shadows and lights
+* One sun shadow map follows the camera (Low 1024 px / 120 m, Medium 2048 / 200 m, High 4096 / 300 m); terrain, objects and water-side props all cast and receive it. Off at night / low sun.
+* Dynamic lights: the nearest N (4/8/16) of ~11k torches, braziers, fireplaces, lamp poles and lanterns (found by name in the level placements, `tools/build_props.js` -> `data/props.json`) light terrain and objects, flicker, and are strongest at night. The game's own `dynamic_objects_lights.bin` only covers instanced dungeons.

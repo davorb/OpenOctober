@@ -8,11 +8,12 @@ import { buildTerrain } from './terrain.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { kindOf } from './water.js';
 import { fogUniforms, fogFn } from './chunks.js';
+import { newColl, addCollision, finishColl } from './collision.js';
 
 const OBJ_DIR = '/converted/maps/';
 
 export class World {
-  constructor({ scene, env, tex, water, tiles, names, opts = {} }) {
+  constructor({ scene, env, tex, water, tiles, names, props = {}, opts = {} }) {
     this.scene = scene; this.env = env; this.tex = tex; this.water = water;
     this.opts = { terrainRadius: 3600, objectRadius: 1500, workers: 3, ...opts };
     this.tiles = new Map();
@@ -20,7 +21,8 @@ export class World {
       // game (x, z) -> three (x, -z)
       this.tiles.set(name, { name, info: t, display: names[name] || name,
         rect: { x0: t.x0, x1: t.x1, z0: -t.z1, z1: -t.z0 }, hasTerrain: t.empty > 0, hasObjects: t.base > 330000,
-        hasWater: !!t.liquids, tState: 0, oState: 0, terrain: null, objects: null, fade: { value: 0 }, fadeO: { value: 0 }, heights: null, dist: 1e9 });
+        hasWater: !!t.liquids, tState: 0, oState: 0, terrain: null, objects: null, fade: { value: 0 }, fadeO: { value: 0 }, heights: null, dist: 1e9,
+        lights: props[name]?.l?.length ? new Float32Array(props[name].l) : null, trees: props[name]?.t?.length ? new Float32Array(props[name].t) : null, coll: null });
     }
     this.byXZ = new Map(); for (const t of this.tiles.values()) this.byXZ.set(Math.round(t.rect.x0 / 1024) + ',' + Math.round(t.rect.z0 / 1024), t);
     this.workers = Array.from({ length: this.opts.workers }, () => ({ w: new Worker('/js/terrain-worker.js'), busy: null }));
@@ -36,7 +38,7 @@ export class World {
   tileAt(x, z) { return this.byXZ.get(Math.floor(x / 1024) + ',' + Math.floor(z / 1024)); }
   groundHeight(x, z) {
     const t = this.tileAt(x, z); if (!t || !t.heights) return null;
-    const G = 128, c = 1024 / G, fx = (x - (t.rect.x0 + 512)) / c + G / 2, fz = (z - (t.rect.z0 + 512)) / c + G / 2;
+    const G = 256, c = 1024 / G, fx = (x - (t.rect.x0 + 512)) / c + G / 2, fz = (z - (t.rect.z0 + 512)) / c + G / 2;
     const x0 = Math.max(0, Math.min(G - 1, Math.floor(fx))), z0 = Math.max(0, Math.min(G - 1, Math.floor(fz))), tx = fx - x0, tz = fz - z0, h = t.heights, W = G + 1;
     const a = h[z0 * W + x0], b = h[z0 * W + x0 + 1], d = h[(z0 + 1) * W + x0], e = h[(z0 + 1) * W + x0 + 1];
     return (a * (1 - tx) + b * tx) * (1 - tz) + (d * (1 - tx) + e * tx) * tz;
@@ -127,10 +129,14 @@ export class World {
     m.name = src.name;
     m.customProgramCacheKey = () => 'dfobj';
     m.onBeforeCompile = sh => {
-      Object.assign(sh.uniforms, { uFogColor: this.env.u.uFogColor, uFogRange: this.env.u.uFogRange, uFogDensity: this.env.u.uFogDensity, uSunDirView: this.env.u.uSunDirView, uSunColor: this.env.u.uSunColor, uFade: fade });
-      sh.fragmentShader = 'uniform float uFade;\n' + fogUniforms + fogFn + sh.fragmentShader
+      Object.assign(sh.uniforms, { uDynV: this.env.u.uDynV, uDynCol: this.env.u.uDynCol, uDynRad: this.env.u.uDynRad, uFogColor: this.env.u.uFogColor, uFogRange: this.env.u.uFogRange, uFogDensity: this.env.u.uFogDensity, uSunDirView: this.env.u.uSunDirView, uSunColor: this.env.u.uSunColor, uFade: fade });
+      sh.fragmentShader = 'uniform float uFade; uniform vec3 uDynV[16]; uniform vec3 uDynCol[16]; uniform float uDynRad[16];\n' + fogUniforms + fogFn + sh.fragmentShader
         .replace('#include <tonemapping_fragment>', 'gl_FragColor.rgb = dfFog(gl_FragColor.rgb, -vViewPosition, uFade);\n#include <tonemapping_fragment>')
-        .replace('#include <fog_fragment>', '');
+        .replace('#include <fog_fragment>', '')
+        .replace('#include <opaque_fragment>', `{ vec3 dyn = vec3(0.0); vec3 vp = -vViewPosition;
+          for (int i = 0; i < 16; i++) { if (uDynRad[i] <= 0.0) continue; vec3 d = uDynV[i] - vp; float dd = length(d); float att = clamp(1.0 - dd / uDynRad[i], 0.0, 1.0); dyn += uDynCol[i] * att * att * (max(dot(normal, d / dd), 0.0) * 0.8 + 0.2); }
+          outgoingLight += diffuseColor.rgb * dyn * 1.6; }
+        #include <opaque_fragment>`);
     };
     return m;
   }
@@ -165,14 +171,14 @@ export class World {
         o.material = Array.isArray(o.material) ? out : out[0];
       });
       root.updateMatrixWorld(true);
-      this._mergeStatic(root);
+      this._mergeStatic(root, t);
       t.objects = root; this.sceneObjects.add(root); t.oState = 2;
     } catch (e) { console.warn('objects', t.name, e); t.oState = 0; }
     this.objBusy = false;
   }
   // One draw call per material per tile instead of one per placed object
-  _mergeStatic(root) {
-    const buckets = new Map(), keep = [];
+  _mergeStatic(root, tile) {
+    const coll = newColl(tile), buckets = new Map(), keep = [];
     root.traverse(o => {
       if (!o.isMesh) return;
       if (o.material.userData?.water || Array.isArray(o.material) || o.material.vertexColors || !o.geometry.attributes.position) { keep.push(o); return; }
@@ -193,9 +199,11 @@ export class World {
       const list = idx && idx !== geos.length ? geos.map(g => g.index ? g.toNonIndexed() : g) : geos;
       const merged = mergeGeometries(list, false); if (!merged) continue;
       merged.computeBoundingSphere();
-      const m = new THREE.Mesh(merged, mat); m.matrixAutoUpdate = false; root.add(m);
+      const m = new THREE.Mesh(merged, mat); m.matrixAutoUpdate = false; m.castShadow = true; m.receiveShadow = true; root.add(m);
+      if (!mat.alphaTest && !mat.transparent) addCollision(coll, merged);
       for (const g of geos) g.dispose();
     }
+    finishColl(coll); tile.coll = coll;
     for (const { o, m } of kept) { root.add(o); o.matrix.copy(m); o.matrixAutoUpdate = false; o.matrixWorld.copy(m); }
   }
   _sharedTexture(tex, assoc, json, t) {
@@ -214,6 +222,6 @@ export class World {
   _dropObjects(t) {
     if (t.objects) { this.sceneObjects.remove(t.objects); this._disposeScene(t.objects); t.objects = null; }
     for (const u of t.uris || []) { const e = this.texCache.get(u); if (e && --e.refs <= 0) { e.tex.dispose(); this.texCache.delete(u); } }
-    t.uris = []; t.oState = 0; t.fadeO.value = 0;
+    t.uris = []; t.oState = 0; t.fadeO.value = 0; t.coll = null;
   }
 }
