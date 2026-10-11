@@ -41,11 +41,13 @@ const haveAudio = new Set(fs.readdirSync(AUDIO));
     const e = [...x.matchAll(/<EnvironmentOS File="([^"]+)" StartTime="(\d+)" InterpolationTime="(\d+)"/g)].map(m => ({ file: m[1], start: +m[2], interp: +m[3] }));
     if (e.length) cfgs[f] = e;
   }
+  // regional full-day cycle: the volcano set mirrors the clear-sky letters/times
+  cfgs.volcano_clear = cfgs.human_clearsky.map(e => ({ ...e, file: e.file.replace('env_human_clear01_', 'env_volcano_clear01_') }));
   const num = (s, tag) => { const m = s.match(new RegExp('<' + tag + '>\\s*<SFFloat Value="([-\\d.e]+)"')); return m ? +m[1] : null; };
   const vec = (s, tag) => { const m = s.match(new RegExp('<' + tag + '>\\s*<SFVector3 X="([-\\d.e]+)" Y="([-\\d.e]+)" Z="([-\\d.e]+)"')); return m ? [+m[1], +m[2], +m[3]] : null; };
   const col = (s, tag) => { const m = s.match(new RegExp('<' + tag + '>\\s*<SFColor A="([-\\d.e]+)" B="([-\\d.e]+)" G="([-\\d.e]+)" R="([-\\d.e]+)"')); return m ? [+m[4], +m[3], +m[2]] : null; };
   const frames = {};
-  for (const f of new Set(Object.values(cfgs).flat().map(e => e.file))) {
+  for (const f of new Set([...Object.values(cfgs).flat().map(e => e.file), ...fs.readdirSync(path.join(D, base)).filter(f => /\.xml$/.test(f))])) {
     let s; try { s = rd(base + f); } catch { continue; }
     const planets = [...s.matchAll(/<SFPlanet>([\s\S]*?)<\/SFPlanet>/g)].map(m => m[1]).map(p => ({
       xml: ((p.match(/<XMLFilename>\s*<SFString Value="([^"]*)"/) || [])[1] || '').replace(/\\/g, '/'),

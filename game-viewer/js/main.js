@@ -45,7 +45,7 @@ scene.add(sunL, moonL, hemi);
 const loader = new THREE.TextureLoader();
 const sky = new Sky(env, loader); scene.add(sky.group);
 const tex = new TerrainTextures(renderer, terrainManifest);
-const water = new WaterFactory(env, sky.uniforms.uZenith);
+const water = new WaterFactory(env, sky.uniforms.uZenith); water.linearFloat = renderer.extensions.has('OES_texture_float_linear');
 const world = new World({ scene, env, tex, water, tiles: worldData, names: tileNames, props, opts: { terrainRadius: VIEW * 0.9, objectRadius: S.obj } });
 
 // open ocean everywhere (terrain-only far tiles carry no water plane of their own)
@@ -54,6 +54,20 @@ ocean.frustumCulled = false; ocean.renderOrder = 1; ocean.scale.setScalar(VIEW *
 
 const music = new Music(musicAreas, env, (title, area) => { const t = $('track'); t.textContent = `♪ ${title}`; t.classList.add('on'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('on'), 9000); });
 const ambience = new Ambience(env);
+// region mix around the camera (3x3 probes, 512 m apart) -> smooth sky/fog transitions across region borders
+const areaOfTile = new Map(); for (const a of Object.values(musicAreas)) for (const n of a.tiles) if (!areaOfTile.has(n)) areaOfTile.set(n, a.name);
+let regionClock = 0;
+function probeRegion(dt) {
+  regionClock -= dt; if (regionClock > 0) return; regionClock = 0.3;
+  const m = new Map(); let n = 0;
+  for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) {
+    const tt = world.tileAt(camera.position.x + i * 512, camera.position.z + j * 512), a = (tt && areaOfTile.get(tt.name)) || 'Sea Area', w = (i || j ? 1 : 2);
+    m.set(a, (m.get(a) || 0) + w); n += w;
+  }
+  for (const [k, v] of m) m.set(k, v / n);
+  const moved = Math.hypot(camera.position.x - (probeRegion.px ?? 1e9), camera.position.z - (probeRegion.pz ?? 1e9)); probeRegion.px = camera.position.x; probeRegion.pz = camera.position.z;
+  env.setRegionTarget(m); if (moved > 1500) env.regionW = new Map(m);   // teleport: no fade
+}
 const dyn = new DynLights(env, world);
 const player = new Player(world);
 env.u.uShadowMat.value = sunL.shadow.matrix;
@@ -145,7 +159,7 @@ function frameInner() {
   updateShadow();
   dyn.count = S.lights; dyn.update(dt, camera);
   sky.update(camera);
-  ocean.position.set(Math.round(camera.position.x / 64) * 64, SEA_LEVEL - 3.0, Math.round(camera.position.z / 64) * 64);
+  ocean.position.set(Math.round(camera.position.x / 64) * 64, SEA_LEVEL - 5.0, Math.round(camera.position.z / 64) * 64);
 
   world.update(Math.min(raw, 0.5), camera);
 
@@ -156,7 +170,7 @@ function frameInner() {
     if (t && t.display !== lastRegion) { if (lastRegion !== null) banner(t.display); lastRegion = t.display; }
   }
   const tileName = t?.name;
-  music.setTile(tileName, dt); music.update(dt);
+  music.setTile(tileName, dt); music.update(dt); probeRegion(dt);
   const agl = gh != null ? camera.position.y - gh : 50;
   ambience.update(dt, { y: camera.position.y, agl: Math.max(0, agl), treeDensity: t ? Math.min(1, (t.info.trees || 0) / 450) : 0, riverDist: 1e9, muted: music.muted });
 

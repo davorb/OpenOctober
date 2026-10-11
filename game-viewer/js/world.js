@@ -99,6 +99,7 @@ export class World {
     if (!t || data.error) { if (t) t.tState = 4; if (data.error) console.warn('terrain', data.id, data.error); this._pump(); return; }
     if (t.tState !== 1) { this._pump(); return; }       // cancelled while loading
     t.heights = data.heights;
+    if (t.waterMats) { for (const m of t.waterMats) this.water.bind(m, t); t.waterMats = null; }
     t.terrain = buildTerrain(data, this.tex, this.env, t.fade);
     this.group.add(t.terrain); t.tState = 2;
     this._pump();
@@ -120,7 +121,7 @@ export class World {
     } catch (e) { console.warn('mesh terrain', t.name, e); t.tState = 4; }
     this.meshBusy = false;
   }
-  _dropTerrain(t) { if (t.terrain) { this.group.remove(t.terrain); t.terrain.userData.dispose(); t.terrain = null; } t.heights = null; t.tState = 0; t.fade.value = 0; for (const u of t.turis || []) { /* shared textures released with objects */ } }
+  _dropTerrain(t) { if (t.terrain) { this.group.remove(t.terrain); t.terrain.userData.dispose(); t.terrain = null; } t.heights = null; if (t.waterTex) { t.waterTex.dispose(); t.waterTex = null; } t.waterMats = null; t.tState = 0; t.fade.value = 0; for (const u of t.turis || []) { /* shared textures released with objects */ } }
 
   // ---- objects
   _objMaterial(src, fade) {
@@ -159,7 +160,7 @@ export class World {
         if (!o.isMesh) return;
         o.matrixAutoUpdate = false;
         let top = o; while (top.parent && top.parent !== root) top = top.parent;
-        if (top.userData.liquid) { o.material = this.water.material(kindOf(top.userData.liquid), t.fadeO); o.renderOrder = 2; return; }
+        if (top.userData.liquid) { o.material = this.water.material(kindOf(top.userData.liquid), t.fadeO); this.water.bind(o.material, t); o.renderOrder = 2; return; }
         const mats = Array.isArray(o.material) ? o.material : [o.material], out = [];
         for (const src of mats) {
           if (!seen.has(src)) {
