@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Darkfall — Game Viewer</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root { color-scheme: dark; --gold:#d9b86a; --ink:#e9e2d0; }
+  html,body { margin:0; height:100%; background:#05070a; overflow:hidden; font:13px/1.4 "Palatino Linotype",Palatino,Georgia,serif; color:var(--ink); }
+  canvas#view { position:fixed; inset:0; width:100%; height:100%; display:block; }
+  #hud { position:fixed; left:16px; bottom:14px; text-shadow:0 1px 3px #000, 0 0 8px #000; pointer-events:none; opacity:.0; transition:opacity .6s; }
+  body.playing #hud { opacity:1; }
+  #place { font-size:26px; letter-spacing:.06em; color:var(--gold); }
+  #sub { opacity:.85; font-size:13px; letter-spacing:.04em; }
+  #stats { position:fixed; right:14px; top:10px; text-align:right; font:11px/1.5 ui-monospace,Menlo,monospace; opacity:.7; text-shadow:0 1px 2px #000; pointer-events:none; white-space:pre; }
+  #track { position:fixed; right:16px; bottom:14px; text-align:right; font-style:italic; opacity:0; transition:opacity 1.2s; text-shadow:0 1px 3px #000; pointer-events:none; }
+  #track.on { opacity:.9; }
+  #banner { position:fixed; top:16%; left:0; right:0; text-align:center; font-size:40px; letter-spacing:.14em; color:var(--gold); text-shadow:0 2px 12px #000; opacity:0; transition:opacity 1.4s; pointer-events:none; }
+  #banner.on { opacity:1; }
+  #cross { position:fixed; left:50%; top:50%; width:4px; height:4px; margin:-2px; border-radius:50%; background:#fff6; pointer-events:none; opacity:0; }
+  body.playing #cross { opacity:1; }
+  #intro { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:18px; background:radial-gradient(ellipse at center,#14100aee,#030304f4); cursor:pointer; transition:opacity .7s; text-align:center; }
+  #intro.hide { opacity:0; pointer-events:none; }
+  #intro h1 { margin:0; font-weight:400; font-size:54px; letter-spacing:.3em; color:var(--gold); text-indent:.3em; }
+  #intro .btn { border:1px solid var(--gold); padding:10px 34px; letter-spacing:.2em; color:var(--gold); }
+  #intro .keys { opacity:.7; max-width:560px; line-height:1.8; }
+  #intro .keys b { color:var(--gold); font-weight:400; border:1px solid #d9b86a55; border-radius:3px; padding:0 6px; margin:0 2px; }
+  #load { opacity:.7; letter-spacing:.1em; }
+  #cfg { position:fixed; right:14px; top:64px; width:250px; padding:12px 14px; background:#0b0d10d8; border:1px solid #d9b86a55; display:none; font:12px/1.5 ui-monospace,Menlo,monospace; }
+  #cfg.on { display:block; }
+  #cfg label { display:flex; justify-content:space-between; margin-top:8px; } #cfg input[type=range] { width:100%; accent-color:#d9b86a; } #cfg select { background:#14181d; color:inherit; border:1px solid #d9b86a55; }
+  #cfgbtn { position:fixed; right:14px; bottom:48px; padding:3px 10px; border:1px solid #d9b86a77; color:var(--gold); cursor:pointer; opacity:0; background:#0008; }
+  body.playing #cfgbtn { opacity:.8; }
+  #help { position:fixed; left:16px; top:12px; opacity:.0; transition:opacity .4s; text-shadow:0 1px 3px #000; pointer-events:none; line-height:1.7; }
+  #help.on { opacity:.85; }
+  #help b { color:var(--gold); font-weight:400; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="cross"></div>
+<div id="banner"></div>
+<div id="hud"><div id="place"></div><div id="sub"></div></div>
+<div id="stats"></div>
+<div id="track"></div>
+<div id="help"></div>
+<div id="cfgbtn">Performance (O)</div>
+<div id="cfg"></div>
+<div id="intro">
+  <h1>DARKFALL</h1>
+  <div id="load">Reading the world…</div>
+  <div class="btn" id="enter" style="display:none">ENTER THE WORLD</div>
+  <div class="keys"><b>W</b><b>A</b><b>S</b><b>D</b> fly &nbsp; <b>Shift</b> faster &nbsp; <b>Space</b>/<b>E</b> up &nbsp; <b>C</b>/<b>Q</b> down &nbsp; mouse to look<br>
+  <b>Wheel</b> speed &nbsp; <b>T</b> time of day &nbsp; <b>[</b> <b>]</b> scrub time &nbsp; <b>M</b> music &nbsp; <b>H</b> help &nbsp; <b>Esc</b> release mouse</div>
+</div>
+<script type="importmap">{"imports":{"three":"/vendor/three/build/three.module.js","three/addons/":"/vendor/three/examples/jsm/"}}</script>
+<script type="module" src="/js/main.js"></script>
+</body>
+</html>
