@@ -137,6 +137,7 @@ export class AvatarFactory {
 
 // ---- procedural pose. Every delta is a rotation about a fixed avatar-space axis (model faces -Z, X = sideways, Y = up),
 // converted into each bone's local frame through its parent's rest rotation, so the T-pose bone axes don't matter.
+// NB the body meshes face +Z (chest/nose extend towards +Z), so "forward" below is +Z; multiplayer.js turns avatars by PI to match the camera's -Z convention.
 function put(b, rig, R) { b.quaternion.copy(rig.pqInv).multiply(R).multiply(rig.pq).multiply(rig.q0); }
 
 /** swing: -1..1 stride phase output (sin), amp: 0 idle .. 1 full run, air: arms/legs out */
@@ -148,15 +149,15 @@ export function pose(av, swing, amp, air) {
   for (const o of av.rigs) {
     const B = o.userData.bones, R = o.userData.rig;
     if (!B.LLeg1) continue;
-    put(B.LLeg1, R.LLeg1, qa.setFromAxisAngle(AX_X, air ? 0.25 : legF));
-    put(B.RLeg1, R.RLeg1, qa.setFromAxisAngle(AX_X, air ? -0.25 : -legF));
-    put(B.LLeg2, R.LLeg2, qa.setFromAxisAngle(AX_X, -kneeL * (air ? 0.4 : 1)));
-    put(B.RLeg2, R.RLeg2, qa.setFromAxisAngle(AX_X, -kneeR * (air ? 0.4 : 1)));
+    put(B.LLeg1, R.LLeg1, qa.setFromAxisAngle(AX_X, air ? -0.25 : -legF));
+    put(B.RLeg1, R.RLeg1, qa.setFromAxisAngle(AX_X, air ? 0.25 : legF));
+    put(B.LLeg2, R.LLeg2, qa.setFromAxisAngle(AX_X, kneeL * (air ? 0.4 : 1)));
+    put(B.RLeg2, R.RLeg2, qa.setFromAxisAngle(AX_X, kneeR * (air ? 0.4 : 1)));
     // arms: drop out of the T-pose about Z, then swing about X (applied outermost)
-    put(B.LArm1, R.LArm1, qa.setFromAxisAngle(AX_X, -armF).multiply(qb.setFromAxisAngle(AX_Z, -drop)));
-    put(B.RArm1, R.RArm1, qa.setFromAxisAngle(AX_X, armF).multiply(qb.setFromAxisAngle(AX_Z, drop)));
+    put(B.LArm1, R.LArm1, qa.setFromAxisAngle(AX_X, armF).multiply(qb.setFromAxisAngle(AX_Z, -drop)));
+    put(B.RArm1, R.RArm1, qa.setFromAxisAngle(AX_X, -armF).multiply(qb.setFromAxisAngle(AX_Z, drop)));
     // elbows bend forward: in the T-pose frame that is a turn about Y (opposite sign per side)
-    put(B.LArm20, R.LArm20, qa.setFromAxisAngle(AX_Y, -bend));
-    put(B.RArm20, R.RArm20, qa.setFromAxisAngle(AX_Y, bend));
+    put(B.LArm20, R.LArm20, qa.setFromAxisAngle(AX_Y, bend));
+    put(B.RArm20, R.RArm20, qa.setFromAxisAngle(AX_Y, -bend));
   }
 }

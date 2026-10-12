@@ -214,7 +214,7 @@ export class Multiplayer {
       if (a.dot.visible) { if (!a.dot.parent) this.scene.add(a.dot); a.dot.position.set(st.x, st.y + AVATAR_HEIGHT * 0.5, st.z); const h = 11 * fovK * dist; a.dot.scale.set(h, h, 1); }
       else if (a.dot.parent) this.scene.remove(a.dot);
       if (!full) { if (a.bubble) a.bubble.visible = false; continue; }
-      a.root.position.set(st.x, st.y, st.z); a.root.rotation.y = st.yaw;
+      a.root.position.set(st.x, st.y, st.z); a.root.rotation.y = st.yaw + Math.PI;   // meshes face +Z, the camera's forward is -Z
       // animation: stride phase advances with distance travelled
       const amp = Math.min(1, st.speed / RUN), air = !!(st.flags & FLAG_AIR) && !(st.flags & FLAG_SWIM);
       if (st.speed > 0.15 && !air) a.phase += dt * (3 + st.speed * 1.9);

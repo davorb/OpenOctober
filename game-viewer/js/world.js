@@ -149,14 +149,15 @@ export class World {
     let v = this.alphaCov.get(img);
     if (v === undefined) {
       try {
-        const c = document.createElement('canvas'); c.width = c.height = 32;
-        const x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(img, 0, 0, 32, 32);
-        const d = x.getImageData(0, 0, 32, 32).data; let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] >= 128) n++;
-        v = n / 1024;
-      } catch { v = 1; }
+        const c = document.createElement('canvas'); c.width = c.height = 64;
+        const x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(img, 0, 0, 64, 64);
+        const d = x.getImageData(0, 0, 64, 64).data; let n = 0, z = 0; for (let i = 3; i < d.length; i += 4) { if (d[i] >= 128) n++; if (d[i] < 8) z++; }
+        // sparse cutouts (thin snowy branches: ~2% covered, ~60% fully clear) are real; bogus alpha is low everywhere without being empty
+        v = n / 4096 < 0.15 && z / 4096 < 0.3;
+      } catch { v = false; }
       this.alphaCov.set(img, v);
     }
-    return v < 0.15;
+    return v;
   }
   _objMaterial(src, fade) {
     // MeshStandardMaterial from glTF -> cheaper Lambert with the game's fog
