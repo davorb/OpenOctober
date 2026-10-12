@@ -7,9 +7,11 @@ import { World } from './world.js';
 import { Music, Ambience } from './music.js';
 import { Player, SPEEDS } from './collision.js';
 import { DynLights } from './lights.js';
+import { Post } from './post.js';
 
 const $ = id => document.getElementById(id);
 const q = new URLSearchParams(location.search);
+if (q.get('timer')) window.requestAnimationFrame = cb => setTimeout(() => cb(performance.now()), 33);   // debug: keep rendering while the tab is hidden
 // ---- performance settings (persisted). View distance: fog is relative to it, like the game's FogStart/FogEnd fractions.
 const SHADOWS = { Off: [0, 0], Low: [1024, 120], Medium: [2048, 200], High: [4096, 300] };   // [map size, covered radius m]
 const PRESETS = { Low: { view: 2200, obj: 700, scale: 0.75, shadow: 'Off', lights: 4 }, Medium: { view: 3200, obj: 1100, scale: 1, shadow: 'Low', lights: 8 }, High: { view: 4500, obj: 1500, scale: 1.25, shadow: 'Medium', lights: 16 }, Ultra: { view: 7000, obj: 2200, scale: 1.5, shadow: 'High', lights: 16 } };
@@ -22,10 +24,12 @@ const J = u => fetch(u).then(r => r.json());
 const renderer = new THREE.WebGLRenderer({ canvas: $('view'), antialias: true, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(devicePixelRatio, S.scale));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.info.autoReset = false;   // post-processing renders several passes per frame; reset once per frame so the stats show the scene pass
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(70, 1, 1.5, VIEW * 1.05);
 camera.rotation.order = 'YXZ';
-function resize() { renderer.setSize(innerWidth, innerHeight, false); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); }
+const post = new Post(renderer); post.enabled = q.get('post') ? q.get('post') !== '0' : S.post !== false;
+function resize() { renderer.setSize(innerWidth, innerHeight, false); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); const d = renderer.getDrawingBufferSize(new THREE.Vector2()); post.resize(d.x, d.y); }
 addEventListener('resize', resize); resize();
 
 const [worldData, musicAreas, tileNames, envData, terrainManifest, props, spawns] = await Promise.all(
@@ -69,7 +73,7 @@ function probeRegion(dt) {
   const moved = Math.hypot(camera.position.x - (probeRegion.px ?? 1e9), camera.position.z - (probeRegion.pz ?? 1e9)); probeRegion.px = camera.position.x; probeRegion.pz = camera.position.z;
   env.setRegionTarget(m); if (moved > 1500) env.regionW = new Map(m);   // teleport: no fade
 }
-const dyn = new DynLights(env, world);
+const dyn = new DynLights(env, world, scene);
 const player = new Player(world);
 env.u.uShadowMat.value = sunL.shadow.matrix;
 let shadowSize = -1;
@@ -92,6 +96,7 @@ addEventListener('keydown', e => {
   if (hit('KeyV')) toast('Atmosphere: ' + env.cycleConfig());
   if (hit('KeyM')) toast(music.toggle() ? 'Music on' : 'Music muted');
   if (hit('KeyG')) toggleMode();
+  if (hit('KeyB')) { post.enabled = S.post = !post.enabled; try { localStorage.setItem('dfSettings2', JSON.stringify(S)); } catch {} toast(post.enabled ? 'Post-processing on (bloom, god rays, vignette)' : 'Post-processing off'); }
   if (hit('KeyN')) { noclip = !noclip; toast(noclip ? 'No clipping' : 'Ground clamp'); }
   if (hit('KeyO')) $('cfg').classList.toggle('on');
   if (hit('KeyH')) $('help').classList.toggle('on');
@@ -112,7 +117,7 @@ let lastRegion = null;
 function banner(text) { const b = $('banner'); b.textContent = text; b.style.fontSize = '40px'; b.style.top = '16%'; b.classList.add('on'); clearTimeout(b._h); b._h = setTimeout(() => b.classList.remove('on'), 4200); }
 
 // ---- loop
-const clock = new THREE.Clock(); let fpsAcc = 0, fpsN = 0, fps = 0, cur = null;
+const clock = new THREE.Clock(); let underAmt = 0, fpsAcc = 0, fpsN = 0, fps = 0, cur = null;
 const fwd = new THREE.Vector3(), right = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0), mv = new THREE.Vector3();
 function frame() {
   try { frameInner(); } catch (e) { console.error('frame', e.stack || e); }
@@ -182,7 +187,9 @@ function frameInner() {
   const agl = gh != null ? camera.position.y - gh : 50;
   ambience.update(dt, { y: camera.position.y, agl: Math.max(0, agl), treeDensity: t ? Math.min(1, (t.info.trees || 0) / 450) : 0, riverDist: 1e9, muted: music.muted });
 
-  renderer.render(scene, camera);
+  underAmt += ((ocean.visible && camera.position.y < SEA_LEVEL - 4 ? 1 : 0) - underAmt) * (1 - Math.exp(-dt * 8));
+  renderer.info.reset();
+  post.render(scene, camera, { sunDir: env.u.uSunDir.value, sunColor: env.u.uSunColor.value, daylight: env.state.daylight ?? 1, under: underAmt, time: env.u.uTime.value });
 
   fpsAcc += dt; fpsN++;
   if (fpsAcc > 0.5) { fps = Math.round(fpsN / fpsAcc); fpsAcc = 0; fpsN = 0; hud(t, gh); }
@@ -220,7 +227,7 @@ function hud(t, gh) {
   $('stats').textContent = `${fps} fps   ${world.stats.terrain} terrain · ${world.stats.objects} object tiles${world.stats.loading ? '   loading ' + world.stats.loading : ''}\n` +
     `x ${p.x.toFixed(0)}  y ${p.y.toFixed(0)}  z ${(-p.z).toFixed(0)}   ${Math.round(baseSpeed)} m/s\n${renderer.info.render.calls} calls · ${(renderer.info.render.triangles / 1e6).toFixed(2)}M tris`;
 }
-$('help').innerHTML = `<b>WASD</b> fly · <b>Shift</b> fast · <b>Ctrl</b> slow · <b>Space/E</b> up · <b>C/Q</b> down · <b>Wheel</b> base speed · <b>G</b> walk with collision (Space jumps, Shift sprints, Ctrl slow walk)<br><b>T</b> pause/resume time · <b>[ ]</b> ±30 min (Shift ±2 h) · <b>V</b> atmosphere · <b>M</b> music · <b>N</b> noclip · <b>H</b> hide this`;
+$('help').innerHTML = `<b>WASD</b> fly · <b>Shift</b> fast · <b>Ctrl</b> slow · <b>Space/E</b> up · <b>C/Q</b> down · <b>Wheel</b> base speed · <b>G</b> walk with collision (Space jumps, Shift sprints, Ctrl slow walk)<br><b>T</b> pause/resume time · <b>[ ]</b> ±30 min (Shift ±2 h) · <b>V</b> atmosphere · <b>M</b> music · <b>B</b> post-processing · <b>N</b> noclip · <b>H</b> hide this`;
 setTimeout(setModeLabel, 0);
 
 // ---- boot: preload around the start, then wait for the click (also unlocks audio)
