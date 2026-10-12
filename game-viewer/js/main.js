@@ -9,6 +9,7 @@ import { Player, SPEEDS } from './collision.js';
 import { DynLights } from './lights.js';
 import { Post } from './post.js';
 import { Vegetation } from './vegetation.js';
+import { Multiplayer } from './multiplayer.js';
 
 const $ = id => document.getElementById(id);
 const q = new URLSearchParams(location.search);
@@ -89,7 +90,7 @@ const keys = new Set(); let baseSpeed = 70, vel = new THREE.Vector3(), locked = 
 
 // ---- input
 addEventListener('keydown', e => {
-  if (e.repeat) return;
+  if (e.repeat || e.target.tagName === 'INPUT') return;   // typing in the name / chat box
   keys.add(e.code);
   const hit = c => e.code === c;
   if (hit('KeyP')) { env.u.uParallax.value = env.u.uParallax.value ? 0 : parallaxOn; toast(env.u.uParallax.value ? 'Parallax on' : 'Parallax off'); }
@@ -165,6 +166,7 @@ function frameInner() {
     }
   }
   camera.updateMatrixWorld(true);
+  mp.update(dt, performance.now() / 1000);
 
   env.update(dt, VIEW);
   env.u.uSunDirView.value.copy(env.u.uSunDir.value).transformDirection(camera.matrixWorldInverse);
@@ -239,6 +241,9 @@ setTimeout(setModeLabel, 0);
 // ---- boot: preload around the start, then wait for the click (also unlocks audio)
 window.dbg = { post, player, tp: (x, y, z) => { camera.position.set(x, y, -z); player.pos.set(x, y - player.eye, -z); player.vy = 0; }, camera, world, env, music, scene, renderer, ambience, set: (x, y, z) => camera.position.set(x, y, -z), look: (yw, pt) => { yaw = yw; pitch = pt; } };
 const intro = $('intro');
+const mp = new Multiplayer({ scene, camera, world, $, toast,
+  getSelf: () => ({ x: camera.position.x, y: camera.position.y - player.eye, z: camera.position.z, yaw: camera.rotation.y, swim: mode === 'walk' && player.swim, air: mode === 'fly' || !player.onGround }) });
+window.dbg.mp = mp;
 let ready = false, started = false;
 let bootTimer = 0;
 function bootProgress() {
@@ -275,7 +280,7 @@ if (pre > 0) pickSpawn(pre); else if (!q.get('x')) spawnBox.children[0].classLis
 function begin() {
   if (started || !ready) return; started = true;
   document.body.classList.add('playing'); intro.classList.add('hide');
-  music.enable(); ambience.enable();
+  music.enable(); ambience.enable(); mp.connect();
   $('view').requestPointerLock?.()?.catch?.(() => {});
   clock.getDelta(); frame();
 }

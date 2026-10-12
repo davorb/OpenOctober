@@ -11,6 +11,11 @@ Controls: **WASD** fly, **Shift** ×5, **Ctrl** ×0.2, **Space/E** up, **C/Q** d
 **V** atmosphere preset, **M** music, **B** post-processing, **K** SSAO, **J** vegetation, **N** noclip, **O** performance panel (presets + view/object distance + render scale + shadows + dynamic lights; default Medium), **H** help, **P** parallax on/off.
 URL params: `?x=&z=&y=` (game coords), `?yaw=&pitch=`, `?t=` (minutes of day), `?view=`, `?obj=`, `?env=cc_ork`.
 
+## Multiplayer
+Optional: with [`../game-server`](../game-server) running (`cargo run --release`, port 9000) the intro screen has a **character picker** (6 races x 2 bodies, live preview) and a name field; on entering, other players appear as avatars you can see walk around, with **name tags**, **chat bubbles**, a **radar** (top left) and an **online list** (**Tab**). **Enter** opens chat (Enter sends, Esc cancels). `?server=ws://host:9000` overrides the server, `?name=&race=hum|alf|dwf|ork|mir|mhm&gender=m|f` preselect the character. Handled by `js/multiplayer.js` (network, UI, interpolation) and `js/avatars.js`.
+* Avatars are the game's racial body-part meshes (`converted/animated/<race>_<m|f>_<legs|torso|arms|head>.glb`, one shared skeleton) with a procedural walk cycle driven by the other player's speed. The body-part textures in the data are armour atlases / unusable, so only the face uses a real texture; skin colour is the face's average colour tinted per race, and clothes are a per-player colour. Hair, armour and hands are not shown.
+* Players further than the server's interest radius (900 m) aren't streamed; they stay in the online list as "out of range".
+
 ## Where the data comes from
 Everything under `export/xml-files` (type 3 in the archive) and the shader sources are **encrypted with a per-class XOR keystream that
 depends only on byte position**. `tools/solve_keystream.js` recovers it statistically (many-time-pad over ~2,900 files, byte-trigram model,
