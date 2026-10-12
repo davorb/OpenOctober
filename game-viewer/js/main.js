@@ -11,6 +11,7 @@ import { Post } from './post.js';
 import { Vegetation } from './vegetation.js';
 import { Multiplayer } from './multiplayer.js';
 import { Pois } from './pois.js';
+import { TouchControls, touchWanted } from './touch.js';
 
 const $ = id => document.getElementById(id);
 const q = new URLSearchParams(location.search);
@@ -113,6 +114,7 @@ addEventListener('keydown', e => {
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
 });
 addEventListener('keyup', e => keys.delete(e.code));
+const touch = touchWanted() ? new TouchControls({ keys, look: (dx, dy) => { yaw -= dx; pitch = Math.max(-1.55, Math.min(1.55, pitch - dy)); } }) : { x: 0, y: 0, sprint: false, setMode() {} };
 addEventListener('blur', () => keys.clear());
 addEventListener('mousemove', e => { if (!locked && !dragging) return; yaw -= e.movementX * 0.0022; pitch = Math.max(-1.55, Math.min(1.55, pitch - e.movementY * 0.0022)); });
 let dragging = false;
@@ -136,13 +138,14 @@ function frameInner() {
   const raw = clock.getDelta(), dt = Math.min(raw, 0.1);
   // movement
   camera.rotation.set(pitch, yaw, 0);
-  const run = keys.has('ShiftLeft') || keys.has('ShiftRight');
+  const run = keys.has('ShiftLeft') || keys.has('ShiftRight') || touch.sprint;
   let gh = world.groundHeight(camera.position.x, camera.position.z);
   if (mode === 'walk') {
     // WASD relative to where you look, flattened onto the ground plane
     let fx = 0, fz = 0;
     if (keys.has('KeyW')) fz -= 1; if (keys.has('KeyS')) fz += 1; if (keys.has('KeyD')) fx += 1; if (keys.has('KeyA')) fx -= 1;
-    const l = Math.hypot(fx, fz) || 1, s = Math.sin(yaw), c = Math.cos(yaw);
+    fx += touch.x; fz += touch.y;
+    const l = Math.max(1, Math.hypot(fx, fz)), s = Math.sin(yaw), c = Math.cos(yaw);
     // game speeds: W = run, Ctrl = walk, Shift = sprint (see SPEEDS)
     const sp = player.swim ? (run ? SPEEDS.swim * 1.75 : SPEEDS.swim) : keys.has('ControlLeft') ? SPEEDS.walk : run ? SPEEDS.sprint : SPEEDS.run;
     const tx = (fx * c + fz * s) / l * sp, tz = (-fx * s + fz * c) / l * sp;
@@ -156,8 +159,9 @@ function frameInner() {
     mv.set(0, 0, 0);
     if (keys.has('KeyW')) mv.add(fwd); if (keys.has('KeyS')) mv.sub(fwd);
     if (keys.has('KeyD')) mv.add(right); if (keys.has('KeyA')) mv.sub(right);
+    mv.addScaledVector(fwd, -touch.y).addScaledVector(right, touch.x);
     if (keys.has('Space') || keys.has('KeyE')) mv.y += 1; if (keys.has('KeyC') || keys.has('KeyQ')) mv.y -= 1;
-    if (mv.lengthSq()) mv.normalize();
+    if (mv.lengthSq() > 1) mv.normalize();
     const sp = baseSpeed * (run ? 5 : 1) * (keys.has('ControlLeft') ? 0.2 : 1);
     vel.lerp(mv.multiplyScalar(sp), 1 - Math.exp(-dt * 6));
     camera.position.addScaledVector(vel, dt);
@@ -224,7 +228,7 @@ function updateShadow() {
 // ---- walk / fly
 let mode = 'fly';
 $('modebtn').addEventListener('click', () => { toggleMode(); $('view').requestPointerLock?.()?.catch?.(() => {}); });
-function setModeLabel() { $('modebtn').textContent = mode === 'walk' ? 'Mode: Walk (G) — click to fly' : 'Mode: Fly (G) — click to walk'; }
+function setModeLabel() { touch.setMode(mode); $('modebtn').textContent = mode === 'walk' ? 'Mode: Walk (G) — click to fly' : 'Mode: Fly (G) — click to walk'; }
 function toggleMode() {
   if (mode === 'fly') {
     mode = 'walk'; player.pos.set(camera.position.x, camera.position.y - player.eye, camera.position.z); player.vy = 0; vel.set(0, 0, 0);

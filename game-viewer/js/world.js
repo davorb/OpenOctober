@@ -51,12 +51,13 @@ export class World {
       return (a * (1 - tx) + b * tx) * (1 - tz) + (d * (1 - tx) + e * tx) * tz;
     }
     const L = t.layers, K = 6;
-    const at = k => { for (let i = K - 1; i >= 0; i--) { const v = L[k * K + i]; if (v > -1e8 && v <= maxY) return v; } return L[k * K] < -1e8 && h[k] <= maxY ? h[k] : -1e9; };
-    let sum = 0, wt = 0;
-    for (const [k, w] of [[z0 * W + x0, (1 - tx) * (1 - tz)], [z0 * W + x0 + 1, tx * (1 - tz)], [(z0 + 1) * W + x0, (1 - tx) * tz], [(z0 + 1) * W + x0 + 1, tx * tz]]) {
-      const v = at(k); if (v > -1e8) { sum += v * w; wt += w; }
-    }
-    return wt > 1e-6 ? sum / wt : -1e9;
+    // Every corner always contributes: the highest layer at or below maxY, else (all layers above it) the lowest one. Dropping corners that
+    // are above maxY biased the average low on slopes, which lowered the player and so maxY, which dropped more corners: the player sank
+    // through the hillside. Callers reject a result above maxY themselves (Player.floor).
+    const at = k => { let lo = -1e9; for (let i = K - 1; i >= 0; i--) { const v = L[k * K + i]; if (v > -1e8) { if (v <= maxY) return v; lo = v; } } return lo > -1e8 ? lo : h[k]; };
+    let sum = 0;
+    for (const [k, w] of [[z0 * W + x0, (1 - tx) * (1 - tz)], [z0 * W + x0 + 1, tx * (1 - tz)], [(z0 + 1) * W + x0, (1 - tx) * tz], [(z0 + 1) * W + x0 + 1, tx * tz]]) sum += at(k) * w;
+    return sum;
   }
   // true if there is terrain above (x, y, z): inside Shoal's cavern, under the dome
   covered(x, y, z) {
