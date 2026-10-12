@@ -38,7 +38,7 @@ const REGION_MOOD = {
   'Alfar Land': 'mood_alfar', 'Alfar Starting Area': 'mood_alfar', 'Dwarven Land': 'mood_dwarf', 'Dwarf Starting Area': 'mood_dwarf',
   'Ork Land': 'mood_ork', 'Ork Starting Area': 'mood_ork', 'Mirdain Land': 'mood_mirdain', 'Mirdain Starting Area': 'mood_mirdain',
   'Mahirim Land': 'mood_mahirim', 'Mahirim Starting Area': 'mood_mahirim', 'Dawnshore': 'mood_dawnshore', 'Desert Continent': 'mood_rubayiat',
-  'Ice continent': 'mood_niflheim', 'The Frostheld': 'mood_frostheld', 'Sea Area': 'mood_sea',
+  'Ice continent': 'mood_niflheim', 'The Frostheld': 'mood_frostheld', 'Sea Area': 'mood_sea', 'Jungle Continent': 'mood_yssam',
 };
 // time-of-day LUT keyframes (minutes of day); the game's phase boundaries are native too, these follow the clear-sky keyframes used for the music slots
 const TOD_LUT = [[270, 'tod_night'], [360, 'tod_dawn'], [540, 'tod_day'], [900, 'tod_day'], [1120, 'tod_dusk'], [1290, 'tod_night'], [1710, 'tod_night']];
