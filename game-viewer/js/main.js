@@ -22,9 +22,10 @@ const q = new URLSearchParams(location.search);
 if (q.get('timer')) window.requestAnimationFrame = cb => setTimeout(() => cb(performance.now()), 33);   // debug: keep rendering while the tab is hidden
 // ---- performance settings (persisted). View distance: fog is relative to it, like the game's FogStart/FogEnd fractions.
 const SHADOWS = { Off: [0, 0], Low: [1024, 120], Medium: [2048, 200], High: [4096, 300] };   // [map size, covered radius m]
-const PRESETS = { Low: { view: 2200, obj: 700, scale: 0.75, shadow: 'Off', lights: 4 }, Medium: { view: 3200, obj: 1100, scale: 1, shadow: 'Low', lights: 8 }, High: { view: 4500, obj: 1500, scale: 1.25, shadow: 'Medium', lights: 16 }, Ultra: { view: 7000, obj: 2200, scale: 1.5, shadow: 'High', lights: 16 } };
+const PRESETS = { Low: { view: 2200, obj: 700, scale: 0.75, shadow: 'Off', lights: 4, grass: 40 }, Medium: { view: 3200, obj: 1100, scale: 1, shadow: 'Low', lights: 8, grass: 80 }, High: { view: 4500, obj: 1500, scale: 1.25, shadow: 'Medium', lights: 16, grass: 120 }, Ultra: { view: 7000, obj: 2200, scale: 1.5, shadow: 'High', lights: 16, grass: 160 } };
 let S = { preset: 'Medium', ...PRESETS.Medium };
 try { Object.assign(S, JSON.parse(localStorage.getItem('dfSettings2') || '{}')); } catch {}
+if (!S.grass) S.grass = PRESETS.Medium.grass;
 if (q.get('view')) S.view = +q.get('view'); if (q.get('obj')) S.obj = +q.get('obj');
 let VIEW = S.view;
 const J = u => fetch(u).then(r => r.json());
@@ -64,7 +65,7 @@ const water = new WaterFactory(env, sky.uniforms.uZenith); water.linearFloat = r
 const world = new World({ scene, env, tex, water, tiles: worldData, names: tileNames, props, alphaMode, fullTiles: q.get('full') === '0' ? [] : fullTiles, opts: { terrainRadius: VIEW * 0.9, objectRadius: S.obj } });
 
 const pois = new Pois({ scene, world, data: poiData }); pois.setEnabled(q.get('pois') === '1');
-const veg = new Vegetation({ scene, env, world, data: vegData }); veg.enabled = q.get('veg') !== '0';
+const veg = new Vegetation({ scene, env, world, data: vegData, distance: S.grass }); veg.enabled = q.get('veg') !== '0';
 
 // open ocean everywhere (terrain-only far tiles carry no water plane of their own)
 const ocean = new THREE.Mesh(new THREE.PlaneGeometry(2, 2).rotateX(-Math.PI / 2), water.material('water', { value: 1 }));
@@ -327,6 +328,7 @@ if (q.get('auto')) { const iv = setInterval(() => { if (ready) { clearInterval(i
 function applySettings() {
   VIEW = S.view; camera.far = VIEW * 1.05; camera.updateProjectionMatrix();
   world.opts.terrainRadius = VIEW * 0.9; world.opts.objectRadius = S.obj; ocean.scale.setScalar(VIEW * 1.1);
+  veg.setDistance(S.grass);
   renderer.setPixelRatio(Math.min(devicePixelRatio, S.scale)); resize();
   try { localStorage.setItem('dfSettings2', JSON.stringify(S)); } catch {}
 }
@@ -334,11 +336,12 @@ function buildPanel() {
   const c = $('cfg');
   const row = (key, label, min, max, step, fmt) => `<label><span>${label}</span><span id="v_${key}">${fmt(S[key])}</span></label><input type="range" id="r_${key}" min="${min}" max="${max}" step="${step}" value="${S[key]}">`;
   c.innerHTML = `<b>PERFORMANCE</b><label><span>Preset</span><select id="preset">${Object.keys(PRESETS).map(p => `<option${p === S.preset ? ' selected' : ''}>${p}</option>`).join('')}<option${S.preset === 'Custom' ? ' selected' : ''}>Custom</option></select></label>` +
-    row('view', 'View distance', 1200, 9000, 100, v => (v / 1000).toFixed(1) + ' km') + row('obj', 'Object distance', 300, 3000, 100, v => (v / 1000).toFixed(1) + ' km') + row('scale', 'Render scale', 0.5, 2, 0.05, v => v.toFixed(2) + '×') +
+    row('view', 'View distance', 1200, 9000, 100, v => (v / 1000).toFixed(1) + ' km') + row('obj', 'Object distance', 300, 3000, 100, v => (v / 1000).toFixed(1) + ' km') + row('grass', 'Grass distance', 40, 160, 10, v => Math.round(v) + ' m') + row('scale', 'Render scale', 0.5, 2, 0.05, v => v.toFixed(2) + '×') +
     `<label><span>Shadows</span><select id="sel_shadow">${Object.keys(SHADOWS).map(k => `<option${k === S.shadow ? ' selected' : ''}>${k}</option>`).join('')}</select></label><label><span>Dynamic lights</span><select id="sel_lights">${[0, 4, 8, 16].map(k => `<option${k === S.lights ? ' selected' : ''}>${k}</option>`).join('')}</select></label>` +
-    '<div style="opacity:.55;margin-top:8px">Lower view/object distance if the frame rate drops. Settings are remembered.</div>';
-  const sync = () => { for (const k of ['view', 'obj', 'scale']) { $('r_' + k).value = S[k]; $('v_' + k).textContent = { view: v => (v / 1000).toFixed(1) + ' km', obj: v => (v / 1000).toFixed(1) + ' km', scale: v => v.toFixed(2) + '×' }[k](S[k]); } $('preset').value = S.preset; $('sel_shadow').value = S.shadow; $('sel_lights').value = String(S.lights); };
-  for (const k of ['view', 'obj', 'scale']) $('r_' + k).addEventListener('input', e => { S[k] = +e.target.value; S.preset = 'Custom'; sync(); applySettings(); });
+    '<div style="opacity:.55;margin-top:8px">Lower view, object, or grass distance if the frame rate drops. Settings are remembered.</div>';
+  const fmt = { view: v => (v / 1000).toFixed(1) + ' km', obj: v => (v / 1000).toFixed(1) + ' km', grass: v => Math.round(v) + ' m', scale: v => v.toFixed(2) + '×' };
+  const sync = () => { for (const k of ['view', 'obj', 'grass', 'scale']) { $('r_' + k).value = S[k]; $('v_' + k).textContent = fmt[k](S[k]); } $('preset').value = S.preset; $('sel_shadow').value = S.shadow; $('sel_lights').value = String(S.lights); };
+  for (const k of ['view', 'obj', 'grass', 'scale']) $('r_' + k).addEventListener('input', e => { S[k] = +e.target.value; S.preset = 'Custom'; sync(); applySettings(); });
   $('sel_shadow').addEventListener('change', e => { S.shadow = e.target.value; S.preset = 'Custom'; sync(); applySettings(); });
   $('sel_lights').addEventListener('change', e => { S.lights = +e.target.value; S.preset = 'Custom'; sync(); applySettings(); });
   $('preset').addEventListener('change', e => { const p = PRESETS[e.target.value]; if (p) { Object.assign(S, p, { preset: e.target.value }); sync(); applySettings(); } else S.preset = 'Custom'; });

@@ -2,24 +2,26 @@
 // Meshes and the per-tile type tables come from export/veg (tools/build_veg.js -> data/veg.json). The game's own placement (the run-length cell lists in
 // terrain_<tile>.sfv and the native scatter code) is NOT decoded, so this is an approximation: tufts are scattered deterministically per 8 m chunk where
 // the terrain splat weights are grassy, picking only mesh types that tile's table lists. Shading/wind follow shaders/vegetation.teq (up-facing lighting,
-// wind sway weighted by height, shrink-out fade between FadeStart 10 m and FadeEnd 29 m of the game; stretched here because the tufts are sparse).
+// wind sway weighted by height). Tufts stay full height out to about 62% of the draw distance, then shrink away at the edge.
+// Draw distance comes from the performance panel (O).
 import * as THREE from 'three';
 import { fogUniforms, fogFn } from './chunks.js';
 import { SEA_LEVEL } from './water.js';
 
-const CH = 8, RADIUS = 40, FADE0 = 22, FADE1 = 38, DENSITY = 0.55, CAP = 4000;
+const CH = 8, DENSITY = 0.55, CAP = 12000;
+const GRASS_Y = 1.75 * 2 / 3;   // grass_* tufts, Y only: the 1.75 stretch, then one third shorter. Flowers and mushrooms stay authored.
 const CLASS_RE = [/^grass_(green|jungle|moss|central|straws_green)/, /^grass_(yellow|straws_yellow)/, /^grass_swamp/, /^grass_(dead|branches)/, /^(grass_flowers|flower_)/, /^mushroom/];
 const classOfMesh = n => CLASS_RE.findIndex(r => r.test(n));
 const GW = 257;
 
 const vs = `
 attribute vec3 aOff; attribute vec3 aRS;      // xyz offset; (yaw, scale, tint)
-uniform float uHeight; uniform vec3 uCam; uniform float uTime; uniform vec3 uWindV; uniform float uF0; uniform float uF1;
+uniform float uHeight; uniform vec3 uCam; uniform float uTime; uniform vec3 uWindV; uniform float uF0; uniform float uF1; uniform float uYScale;
 varying vec2 vUv; varying vec3 vView; varying float vTint;
 void main() {
   float d = distance(aOff.xz, uCam.xz);
   float fade = 1.0 - smoothstep(uF0, uF1, d);
-  vec3 p = position * aRS.y; p.y *= mix(0.25, 1.0, fade) * step(0.001, fade);
+  vec3 p = position * aRS.y; p.y *= uYScale * mix(0.25, 1.0, fade) * step(0.001, fade);
   float hw = clamp(position.y / uHeight, 0.0, 1.0); hw *= hw;
   float c = cos(aRS.x), s = sin(aRS.x);
   p.xz = vec2(c * p.x + s * p.z, -s * p.x + c * p.z);
@@ -27,7 +29,7 @@ void main() {
   float sw = sin(uTime * 1.6 + ph) * 0.6 + sin(uTime * 3.3 + ph * 2.1) * 0.4;
   vec2 wd = uWindV.xz; float wl = length(wd); wd = wl > 1e-3 ? wd / wl : vec2(1.0, 0.0);
   float amp = (0.10 + min(wl, 8.0) * 0.03) * aRS.y;
-  p.xz += wd * (sw * 0.6 + 0.4) * amp * hw * uHeight;
+  p.xz += wd * (sw * 0.6 + 0.4) * amp * hw * uHeight * uYScale;
   vec4 mv = viewMatrix * vec4(aOff + p, 1.0);
   vView = mv.xyz; vUv = uv; vTint = aRS.z;
   gl_Position = projectionMatrix * mv;
@@ -51,8 +53,8 @@ void main() {
 function rng(seed) { let a = seed >>> 0; return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
 
 export class Vegetation {
-  constructor({ scene, env, world, data }) {
-    this.env = env; this.world = world; this.data = data; this.enabled = true;
+  constructor({ scene, env, world, data, distance }) {
+    this.env = env; this.world = world; this.data = data; this.enabled = true; this.radius = 0;
     this.group = new THREE.Group(); scene.add(this.group);
     this.chunks = new Map(); this.cx = NaN; this.cz = NaN; this.timer = 0; this.pending = false;
     this.types = new Map();                       // mesh name -> { mesh, attrs, count }
@@ -70,12 +72,23 @@ export class Vegetation {
       if (!tex) { tex = loader.load('/converted/textures/' + m.tex + '.png'); tex.colorSpace = THREE.SRGBColorSpace; tex.wrapS = tex.wrapT = THREE.RepeatWrapping; tex.anisotropy = 4; texs.set(m.tex, tex); }
       let hmax = 0.1; for (let i = 1; i < m.pos.length; i += 3) hmax = Math.max(hmax, m.pos[i]);
       const mat = new THREE.ShaderMaterial({ vertexShader: vs, fragmentShader: fs, side: THREE.DoubleSide,
-        uniforms: { ...env.u, tMap: { value: tex }, uHeight: { value: hmax }, uCam: { value: new THREE.Vector3() }, uWindV: env.u.uWind, uF0: { value: FADE0 }, uF1: { value: FADE1 } } });
+        uniforms: { ...env.u, tMap: { value: tex }, uHeight: { value: hmax }, uYScale: { value: name.startsWith('grass_') ? GRASS_Y : 1 }, uCam: { value: new THREE.Vector3() }, uWindV: env.u.uWind, uF0: { value: 22 }, uF1: { value: 38 } } });
       const mesh = new THREE.Mesh(g, mat); mesh.frustumCulled = false; mesh.visible = false; mesh.renderOrder = 0;
       this.group.add(mesh);
       this.types.set(name, { mesh, off, rs, count: 0, cls: classOfMesh(name) });
     }
     this.camV = new THREE.Vector3();
+    this.setDistance(distance);
+  }
+
+  // metres. Full height until ~62% of the range, then the same shrink-out the shader already does.
+  setDistance(meters) {
+    const d = Math.min(160, Math.max(40, +meters || 80));
+    if (d === this.radius) return;
+    this.radius = d;
+    const f0 = d * 0.62, f1 = d - 2;
+    for (const t of this.types.values()) { const u = t.mesh.material.uniforms; u.uF0.value = f0; u.uF1.value = f1; }
+    this.cx = NaN;
   }
 
   // per-tile, per-class list of [mesh, cumulative weight] from the tile's type table
@@ -128,10 +141,14 @@ export class Vegetation {
     this.timer = 0.6; this.cx = cx; this.cz = cz; this.pending = false;
     const gh = this.world.groundHeight(p.x, p.z);
     for (const t of this.types.values()) t.count = 0;
-    if (gh != null && p.y - gh < 100) {
-      const r = Math.ceil(RADIUS / CH);
+    if (gh != null && p.y - gh < Math.max(100, this.radius)) {
+      const r = Math.ceil(this.radius / CH), cells = [];
       for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++) {
-        if (Math.hypot((cx + dx + 0.5) * CH - p.x, (cz + dz + 0.5) * CH - p.z) > RADIUS + CH) continue;
+        const dist = Math.hypot((cx + dx + 0.5) * CH - p.x, (cz + dz + 0.5) * CH - p.z);
+        if (dist <= this.radius + CH) cells.push([dx, dz, dist]);
+      }
+      cells.sort((a, b) => a[2] - b[2]);   // near tufts fill the per-mesh cap first
+      for (const [dx, dz] of cells) {
         const ch = this._chunk(cx + dx, cz + dz); if (!ch) continue;
         for (const i of ch) {
           const t = this.types.get(i.name); if (!t || t.count >= CAP) continue;
@@ -141,7 +158,7 @@ export class Vegetation {
       }
     }
     for (const t of this.types.values()) { t.mesh.visible = t.count > 0; t.mesh.geometry.instanceCount = t.count; t.off.needsUpdate = t.rs.needsUpdate = true; }
-    // drop chunks that fell out of range
-    if (this.chunks.size > 600) for (const k of this.chunks.keys()) { const [a, b] = k.split(',').map(Number); if (Math.abs(a - cx) > 12 || Math.abs(b - cz) > 12) this.chunks.delete(k); }
+    const keep = Math.ceil(this.radius / CH) + 4;
+    if (this.chunks.size > (keep * 2) ** 2) for (const k of this.chunks.keys()) { const [a, b] = k.split(',').map(Number); if (Math.abs(a - cx) > keep || Math.abs(b - cz) > keep) this.chunks.delete(k); }
   }
 }
