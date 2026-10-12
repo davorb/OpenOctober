@@ -3,7 +3,7 @@
 // and differ by index buffer; mesh.extras.groups[i] = { materials, slots, textures } per primitive.
 // Vegetation classes from terrain material names: 0 green grass, 1 dry/yellow, 2 swamp, 3 dead/burned, 4 flowers, 5 forest floor (mushrooms)
 const VC = 6;
-const CLS = [[/grass_(green|jungle|fall|moss)|grass_moss|forestfloor-grass|central_red_grass|junglefloor/, [[0, 1]]], [/grass_flowers/, [[4, 1], [0, 0.5]]], [/grass_dark|grass_yellow|wasteland|highlands|dirt-light|red_(light|medium)/, [[1, 0.8]]],
+const CLS = [[/grass_(green|jungle|fall|moss|normal|autumn)|grass_moss|forestfloor-grass|central_red_grass|junglefloor/, [[0, 1]]], [/grass_flowers/, [[4, 1], [0, 0.5]]], [/grass_dark|grass_yellow|wasteland|highlands|dirt-light|red_(light|medium)/, [[1, 0.8]]],
   [/swamp/, [[2, 0.9]]], [/burned|dirt-(medium|dark)|mud_dry|red_dark|alfar/, [[3, 0.7]]], [/forestfloor|moss01|rock-moss/, [[5, 0.8], [0, 0.4]]]];
 const classOf = n => { for (const [re, l] of CLS) if (re.test(n)) return l; return []; };
 self.onmessage = async ({ data: { id, url } }) => {
