@@ -46,7 +46,7 @@ export class Multiplayer {
     const q = new URLSearchParams(location.search);
     this.url = q.get('server') || `ws://${location.hostname || 'localhost'}:9000`;
     this.factory = new AvatarFactory(); this.mobs = new MobWorld({ scene, camera, world });
-    this.players = new Map(); this.shots = new Map(); this.me = null; this.ws = null; this.sendAcc = 0; this.last = null; this.speed = 0; this.dotMat = null;
+    this.players = new Map(); this.shots = new Map(); this.corpses = new Map(); this.me = null; this.ws = null; this.sendAcc = 0; this.last = null; this.speed = 0; this.dotMat = null;
     let saved = {}; try { saved = JSON.parse(localStorage.getItem('dfProfile') || '{}'); } catch {}
     this.profile = { name: q.get('name') || saved.name || '', race: q.get('race') || saved.race || 'hum', gender: q.get('gender') || saved.gender || 'm', gear: q.get('gear') ?? saved.gear ?? '' };
     this.dotTex = null; this.started = false; this.typing = false; this.radius = 900;
@@ -117,13 +117,13 @@ export class Multiplayer {
     ws.onerror = () => {};
   }
   status(s) { this.online = s === 'online'; const e = this.$('mpnet'); e.textContent = this.online ? `● ${this.players.size + 1} online` : `○ ${s}`; e.classList.toggle('up', this.online); }
-  dropAll() { for (const p of this.players.values()) this.removeAvatar(p); this.players.clear(); this.me = null; this.mobs.clear(); }
+  dropAll() { for (const c of this.corpses.values()) this.scene.remove(c.root); this.corpses.clear(); for (const p of this.players.values()) this.removeAvatar(p); this.players.clear(); this.me = null; this.mobs.clear(); }
 
   onJson(m) {
     if (m.t === 'welcome') {
       this.dropAll(); this.me = m.id; this.radius = m.radius;
       for (const p of m.players) if (p.id !== m.id) this.players.set(p.id, { info: p, states: [], av: null, seen: 0 });
-      this.last = null; this.status('online'); if (this.weapons) { this.weapons.setHp(120, 120); if (this.weapons.id) this.combat.equip(this.weapons.id, this.weapons.drawn); } this.log(`Connected as <b>${esc(m.players.find(p => p.id === m.id)?.name || '')}</b> — ${m.players.length} online. Enter to chat, Tab for the player list.`, 'sys');
+      this.last = null; this.status('online'); if (this.weapons) { this.weapons.setHp(120, 120); this.weapons.selfId = this.me; if (this.weapons.id) this.combat.equip(this.weapons.id, this.weapons.drawn); } this.log(`Connected as <b>${esc(m.players.find(p => p.id === m.id)?.name || '')}</b> — ${m.players.length} online. Enter to chat, Tab for the player list.`, 'sys');
     } else if (m.t === 'joined') {
       if (m.player.id !== this.me) { this.players.set(m.player.id, { info: m.player, states: [], av: null, seen: 0 }); this.status('online'); this.log(`${esc(m.player.name)} joined`, 'sys'); }
     } else if (m.t === 'left') {
@@ -138,6 +138,8 @@ export class Multiplayer {
   /** Combat events from the server (game-server/src/proto.rs ServerMsg): other players' equip / swings / shots, blows landing, deaths. true = handled */
   onCombat(m) {
     const W = this.weapons, now = performance.now() / 1000, p = this.players.get(m.id), at = a => new THREE.Vector3(a[0], a[1], a[2]);
+    if (m.t === 'corpse') { this.addCorpse(m); return true; }
+    if (m.t === 'corpsegone') { const c = this.corpses.get(m.cid); if (c) { this.scene.remove(c.root); this.corpses.delete(m.cid); } return true; }
     if (m.t === 'equip') { if (p) { p.info.weapon = m.w; p.info.drawn = m.drawn; this.wield(p); } return true; }
     if (m.t === 'swing') {
       const a = p?.av; if (!a) return true; a.anim?.play(m.clip);
@@ -155,11 +157,12 @@ export class Multiplayer {
     if (m.t === 'hit') {
       const self = m.v === 'p' && m.i === this.me, shot = this.shots.get(m.a); if (shot && !m.am) { shot.done = true; this.shots.delete(m.a); }
       if (m.a === this.me && !m.am && W.lastShot) W.lastShot.done = true;
+      if (m.v === 'p' && m.i !== this.me) { const a = this.players.get(m.i)?.av; if (a?.attached) { m.at = [a.pos.x, a.pos.y, a.pos.z]; m.snap = false; } }   // the avatar stands on the real terrain (bots report no height)
       W.onHit({ ...m, self }); if (m.v === 'm') this.mobs.showHp(m.i, m.hp, m.max, now);
       return true;
     }
     if (m.t === 'died') {
-      if (m.v === 'p') { if (m.i === this.me) W.died(); else { const q = this.players.get(m.i); if (q?.av?.anim) q.av.anim.dead = true; } }
+      if (m.v === 'p') { if (m.i === this.me) W.died(); else { const q = this.players.get(m.i); if (q) q.dead = true; } }
       return true;
     }
     if (m.t === 'respawn') {
@@ -167,6 +170,16 @@ export class Multiplayer {
       return true;
     }
     return false;
+  }
+  /** A body on the ground (server: Corpse, kept 10 minutes): the dying clip of the player's own race, held at its last frame. Static, so it costs nothing per frame. */
+  async addCorpse(m) {
+    if (this.corpses.has(m.cid)) return;
+    const c = { root: null, x: m.x, y: m.y, z: m.z, yaw: m.yaw, snap: m.snap, shown: false, gyT: -9 }; this.corpses.set(m.cid, c);
+    try {
+      const av = await this.factory.build(m.race, m.gender, m.gear); if (!this.corpses.has(m.cid)) return;
+      const an = await PlayerAnim.create(av).catch(() => null); if (an) { an.dead = true; an.update(0.01); an.update(10); }   // pose: lying where it fell
+      av.root.rotation.y = m.yaw + Math.PI; c.root = av.root; c.av = av;
+    } catch (e) { console.warn('corpse', e); }
   }
   /** put the player's weapon into his avatar's hand (and pick the matching stance clips) */
   async wield(p) {
@@ -256,6 +269,7 @@ export class Multiplayer {
     for (const p of this.players.values()) {
       if (now - p.seen > 1.5) { if (p.av) { this.scene.remove(p.av.root, p.av.tag, p.av.dot); if (p.av.bubble) this.scene.remove(p.av.bubble); p.av.attached = false; p.av.bubble = null; p.states.length = 0; } continue; }   // out of the server's interest radius
       if (!p.av) { this.ensureAvatar(p); continue; }
+      if (p.dead) { const d = p.av; if (d.attached) { this.scene.remove(d.root, d.tag); d.attached = false; } if (d.dot.parent) this.scene.remove(d.dot); continue; }   // lying as a corpse (see addCorpse), not walking about
       const a = p.av; if (!this.sample(p, rt, st)) continue;
       if (st.flags & FLAG_SNAP) { const g = this.world.groundHeight(st.x, st.z); a.gy = g != null && g > -1e8 ? g : (a.gy ?? st.y); st.y = a.gy; }
       a.pos.set(st.x, st.y, st.z);
@@ -280,6 +294,11 @@ export class Multiplayer {
         else { a.bubble.visible = true; const bh = 16 * fovK * dist * (a.bubble.material.map.image.height / 34); a.bubble.center.set(0.5, 0); a.bubble.position.set(st.x, topY + ty * 0.9, st.z); a.bubble.scale.set(bh * a.bubble.userData.aspect, bh, 1); }
       }
     }
+    for (const c of this.corpses.values()) {
+      if (!c.root) continue; const dd = Math.hypot(c.x - cam.x, c.z - cam.z), near = dd < AVATAR_NEAR;
+      if (near && now - c.gyT > 1) { c.gyT = now; let y = c.y; if (c.snap) { const g = this.world.groundHeight(c.x, c.z); if (g != null && g > -1e8) y = g; } c.root.position.set(c.x, y, c.z); }
+      if (near !== c.shown) { c.shown = near; if (near) this.scene.add(c.root); else this.scene.remove(c.root); }
+    }
     this.mobs.update(dt, now); this.drawRadar(); if (this.$('plist').classList.contains('on')) { this.listAcc = (this.listAcc || 0) + dt; if (this.listAcc > 0.5) { this.listAcc = 0; this.renderList(); } }
   }
 
@@ -291,7 +310,7 @@ export class Multiplayer {
     c.beginPath(); c.arc(70, 70, 34, 0, 7); c.stroke();
     const cs = Math.cos(yaw), sn = Math.sin(yaw);
     for (const p of this.players.values()) {
-      const s = p.states[p.states.length - 1]; if (!s || now - p.seen > 1.5) continue;
+      const s = p.states[p.states.length - 1]; if (!s || now - p.seen > 1.5 || p.dead) continue;
       const dx = s.x - cam.position.x, dz = s.z - cam.position.z, rx = dx * cs - dz * sn, rz = dx * sn + dz * cs;   // into the camera's frame (up = forward)
       const k = 66 / R, px = 70 + rx * k, py = 70 + rz * k; if (Math.hypot(px - 70, py - 70) > 66) continue;
       c.fillStyle = '#ffd98a'; c.beginPath(); c.arc(px, py, 2.5, 0, 7); c.fill();

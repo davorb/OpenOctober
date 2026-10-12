@@ -8,7 +8,7 @@ const V = (x, y, z) => new THREE.Vector3(x, y, z), E = new THREE.Euler(0, 0, 0, 
 const smooth = t => t * t * (3 - 2 * t);
 
 // swing keyframes for the grip in camera space: [t (0..1 of the attack), x, y, z, pitch, yaw, roll]  (angles are added to the resting orientation)
-const R = [0, 0.34, -0.32, -0.62, 0, 0, 0], REST = { melee: R, staff: [0, 0.30, -0.36, -0.55, 0, 0, 0], bow: [0, -0.20, -0.14, -0.60, 0, 0, 0], thrown: [0, 0.30, -0.30, -0.55, 0, 0, 0] };
+const R = [0, 0.34, -0.32, -0.62, 0, 0, 0], REST = { melee: R, staff: [0, 0.30, -0.36, -0.55, 0, 0, 0], bow: [0, -0.20, -0.14, -0.60, 0, 0.45, 0], thrown: [0, 0.30, -0.30, -0.55, 0, 0, 0] };
 const back = (r, k) => [1, ...r.slice(1)];
 const SWINGS = {
   slash:    [R, [0.28, 0.52, -0.10, -0.46, 0.55, -0.55, -0.9], [0.50, -0.34, -0.28, -0.78, -0.55, 0.85, 0.7], [0.72, -0.18, -0.30, -0.66, -0.2, 0.45, 0.3], back(R)],
@@ -17,14 +17,38 @@ const SWINGS = {
   stab:     [R, [0.30, 0.38, -0.22, -0.34, 0.55, 0.1, 0], [0.48, 0.10, -0.24, -1.00, -0.5, 0, 0], [0.70, 0.18, -0.28, -0.80, -0.2, 0, 0], back(R)],
   cast:     [REST.staff, [0.35, 0.26, -0.20, -0.45, 0.7, 0, 0.2], [0.55, 0.12, -0.18, -0.85, -0.3, 0, 0], [0.8, 0.2, -0.28, -0.7, -0.1, 0, 0], back(REST.staff)],
   throw:    [REST.thrown, [0.30, 0.42, 0.0, -0.30, 0.9, 0, 0], [0.50, 0.05, -0.30, -0.9, -0.8, 0, 0], [0.75, 0.2, -0.3, -0.7, -0.2, 0, 0], back(REST.thrown)],
-  shoot:    [[0, -0.20, -0.10, -0.44, 0.1, 0.15, 0], [0.25, -0.20, -0.12, -0.62, -0.1, 0, 0], back(REST.bow)],   // recoil after the release
+  shoot:    [[0, -0.20, -0.10, -0.44, 0.1, 0.55, 0], [0.25, -0.20, -0.12, -0.62, -0.1, 0.4, 0], back(REST.bow)],   // recoil after the release
 };
 // holds (right mouse = guard / bow draw): pose reached by easing in, kept while held
-const HOLDS = { block: [0, 0.04, -0.06, -0.55, 0.6, 0.15, -0.2], draw: [0, -0.20, -0.10, -0.44, 0.1, 0.15, 0] };
+const HOLDS = { block: [0, 0.04, -0.06, -0.55, 0.6, 0.15, -0.2], draw: [0, -0.20, -0.10, -0.44, 0.1, 0.55, 0] };
 const HIT_AT = 0.45;                                             // the skills' Synchronized_StateChange: the blow lands at 45% of the animation
-// resting orientation per weapon class: [direction of the long axis, direction of the thinnest axis (the flat of a blade / the belly of a bow)]
-const ORIENT = { melee: [V(0.16, 0.74, -0.65), V(1, 0, 0)], staff: [V(0.1, 0.85, -0.5), V(1, 0, 0)], bow: [V(0, 1, -0.05), V(0, 0, 1)], thrown: [V(0.1, 0.8, -0.6), V(1, 0, 0)] };
+// resting orientation per weapon class: [where the business end points, where the edge of the blade / the belly of the bow points] (camera space, -z is away from the player)
+const ORIENT = { melee: [V(0.16, 0.74, -0.65), V(-0.35, 0, -1)], staff: [V(0.1, 0.85, -0.5), V(-0.35, 0, -1)], bow: [V(0, 1, -0.05), V(0, 0, 1)], thrown: [V(0.1, 0.8, -0.6), V(-0.35, 0, -1)] };
 const MAXLEN = { melee: 0.72, staff: 1.0, bow: 0.8, thrown: 0.3 };
+
+/** Geometry of a weapon model: `d` = unit vector (model space) along the long axis towards the business end (the end with the wider cross-section: blade, axe head, club head, staff
+ *  top; for a bow either end), `e` = unit vector across it where the edge sticks out (an axe's blade, a sword's wider side; for a bow the side the limbs curve towards,
+ *  the archer's side), `size` = bounding box, `len` = length of the long axis.  The model origin is the grip. */
+export function analyze(o, kind) {
+  o.updateMatrixWorld(true); const pts = [], p = V(0, 0, 0);
+  o.traverse(n => { if (!n.isMesh) return; const pa = n.geometry.attributes.position, step = Math.max(1, Math.floor(pa.count / 3000)); for (let i = 0; i < pa.count; i += step) pts.push(p.fromBufferAttribute(pa, i).applyMatrix4(n.matrixWorld).toArray()); });
+  const lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9]; for (const q of pts) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], q[k]); hi[k] = Math.max(hi[k], q[k]); }
+  const size = V(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]), ax = [0, 1, 2].sort((a, c) => size.getComponent(c) - size.getComponent(a)), [L, M, T] = ax, len = size.getComponent(L);
+  // cross-section (extent over the other two axes) of the two ends of the long axis; the wider end is the business end
+  // cross-section (extent over the other two axes) of the two ends of the long axis; the wider end is the business end
+  const end = (sgn) => { const a0 = sgn > 0 ? hi[L] - len * 0.25 : lo[L], a1 = sgn > 0 ? hi[L] : lo[L] + len * 0.25; let mn = [1e9, 1e9], mx = [-1e9, -1e9], n = 0; const m = [0, 0];
+    for (const q of pts) if (q[L] >= a0 && q[L] <= a1) { n++; m[0] += q[M]; m[1] += q[T]; mn[0] = Math.min(mn[0], q[M]); mx[0] = Math.max(mx[0], q[M]); mn[1] = Math.min(mn[1], q[T]); mx[1] = Math.max(mx[1], q[T]); }
+    return { w: (mx[0] - mn[0]) + (mx[1] - mn[1]), m: n ? [m[0] / n, m[1] / n] : [0, 0] }; };
+  const A = end(1), B = end(-1), med = k => { const v = pts.map(q => q[k]).sort((a, c) => a - c); return v[v.length >> 1]; }, med2 = [med(M), med(T)];
+  let sgn = A.w > B.w * 1.12 ? 1 : B.w > A.w * 1.12 ? -1 : (Math.abs(hi[L]) >= Math.abs(lo[L]) ? 1 : -1);   // similar widths: the end farther from the grip
+  // the exported models share a convention: the business end of every melee weapon and staff (the head) is at -z of the grip; a bow runs both ways (limbs)
+  if (L === 2) sgn = kind === 'bow' ? 1 : -1;
+  // the side axis: where the mass of the business end (a bow: both tips) is displaced from the middle of the weapon - the blade of an axe, the curve of a bow
+  const ends = kind === 'bow' ? [A, B] : [sgn > 0 ? A : B], dev = [0, 1].map(i => ends.reduce((s, x) => s + x.m[i], 0) / ends.length - med2[i]), side = Math.abs(dev[0]) >= Math.abs(dev[1]) ? 0 : 1;
+  const sym = Math.abs(dev[side]) < 0.03 * len;   // symmetrical (a sword): no side to speak of, show the wide face
+  const d = V(0, 0, 0), e = V(0, 0, 0); d.setComponent(L, sgn); e.setComponent(sym || !side ? M : T, sym ? 1 : dev[side] >= 0 ? 1 : -1);
+  return { d, e, size, len };
+}
 
 export class ViewModel {
   constructor(factory) {
@@ -44,17 +68,14 @@ export class ViewModel {
     const my = ++this.seq; this.w = null; this.atk = null; this.hold = null; this.grip.clear();
     if (!w?.mesh) return;
     const src = await this.factory.static(w.mesh); if (!src || my !== this.seq) return;
-    const kind = { bow: 'bow', staff: 'staff', thrown: 'thrown' }[w.group] || 'melee', [dirT, flatT] = ORIENT[kind];
+    const kind = { bow: 'bow', staff: 'staff', thrown: 'thrown' }[w.group] || 'melee';
     const o = src.clone(true); o.traverse(n => { if (n.isMesh) n.frustumCulled = false; });
-    const b = new THREE.Box3().setFromObject(o), s = b.getSize(V(0, 0, 0)), ax = [0, 1, 2].sort((a, c) => s.getComponent(c) - s.getComponent(a));
-    const dir = V(0, 0, 0); dir.setComponent(ax[0], kind === 'bow' ? 1 : Math.abs(b.max.getComponent(ax[0])) > Math.abs(b.min.getComponent(ax[0])) ? 1 : -1);
-    const flat = V(0, 0, 0); flat.setComponent(ax[2], 1);
-    const target = dirT.clone().normalize(), q1 = new THREE.Quaternion().setFromUnitVectors(dir, target);
-    const flatNow = flat.clone().applyQuaternion(q1), proj = flatT.clone().sub(target.clone().multiplyScalar(flatT.dot(target))).normalize();
-    const f = flatNow.clone().sub(target.clone().multiplyScalar(flatNow.dot(target))).normalize(), roll = Math.atan2(target.dot(f.clone().cross(proj)), f.dot(proj));
-    this.q0.setFromAxisAngle(target, Math.atan2(Math.sin(roll), Math.cos(roll)) % Math.PI).multiply(q1);   // flat up to a half turn: either face may point to the camera
+    const { d, e, len } = analyze(o, kind), [dirT, edgeT] = [ORIENT[kind][0].clone().normalize(), ORIENT[kind][1].clone()];
+    const E2 = edgeT.sub(dirT.clone().multiplyScalar(edgeT.dot(dirT))).normalize(), T2 = dirT.clone().cross(E2);   // target frame: long axis, edge / belly side, third
+    const ms = new THREE.Matrix4().makeBasis(d, e, d.clone().cross(e)), mt = new THREE.Matrix4().makeBasis(dirT, E2, T2);
+    this.q0.setFromRotationMatrix(mt.multiply(ms.transpose()));
     // grip: melee weapons are held at the origin of their model; bows are centred (the model origin is the grip too, but limbs run both ways)
-    const len = s.getComponent(ax[0]), scale = Math.min(1, MAXLEN[kind] / Math.max(0.3, len)); o.scale.setScalar(scale);
+    const scale = Math.min(1, MAXLEN[kind] / Math.max(0.3, len)); o.scale.setScalar(scale);
     if (kind === 'bow') o.position.set(0, 0, 0);
     this.grip.add(o); this.kind = kind; this.w = w; this._k = REST[kind].slice(); this.pose(this._k);
   }

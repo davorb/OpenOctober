@@ -41,7 +41,7 @@ const cam = new THREE.PerspectiveCamera(35, 1, 0.01, 100), pivot = new THREE.Gro
 sc.add(new THREE.GridHelper(4, 16, 0x554433, 0x3a332b)); sc.add(new THREE.AxesHelper(0.5));
 const grip = new THREE.Mesh(new THREE.SphereGeometry(0.02), new THREE.MeshBasicMaterial({ color: 0xff4444, depthTest: false })); grip.renderOrder = 9; sc.add(grip);
 const loader = new GLTFLoader(), cache = new Map(); let cur = null, spin = true, drag = null, yaw = 0.6, dist = 3, ctr = new THREE.Vector3();
-const model = m => cache.get(m) || (cache.set(m, loader.loadAsync(`/converted/models/${m}.glb`).then(g => g.scene)), cache.get(m));
+const model = m => factory.static(m);
 const FALLBACK = { axe: 'waw_axe_1h_01', greataxe: 'waw_axe_2handed_001', sword: 'waw_sword001', greatsword: 'waw_sword_2handed_001', club: 'waw_club_1h_01', greatclub: 'waw_warhammer_2h_special_01', knife: 'waw_dagger_001', polearm: 'waw_halberd_special_01', bow: 'waw_bow_01', staff: 'waw_staff_special_01', shield: 'waw_shield001', sithra: 'waw_sithras_01' };
 
 let show = async function (id) {

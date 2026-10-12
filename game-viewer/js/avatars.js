@@ -41,6 +41,35 @@ const WEAPON_POINT = { sword: 'AttachPoint_Weapon', axe: 'AttachPoint_Weapon', c
 const ARM_SPLAY = 0.1;   // rad the hanging arms stay away from the body
 const POSE_BONES = ['LLeg1', 'RLeg1', 'LLeg2', 'RLeg2', 'LArm1', 'RArm1', 'LArm20', 'RArm20'];
 
+// ---- static meshes (weapons, helmets, ...): the exporter marks every RGBA texture alphaMode MASK, but the game only clips where the subset's shader alpha-tests; elsewhere alpha
+// is metal / specular data and the surface is solid.  Same decision as js/world.js: data/alphamode.json (from the shader files), else a mask is kept only where the texture really is a cut-out (isCutout).
+let alphaP = null; const covCache = new WeakMap();
+const alphaData = () => alphaP ||= fetch('/data/alphamode.json').then(r => r.json()).then(a => ({ all: new Set(a.all), solid: new Set(a.solid), keep: new Set(a.keep) })).catch(() => ({ all: new Set(), solid: new Set(), keep: new Set() }));
+/** A real cut-out (leaves, bristles, chain links) has a binary alpha with a large empty part; soft gradients are glow / specular data, and a small empty part is the padding around the UV islands. */
+function isCutout(tex) {
+  const img = tex?.image; if (!img) return false; let v = covCache.get(img);
+  if (v === undefined) {
+    try {
+      const c = document.createElement('canvas'); c.width = c.height = 128; const x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(img, 0, 0, 128, 128);
+      const d = x.getImageData(0, 0, 128, 128).data; let z = 0, mid = 0; for (let i = 3; i < d.length; i += 4) { if (d[i] < 8) z++; else if (d[i] < 128) mid++; }
+      v = z / 16384 >= 0.2 && z / 16384 <= 0.9 && mid / 16384 < 0.05;
+    } catch { v = false; }
+    covCache.set(img, v);
+  }
+  return v;
+}
+async function fixStatic(scene) {
+  const A = await alphaData();
+  scene.traverse(n => {
+    if (!n.isMesh) return;
+    for (const mt of [].concat(n.material)) {
+      const nm = (mt.name || '').toLowerCase(), mesh = nm.replace(/_\d+$/, ''), solid = !A.keep.has(nm) && (A.all.has(mesh) || A.solid.has(nm));
+      if (solid || (mt.alphaTest > 0 && !isCutout(mt.map))) { mt.alphaTest = 0; mt.transparent = false; mt.opacity = 1; mt.needsUpdate = true; }
+      mt.side = THREE.DoubleSide;
+    }
+  });
+}
+
 export class AvatarFactory {
   constructor() { this.gltf = new GLTFLoader(); this.dds = new DDSLoader(); this.parts = new Map(); this.statics = new Map(); this.tex = new Map(); this.mats = new Map(); this.pd = null; }
 
@@ -73,7 +102,7 @@ export class AvatarFactory {
   }
   // attached pieces are static meshes: models/ first, animated/ for the ones converted with the character set
   static(name) {
-    if (!this.statics.has(name)) this.statics.set(name, this.gltf.loadAsync(`/converted/models/${name}.glb`).catch(() => this.gltf.loadAsync(`/converted/animated/${name}.glb`)).then(g => g.scene, () => null));
+    if (!this.statics.has(name)) this.statics.set(name, this.gltf.loadAsync(`/converted/models/${name}.glb`).catch(() => this.gltf.loadAsync(`/converted/animated/${name}.glb`)).then(async g => { await fixStatic(g.scene); return g.scene; }, () => null));
     return this.statics.get(name);
   }
   texture(name) {
@@ -103,7 +132,8 @@ export class AvatarFactory {
     for (const point of w.group === 'knife' ? [WEAPON_POINT.sword, 'AttachPoint_Weapon Left'] : [WEAPON_POINT[w.group] || WEAPON_POINT.sword]) {
       const ap = A[point], bone = ap && host.getObjectByName(ap.frame); if (!bone) continue;
       const mesh = src.clone(true), holder = new THREE.Group();
-      holder.position.fromArray(ap.t); holder.rotation.set(ap.r[0], ap.r[1], ap.r[2]); holder.scale.setScalar(ATTACH_SCALE); holder.add(mesh);
+      // the game's attach rotation is (pitch, yaw, roll) applied yaw-pitch-roll (D3DX) in a left-handed space; the models are mirrored in z, so pitch and yaw change sign
+      holder.position.fromArray(ap.t); holder.rotation.set(-ap.r[0], -ap.r[1], ap.r[2], 'YXZ'); holder.scale.setScalar(ATTACH_SCALE); holder.add(mesh);
       mesh.traverse(n => { if (n.isMesh) n.frustumCulled = false; });
       bone.add(holder); av.held.push(holder);
     }

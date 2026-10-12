@@ -26,11 +26,14 @@ export function attackClip(group, kind) {
   return { slash: `${fam}_attack_01`, backhand: `${fam}_attack_02`, chop: `${fam}_vertical_attack_01`, stab: `${fam}_stab` }[kind] || `${fam}_attack_01`;
 }
 
+/** the guard clip of a weapon class */
+export const parryClip = group => `${STANCE[group]?.[1] || 'singlehand'}_parrying`;
+
 export class Weapons {
   constructor({ camera, post, world, factory, sfx, fx, net, toast, $, profile, light }) {
     Object.assign(this, { camera, post, world, factory, sfx, fx, net, toast, $, profile, lightSrc: light });
     this.data = null; this.id = null; this.drawn = false; this.combo = 0; this.vm = new ViewModel(factory); this.vm.onhit = () => this.landed();
-    this.post.overlay = this.vm; this.down = { 0: false, 2: false }; this.draw = null; this.hp = { hp: 100, max: 100 }; this.dead = false; this.hotbar = []; this.canFight = true;
+    this.post.overlay = this.vm; this.down = { 0: false, 2: false }; this.draw = null; this.hp = { hp: 100, max: 100 }; this.dead = false; this.hotbar = []; this.canFight = true; this.self = null; this.eye = null;
   }
   async init() {
     this.data = await fetch('/data/weapons.json').then(r => r.json());
@@ -39,16 +42,20 @@ export class Weapons {
     this.buildUI();
   }
   get w() { return this.data?.weapons[this.id] || null; }
+  /** drawn weapons (except magic staves) are used in third person; sheathed or a staff = first person */
+  get third() { const w = this.w; return !!(w && this.drawn && this.canFight && w.group !== 'staff' && w.group !== 'thrown' && !this.dead); }
+  /** where shots start and the aim ray begins: the body's head in third person, else the camera */
+  origin() { return this.third && this.eye ? this.eye : this.camera.position; }
   dur(name, d = 1) { return this.data?.clipDur[name] ?? d; }
 
   // ---- equip / draw
   async equip(id, draw = true) {
     const w = this.data.weapons[id]; if (!w) return;
     this.id = id; this.drawn = draw; this.combo = 0; this.cancelDraw(); await this.vm.setWeapon(draw ? w : null); this.vm.visible = draw;
-    this.net?.equip(id, draw); this.refreshUI(); this.sfx.play(this.sfx.pick(['/weapons/general/df_weapon_swing_01.wav']), { vol: 0.35, rate: 1.3 });
+    this.net?.equip(id, draw); this.self?.wield(w, draw); this.refreshUI(); this.sfx.play(this.sfx.pick(['/weapons/general/df_weapon_swing_01.wav']), { vol: 0.35, rate: 1.3 });
     this.toast(`${w.name}${w.rank ? ' (rank ' + w.rank + ')' : ''}`);
   }
-  async toggleDrawn() { if (!this.id) return; this.drawn = !this.drawn; this.cancelDraw(); await this.vm.setWeapon(this.drawn ? this.w : null); this.vm.visible = this.drawn; this.net?.equip(this.id, this.drawn); this.refreshUI(); }
+  async toggleDrawn() { if (!this.id) return; this.drawn = !this.drawn; this.cancelDraw(); await this.vm.setWeapon(this.drawn ? this.w : null); this.vm.visible = this.drawn; this.net?.equip(this.id, this.drawn); this.self?.wield(this.w, this.drawn); this.refreshUI(); }
 
   // ---- input
   mouse(button, isDown) {
@@ -56,7 +63,7 @@ export class Weapons {
     if (isDown && !this.canFight) { if (button === 0) this.toast('Walk (G) to fight'); return; }
     if (button === 0 && isDown) { if (!w) return; if (!this.drawn) { this.toggleDrawn(); return; } this.press(); }
     if (button === 0 && !isDown && this.draw) this.releaseBow();
-    if (button === 2 && w && this.drawn && !['bow', 'staff', 'thrown'].includes(w.group)) { this.vm.setHold(isDown ? 'block' : null); this.net?.block(isDown); if (isDown) this.sfx.play('/weapons/parry/df_weapon_parry_one_handed_1.wav', { vol: 0.15, rate: 1.6 }); }
+    if (button === 2 && w && this.drawn && !['bow', 'staff', 'thrown'].includes(w.group)) { this.vm.setHold(isDown ? 'block' : null); this.net?.block(isDown); if (isDown) this.self?.play(parryClip(w.group)); if (isDown) this.sfx.play('/weapons/parry/df_weapon_parry_one_handed_1.wav', { vol: 0.15, rate: 1.6 }); }
   }
   press() {
     const w = this.w, g = w.group; if (this.vm.busy) return;
@@ -69,7 +76,7 @@ export class Weapons {
     const w = this.w, g = w.group; if (!this.vm.swing(kind, dur)) return;
     const grp = this.data.groups[g], at = this.camera.position;
     if (grp?.sounds) setTimeout(() => this.sfx.play(this.sfx.pick(grp.sounds), { vol: 0.9, at: null, rate: 0.95 + Math.random() * 0.1 }), SWING_AT * 1000);
-    this.net?.attack({ kind, clip, dur, group: g });
+    this.net?.attack({ kind, clip, dur, group: g }); this.self?.play(clip);
     if (g === 'staff') setTimeout(() => this.cast(), dur * 0.45 * 1000);
     if (g === 'thrown') setTimeout(() => this.cast(), dur * 0.45 * 1000);
   }
@@ -78,23 +85,23 @@ export class Weapons {
 
   // ---- bow: hold to draw, release to shoot
   startDraw() {
-    if (this.draw) return; this.draw = { t: 0 }; this.vm.setHold('draw'); this.net?.bow('load');
+    if (this.draw) return; this.draw = { t: 0 }; this.vm.setHold('draw'); this.net?.bow('load'); this.self?.play('bow_load');
     this.sfx.play(ARCHERY + 'load_arrow.wav', { vol: 0.5 }); this.sfx.play(ARCHERY + 'bow&arrow_pullback.wav', { vol: 0.55 });
   }
   cancelDraw() { this.draw = null; this.vm.setHold(null); }
   releaseBow() {
     const t = this.draw.t, full = Math.min(1, t / this.dur('bow_load', 1.667)); this.draw = null; this.vm.setHold(null);
     if (full < 0.2) return;   // a tap: let down the string
-    this.vm.swing('shoot', 0.45); this.sfx.play(ARCHERY + 'bow&arrow_shot.wav', { vol: 0.8 }); this.sfx.play(ARCHERY + 'fire_bow.wav', { vol: 0.4 });
+    this.vm.swing('shoot', 0.45); this.self?.play('bow_fire'); this.sfx.play(ARCHERY + 'bow&arrow_shot.wav', { vol: 0.8 }); this.sfx.play(ARCHERY + 'fire_bow.wav', { vol: 0.4 });
     const d = new THREE.Vector3(); this.camera.getWorldDirection(d);
-    const from = this.camera.position.clone().addScaledVector(d, 1.2).add(new THREE.Vector3(0.25, -0.3, 0).applyQuaternion(this.camera.quaternion));
+    const from = this.origin().clone().addScaledVector(d, 1.2).add(new THREE.Vector3(0.25, -0.3, 0).applyQuaternion(this.camera.quaternion));
     const m = this.data.missiles.m_Archery_Arrow_01, speed = (m.v0 || 100) * (0.45 + 0.55 * full), range = m.range || 300;
     this.fx.arrow({ from, dir: d.clone(), speed, range }).then(a => { this.lastShot = a; });
     this.net?.shoot({ dir: [d.x, d.y, d.z], from: [from.x, from.y, from.z], power: full, clip: 'bow_fire', dur: this.dur('bow_fire', 0.83) });
   }
   /** staff / thrown: the projectile leaves the weapon */
   cast() {
-    const d = new THREE.Vector3(); this.camera.getWorldDirection(d); const from = this.camera.position.clone().addScaledVector(d, 1.0).add(new THREE.Vector3(0.3, -0.25, 0).applyQuaternion(this.camera.quaternion));
+    const d = new THREE.Vector3(); this.camera.getWorldDirection(d); const from = this.origin().clone().addScaledVector(d, 1.0).add(new THREE.Vector3(0.3, -0.25, 0).applyQuaternion(this.camera.quaternion));
     if (this.w?.group === 'staff') { this.lastShot = this.fx.bolt({ from, dir: d.clone() }); this.net?.shoot({ dir: [d.x, d.y, d.z], from: [from.x, from.y, from.z], power: 1, spell: true, clip: 'magic_fire_01', dur: 0.8 }); }
   }
 
@@ -102,10 +109,16 @@ export class Weapons {
   /** a blow landed: { a: attacker id, v: 'm' | 'p', i: victim id, dmg, hp, max, grp, blocked, at: [x, y, z], killed } */
   onHit(m) {
     const at = new THREE.Vector3(m.at[0], m.at[1], m.at[2]); const gh = this.world.groundHeight(at.x, at.z, at.y + 5); if (m.snap && gh != null && gh > -1e8) at.y = gh;
+    if (m.a === this.selfId && !m.am) this.hitMarker(!!m.killed);
     if (m.blocked) { this.sfx.play(`/weapons/parry/df_weapon_parry_${PARRY[m.grp] || 'one_handed'}_1.wav`, { at, min: 5, max: 50 }); return; }
     this.fx.play(m.grp === 'bow' ? 'se_arrow_impact' : m.grp === 'staff' ? 'se_impact_fire' : 'se_impact_' + (IMPACT[m.grp] || 'slashing'), at);
     if (m.killed) this.fx.play('se_bloodsplatter0' + (1 + ((Math.random() * 3) | 0)), at);
     if (m.v === 'p' && m.self) { this.hp.hp = m.hp; this.hp.max = m.max; this.refreshUI(); const f = this.$('hurt'); if (f) { f.classList.add('on'); setTimeout(() => f.classList.remove('on'), 160); } }
+  }
+  /** feedback for a blow of ours that landed: the crosshair flashes red (and a short thud for the shooter, who may be far from the victim) */
+  hitMarker(kill) {
+    const c = this.$('cross'); if (c) { c.classList.remove('hit', 'kill'); void c.offsetWidth; c.classList.add(kill ? 'kill' : 'hit'); clearTimeout(this._hm); this._hm = setTimeout(() => c.classList.remove('hit', 'kill'), 220); }
+    this.sfx.play('/damage/df_damage_impact_1.wav', { vol: kill ? 0.5 : 0.3, rate: kill ? 0.8 : 1.4 });
   }
   setHp(hp, max) { this.hp = { hp, max }; this.refreshUI(); }
   died(self) { this.dead = true; this.cancelDraw(); this.vm.setHold(null); this.toast('You died'); const d = this.$('death'); if (d) d.classList.add('on'); this.refreshUI(); }
@@ -115,7 +128,7 @@ export class Weapons {
   update(dt, { speed = 0, air = false } = {}) {
     if (this.draw) this.draw.t += dt;
     const L = this.lightSrc; if (L) this.vm.light(L.sun, L.hemi);
-    this.vm.update(dt, speed, air);
+    this.vm.visible = this.drawn && !this.third && !!this.w && !this.dead; this.vm.update(dt, speed, air);
   }
   resize(aspect) { this.vm.resize(aspect); }
 
@@ -127,6 +140,7 @@ export class Weapons {
       #wname{color:var(--gold,#d9b86a);font-size:15px;letter-spacing:.05em}
       #hpbar{width:240px;height:9px;background:#0009;border:1px solid #000a;border-radius:2px;overflow:hidden}#hpfill{height:100%;background:linear-gradient(#c43,#722);width:100%;transition:width .15s}
       #hotbar{display:flex;gap:3px}#hotbar i{font-style:normal;min-width:54px;padding:2px 4px;background:#000a;border:1px solid #554;border-radius:3px;color:#bba;font-size:11px;text-align:center;white-space:nowrap}#hotbar i.on{border-color:var(--gold,#d9b86a);color:#fff;background:#3a3020cc}
+      #cross.hit{background:#f33!important;box-shadow:0 0 10px 4px #f33;transform:scale(2.2)}#cross.kill{background:#fa0!important;box-shadow:0 0 14px 6px #fa0;transform:scale(3)}
       #hurt{position:fixed;inset:0;pointer-events:none;box-shadow:inset 0 0 120px 30px #a00;opacity:0;transition:opacity .25s;z-index:5}#hurt.on{opacity:.8;transition:none}
       #death{position:fixed;inset:0;pointer-events:none;background:#400a;display:none;align-items:center;justify-content:center;color:#d33;font-size:54px;letter-spacing:.1em;z-index:7}#death.on{display:flex}
       #armory{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(720px,92vw);height:min(560px,80vh);background:#14110fee;border:1px solid #554;border-radius:6px;display:none;flex-direction:column;z-index:30;font:13px Palatino,Georgia,serif;color:#ddd}#armory.on{display:flex}

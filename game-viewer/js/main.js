@@ -15,6 +15,7 @@ import { TouchControls, touchWanted } from './touch.js';
 import { Sfx } from './sfx.js';
 import { CombatFx } from './effects.js';
 import { Weapons } from './weapons.js';
+import { SelfAvatar } from './selfavatar.js';
 
 const $ = id => document.getElementById(id);
 const q = new URLSearchParams(location.search);
@@ -36,6 +37,7 @@ const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(70, 1, 1.5, VIEW * 1.05);
 camera.rotation.order = 'YXZ';
 const post = new Post(renderer); post.enabled = q.get('post') ? q.get('post') !== '0' : S.post !== false; post.ssao = q.get('ssao') ? q.get('ssao') !== '0' : S.ssao !== false; post.grade = q.get('grade') !== '0';
+const body = new THREE.Vector3(), bodyEye = new THREE.Vector3();   // where the player's body stands (feet) / its head: the camera is elsewhere in third person
 let weapons = null;   // js/weapons.js, created once the multiplayer / world exist
 function resize() { renderer.setSize(innerWidth, innerHeight, false); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); weapons?.resize(camera.aspect); const d = renderer.getDrawingBufferSize(new THREE.Vector2()); post.resize(d.x, d.y); }
 addEventListener('resize', resize); resize();
@@ -180,6 +182,17 @@ function frameInner() {
       camera.position.y = Math.max(cy, (under ? fh : Math.max(fh, SEA_LEVEL)) + 1.8);
     }
   }
+  // body and camera: with a weapon drawn (not a staff) the camera orbits behind the player and his own avatar is drawn; sheathed, it is the first-person eye
+  if (mode === 'walk') body.copy(player.pos); else body.set(camera.position.x, camera.position.y - player.eye, camera.position.z);
+  bodyEye.set(body.x, body.y + player.eye, body.z);
+  const third = mode === 'walk' && weapons.third, hv = Math.hypot(vel.x, vel.z);
+  if (third) {
+    const cp = Math.cos(pitch), f3 = fwd.set(-Math.sin(yaw) * cp, Math.sin(pitch), -Math.cos(yaw) * cp);
+    camera.position.copy(bodyEye).addScaledVector(f3, -4.6 * (1 + Math.max(0, -pitch) * 0.2)); camera.position.x += Math.cos(yaw) * 0.8; camera.position.z -= Math.sin(yaw) * 0.8; camera.position.y += 0.5;
+    const gc = world.groundHeight(camera.position.x, camera.position.z, camera.position.y + 3); if (gc != null && gc > -1e8 && camera.position.y < gc + 0.7) camera.position.y = gc + 0.7;
+  }
+  selfAv.show(third); selfAv.update(dt, body, yaw, hv, mode === 'fly' || !player.onGround, player.swim, { x: vel.x * Math.cos(yaw) - vel.z * Math.sin(yaw), z: -vel.x * Math.sin(yaw) - vel.z * Math.cos(yaw) });
+  weapons.eye = bodyEye;
   camera.updateMatrixWorld(true);
   mp.update(dt, performance.now() / 1000);
   weapons.canFight = mode === 'walk'; weapons.update(dt, { speed: mode === 'walk' ? Math.hypot(vel.x, vel.z) : 0, air: mode === 'fly' || !player.onGround }); fx.update(dt); sfx.listen(camera);
@@ -259,10 +272,11 @@ setTimeout(setModeLabel, 0);
 window.dbg = { post, player, tp: (x, y, z) => { camera.position.set(x, y, -z); player.pos.set(x, y - player.eye, -z); player.vy = 0; }, camera, world, env, music, scene, renderer, ambience, set: (x, y, z) => camera.position.set(x, y, -z), look: (yw, pt) => { yaw = yw; pitch = pt; } };
 const intro = $('intro');
 const mp = new Multiplayer({ scene, camera, world, $, toast,
-  getSelf: () => ({ x: camera.position.x, y: camera.position.y - player.eye, z: camera.position.z, yaw: camera.rotation.y, swim: mode === 'walk' && player.swim, air: mode === 'fly' || !player.onGround, fly: mode === 'fly' }) });
+  getSelf: () => ({ x: body.x, y: body.y, z: body.z, yaw: camera.rotation.y, swim: mode === 'walk' && player.swim, air: mode === 'fly' || !player.onGround, fly: mode === 'fly' }) });
 window.dbg.mp = mp;
 const sfx = new Sfx(), fx = new CombatFx({ scene, world, sfx, factory: mp.factory, data: await J('/data/combatfx.json') });
 weapons = new Weapons({ camera, post, world, factory: mp.factory, sfx, fx, net: mp.combat, toast, $, light: { sun: sunL, hemi } });
+const selfAv = new SelfAvatar({ scene, factory: mp.factory, profile: () => mp.profile }); weapons.self = selfAv;
 await weapons.init(); mp.bindCombat(weapons, fx, sfx); mp.onRespawn = () => { pickSpawn(curSpawn); toast('You got up again'); }; weapons.resize(camera.aspect); Object.assign(window.dbg, { weapons, fx, sfx });
 let ready = false, started = false;
 let bootTimer = 0;
