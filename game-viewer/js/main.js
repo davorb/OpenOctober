@@ -16,6 +16,7 @@ import { Sfx } from './sfx.js';
 import { CombatFx } from './effects.js';
 import { Weapons } from './weapons.js';
 import { SelfAvatar } from './selfavatar.js';
+import { Stamina, STAMINA } from './stamina.js';
 
 const $ = id => document.getElementById(id);
 const q = new URLSearchParams(location.search);
@@ -139,6 +140,7 @@ let lastRegion = null;
 function banner(text) { const b = $('banner'); b.textContent = text; b.style.fontSize = '40px'; b.style.top = '16%'; b.classList.add('on'); clearTimeout(b._h); b._h = setTimeout(() => b.classList.remove('on'), 4200); }
 
 // ---- loop
+const stamina = new Stamina();
 const clock = new THREE.Clock(); let underAmt = 0, fpsAcc = 0, fpsN = 0, fps = 0, cur = null;
 const fwd = new THREE.Vector3(), right = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0), mv = new THREE.Vector3();
 function frame() {
@@ -158,14 +160,18 @@ function frameInner() {
     fx += touch.x; fz += touch.y;
     const l = Math.max(1, Math.hypot(fx, fz)), s = Math.sin(yaw), c = Math.cos(yaw);
     // game speeds: W = run, Ctrl = walk, Shift = sprint (see SPEEDS)
-    const sp = player.swim ? (run ? SPEEDS.swim * 1.75 : SPEEDS.swim) : keys.has('ControlLeft') ? SPEEDS.walk : run ? SPEEDS.sprint : SPEEDS.run;
+    const moving = fx !== 0 || fz !== 0, sprinting = run && moving && stamina.canSprint && !keys.has('ControlLeft');
+    stamina.update(dt, sprinting);
+    const sp = player.swim ? (sprinting ? SPEEDS.swim * 1.75 : SPEEDS.swim) : keys.has('ControlLeft') ? SPEEDS.walk : sprinting ? SPEEDS.sprint : SPEEDS.run;
     const tx = (fx * c + fz * s) / l * sp, tz = (-fx * s + fz * c) / l * sp;
     const k = 1 - Math.exp(-dt * (player.onGround ? 12 : 2.5));          // less air control
     vel.x += (tx - vel.x) * k; vel.z += (tz - vel.z) * k;
-    let left = dt; const jump = keys.has('Space');
+    let left = dt; const jump = keys.has('Space') && stamina.canJump(), wasGround = player.onGround;
     while (left > 0) { const h = Math.min(left, 1 / 60); player.update(h, vel.x, vel.z, jump); left -= h; }
+    if (jump && wasGround && !player.onGround && player.vy > 0) stamina.spend(STAMINA.jumpCost);
     camera.position.set(player.pos.x, player.pos.y + player.eye, player.pos.z);
   } else {
+    stamina.update(dt, false);
     camera.getWorldDirection(fwd); right.crossVectors(fwd, up).normalize();
     mv.set(0, 0, 0);
     if (keys.has('KeyW')) mv.add(fwd); if (keys.has('KeyS')) mv.sub(fwd);
@@ -278,7 +284,7 @@ window.dbg.mp = mp;
 const sfx = new Sfx(), fx = new CombatFx({ scene, world, sfx, factory: mp.factory, data: await J('/data/combatfx.json') });
 weapons = new Weapons({ camera, post, world, factory: mp.factory, sfx, fx, net: mp.combat, toast, $, light: { sun: sunL, hemi } });
 const selfAv = new SelfAvatar({ scene, factory: mp.factory, profile: () => mp.profile }); weapons.self = selfAv;
-await weapons.init(); mp.bindCombat(weapons, fx, sfx); mp.onRespawn = () => { pickSpawn(curSpawn); toast('You got up again'); }; weapons.resize(camera.aspect); Object.assign(window.dbg, { weapons, fx, sfx });
+await weapons.init(); mp.bindCombat(weapons, fx, sfx); mp.onRespawn = () => { stamina.reset(); pickSpawn(curSpawn); toast('You got up again'); }; weapons.resize(camera.aspect); Object.assign(window.dbg, { weapons, fx, sfx });
 let ready = false, started = false;
 let bootTimer = 0;
 function bootProgress() {
