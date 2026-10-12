@@ -49,7 +49,7 @@ function fragment(N) {
 ${fogUniforms}${fogFn}
 uniform sampler2D tDetail; uniform float uFade; uniform float uTile; uniform float uHB_sharp; uniform float uHB_bias;
 uniform vec3 uSunDir; uniform vec3 uAmbSky; uniform vec3 uAmbGround; uniform vec3 uMoonDir[3]; uniform vec3 uMoonColor[3];
-uniform float uSlot[${N}];
+uniform float uSlot[${N}]; uniform float uParallax;
 uniform sampler2D uShadowMap; uniform mat4 uShadowMat; uniform float uShadowOn; uniform float uShadowTexel;
 uniform vec3 uDynW[16]; uniform vec3 uDynCol[16]; uniform float uDynRad[16];
 ${Array.from({ length: N }, (_, i) => `uniform sampler2D tD${i}; uniform sampler2D tN${i}; uniform float uHasN${i};`).join('\n')}
@@ -72,12 +72,13 @@ void main() {
   // triplanar weights (steep faces use the vertical projections)
   vec3 bw = pow(max(abs(n) - vec3(0.2, 0.7, 0.2), vec3(0.0)), vec3(3.0));
   bw /= max(dot(bw, vec3(1.0)), 1e-5);
-  float w[${N}]; float h[${N}]; float ao[${N}]; vec2 nm[${N}]; vec3 alb[${N}];
+  float w[${N}]; float h[${N}]; float ao[${N}]; vec2 nm[${N}]; vec3 alb[${N}]; vec3 albG[${N}];
   float wTotal = 0.0;
 `;
   for (let i = 0; i < N; i++) s += `
   w[${i}] = slotW(uSlot[${i}]); wTotal += w[${i}];
-  alb[${i}] = textureGrad(tD${i}, p.xz, dx.xz, dy.xz).rgb * bw.y;
+  albG[${i}] = textureGrad(tD${i}, p.xz, dx.xz, dy.xz).rgb;
+  alb[${i}] = albG[${i}] * bw.y;
   if (bw.x > 0.003) alb[${i}] += textureGrad(tD${i}, p.zy, dx.zy, dy.zy).rgb * bw.x;
   if (bw.z > 0.003) alb[${i}] += textureGrad(tD${i}, p.xy, dx.xy, dy.xy).rgb * bw.z;
   h[${i}] = 0.5; ao[${i}] = 1.0; nm[${i}] = vec2(0.0);
@@ -95,6 +96,20 @@ void main() {
   for (let i = 0; i < N; i++) s += `  { float ws = hw[${i}] * inv; col += alb[${i}] * ws; aoB += ao[${i}] * ws; nB += nm[${i}] * ws; }\n`;
   s += `
   if (hwSum <= 1e-6) { col = alb[0]; aoB = 1.0; }
+  // Parallax, after the game's PHASE 3a block in roa_1d_terrain.teq (shipped disabled): single-step, offset-limited, ground (XZ) leg only,
+  //   pOfs = toEye.xz/|toEye| * (height - 0.5) * 0.020 * smoothstep(12, 3, dist)    (material-UV units; no divide by toEye.y)
+  // Blend weights stay the unoffset ones; only the surface is resampled. The game's baked height payload (normal map .r) is a constant 255 in
+  // the shipped files, so the height here is a proxy: the unoffset albedo's perceptual brightness.
+  float pFade = smoothstep(12.0, 3.0, dist) * uParallax;
+  if (pFade > 0.0 && bw.y > 0.003 && hwSum > 1e-6) {
+    float ph = sqrt(clamp(dot(col, vec3(0.299, 0.587, 0.114)), 0.0, 1.0));
+    vec2 pOfs = (cameraPosition.xz - vWorld.xz) / max(dist, 1e-3) * ((ph - 0.5) * 0.020 * pFade);
+    vec3 dCol = vec3(0.0); vec2 dN = vec2(0.0);
+`;
+  for (let i = 0; i < N; i++) s += `    { float ws = hw[${i}] * inv * bw.y; dCol += (textureGrad(tD${i}, p.xz + pOfs, dx.xz, dy.xz).rgb - albG[${i}]) * ws;
+      if (uHasN${i} > 0.5) dN += (textureGrad(tN${i}, p.xz + pOfs, dx.xz, dy.xz).ag * 2.0 - 1.0 - nm[${i}]) * ws; }\n`;
+  s += `    col += dCol; nB += dN;
+  }
   // shared detail texture: .r macro brightness (fades in with distance, breaks tiling), .ag micro normal (near field only)
   vec2 duv = vWorld.xz * 0.7;
   vec4 mac = texture2D(tDetail, vWorld.xz / 650.0);
@@ -129,7 +144,7 @@ export function makeTerrainMaterial(group, tex, env, fade) {
   const N = Math.max(1, pairs.length);
   const uniforms = {
     ...env.u, tDetail: { value: tex.detail }, uFade: fade, uTile: { value: 0.058 },
-    uHB_sharp: { value: 3.0 }, uHB_bias: { value: 0.30 },
+    uHB_sharp: { value: 3.0 }, uHB_bias: { value: 0.30 }, uParallax: env.u.uParallax,
     uSlot: { value: Array.from({ length: N }, (_, i) => pairs[i]?.[1] ?? 0) },
   };
   for (let i = 0; i < N; i++) {

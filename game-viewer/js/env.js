@@ -54,7 +54,7 @@ export class Environment {
       uTime: { value: 0 }, uViewDist: { value: 3000 },
       uWind: { value: new THREE.Vector3(0, 0, 0) },
     };
-    this.u.uShadowMap = { value: null }; this.u.uShadowMat = { value: new THREE.Matrix4() }; this.u.uShadowOn = { value: 0 }; this.u.uShadowTexel = { value: 1 / 2048 };
+    this.u.uShadowMap = { value: null }; this.u.uShadowMat = { value: new THREE.Matrix4() }; this.u.uShadowOn = { value: 0 }; this.u.uParallax = { value: 1 }; this.u.uShadowTexel = { value: 1 / 2048 };
     addLightUniforms(this.u);
     this.state = {};
     this.regionW = new Map(); this.regionT = new Map();   // area name -> weight (smoothed / target)

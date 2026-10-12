@@ -35,6 +35,7 @@ const [worldData, musicAreas, tileNames, envData, terrainManifest, props, spawns
 const env = new Environment(envData);
 env.config = q.get('env') || env.config;
 if (q.get('t')) env.time = +q.get('t');
+const parallaxOn = q.get('parallax') ? +q.get('parallax') || 1 : 1; if (q.get('parallax')) env.u.uParallax.value = +q.get('parallax');
 renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFShadowMap;
 const sunL = new THREE.DirectionalLight(0xffffff, Math.PI * 1.6);
 sunL.shadow.bias = -0.0004; sunL.shadow.normalBias = 0.5; scene.add(sunL.target);
@@ -84,6 +85,7 @@ addEventListener('keydown', e => {
   if (e.repeat) return;
   keys.add(e.code);
   const hit = c => e.code === c;
+  if (hit('KeyP')) { env.u.uParallax.value = env.u.uParallax.value ? 0 : parallaxOn; toast(env.u.uParallax.value ? 'Parallax on' : 'Parallax off'); }
   if (hit('KeyT')) env.auto = !env.auto;
   if (hit('BracketRight')) env.time = (env.time + (e.shiftKey ? 120 : 30)) % 1440;
   if (hit('BracketLeft')) env.time = (env.time - (e.shiftKey ? 120 : 30) + 1440) % 1440;
