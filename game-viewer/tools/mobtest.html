@@ -16,7 +16,7 @@ for (let i = 0; i < N; i++) {
   const o = cloneSkinned(tpl), root = new THREE.Group(); o.traverse(n => { if (n.isMesh) n.frustumCulled = false; }); root.add(o); root.scale.setScalar(S);
   const h = new THREE.Group(); h.add(root); h.position.x = (i - (N - 1) / 2) * 4.2; h.rotation.y = Math.PI / 2;   // face +X (screen right)
   sc.add(h); const m = { bones: {}, breath: 0, phase: (i / N) * Math.PI * 2 }; collectBones(o, tpl, m.bones); ms.push(m);
-  if (clips) { m.part = bindClips(o, clips); m.o = o; } else gait(m, Math.sin(m.phase), Math.cos(m.phase), 1);
+  if (clips) { m.part = bindClips(o, clips, tpl.userData.flip); m.o = o; } else gait(m, Math.sin(m.phase), Math.cos(m.phase), 1);
 }
 const cam = new THREE.PerspectiveCamera(36, innerWidth / innerHeight, 0.1, 100); cam.position.set(0, 2.0, 30); cam.lookAt(0, 1.0, 0);
 if (clips) { const c = clips[clipName]; window.__info = { name, clip: c?.name, nk: c?.nk, speed: walkSpeed(ms[0].o, ms[0].part) };

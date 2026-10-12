@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { AVATAR_SCALE, cloneSkinned } from './avatars.js';
-import { loadClips, bindClips, applyClip, walkSpeed, facing } from './mobanim.js';
+import { loadClips, bindClips, applyClip, walkSpeed, facing, needsFlip, flipSkeleton } from './mobanim.js';
 
 export const OP_MOBS = 3;
 const FLAG_SNAP = 4;
@@ -54,6 +54,7 @@ function fixAlpha(mt) {
 /** Loaded GLB scene -> template: no frustum culling (bind-pose bounds don't follow the pose), double-sided, and each gait bone's rest rotations. */
 export function prepareTemplate(sc) {
   sc.updateMatrixWorld(true); sc.userData.rig = {};
+  if (needsFlip(sc)) { flipSkeleton(sc); sc.userData.flip = true; }
   sc.traverse(n => {
     if (n.isMesh) { n.frustumCulled = false; for (const mt of [].concat(n.material)) { mt.side = THREE.DoubleSide; fixAlpha(mt); } }
     if (!n.isBone) return;
@@ -102,12 +103,12 @@ export class MobWorld {
       for (const f of files) {
         const t = await this.template(f); if (!t) continue;
         const o = cloneSkinned(t); root.add(o); collectBones(o, t, bones);
-        const clips = await loadClips(f), part = clips ? bindClips(o, clips) : null;
-        if (!this.face.has(f)) this.face.set(f, facing(o, part, f));
+        const clips = await loadClips(f), part = clips ? bindClips(o, clips, t.userData.flip) : null;
+        if (!this.face.has(f)) this.face.set(f, facing(o, part));
         face ??= this.face.get(f);
         if (part) { parts.push(part); if (!ref) { if (!this.stride.has(f)) this.stride.set(f, walkSpeed(o, part)); ref = this.stride.get(f); } }
       }
-      root.scale.setScalar(AVATAR_SCALE); root.rotation.y = face > 0 ? Math.PI : 0;   // the meshes face either way along z; the holder's yaw points -Z forward
+      root.scale.setScalar(AVATAR_SCALE); root.rotation.y = face < 0 ? Math.PI : 0;   // the meshes face either way along z; the server's yaw 0 is travel towards +Z (checked against live mob movement)
       const holder = new THREE.Group(); holder.add(root);
       if (this.mobs.get(m.id) === m) { m.obj = holder; m.model = root; m.face = face ?? -1; m.bones = bones; m.parts = parts.length ? parts : null; m.refSpeed = ref ? ref * AVATAR_SCALE : null; m.rigged = Object.keys(bones).some(k => /^[LR](Leg|Arm)1$/.test(k)); } else m.dead = true;
     } catch (e) { console.warn('mob model', m.kind, e); } finally { m.building = false; m.tried = true; this.building--; }

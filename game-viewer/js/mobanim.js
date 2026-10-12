@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 
 const cache = new Map(), q = new THREE.Quaternion(), v = new THREE.Vector3();
+const Y180 = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
 export const CLIPS = ['idle', 'walk'];
 const json = u => fetch(u).then(r => r.ok ? r.json() : null).catch(() => null);
 let index = null;
@@ -41,20 +42,45 @@ export function evalChannel(ch, f, dt) {
 }
 
 /** Bone tracks of every clip for one clone of the model: [{ bone, ch }].  Bones not named in a clip keep their rest pose. */
-export function bindClips(clone, clips) {
+export function bindClips(clone, clips, flip = false) {
   const byName = {}; clone.traverse(n => { if (n.isBone) byName[n.name] = n; });
   const tracks = {};
-  for (const k of CLIPS) if (clips[k]) tracks[k] = Object.entries(clips[k].bones).filter(([n]) => byName[n]).map(([n, ch]) => ({ bone: byName[n], ch }));
+  for (const k of CLIPS) if (clips[k]) tracks[k] = Object.entries(clips[k].bones).filter(([n]) => byName[n]).map(([n, ch]) => ({ bone: byName[n], ch, root: flip && !byName[n].parent?.isBone }));
   return { clips, tracks };
+}
+
+/** Many models (about 100, the ones whose skeleton faces the other way) have their skeleton turned 180 degrees about Y relative to the mesh: each vertex sits at
+ *  the half-turned position of the bone it is skinned to.  The rest pose hides it (skin matrices cancel), but any bone rotation swings the vertices about a
+ *  pivot on the far side of the body (arms like wings).  Compare the fit both ways on the rest pose. */
+export function needsFlip(sc) {
+  sc.updateMatrixWorld(true);
+  let plain = 0, turned = 0, n = 0; const p = new THREE.Vector3(), b = new THREE.Vector3();
+  sc.traverse(m => {
+    if (!m.isSkinnedMesh) return;
+    const si = m.geometry.attributes.skinIndex, sw = m.geometry.attributes.skinWeight, pos = m.geometry.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      if (sw.getComponent(i, 0) < 0.99) continue;
+      p.fromBufferAttribute(pos, i).applyMatrix4(m.matrixWorld); b.setFromMatrixPosition(m.skeleton.bones[si.getComponent(i, 0)].matrixWorld);
+      plain += p.distanceTo(b); turned += p.set(-p.x, p.y, -p.z).distanceTo(b); n++;
+    }
+  });
+  return n > 0 && turned < plain * 0.8;
+}
+/** Turn the skeleton roots half a turn about Y and rebuild the inverse bind matrices from that pose (the mesh itself stays). */
+export function flipSkeleton(sc) {
+  sc.traverse(b => { if (b.isBone && !b.parent?.isBone) { b.position.set(-b.position.x, b.position.y, -b.position.z); b.quaternion.premultiply(Y180); } });
+  sc.updateMatrixWorld(true);
+  sc.traverse(m => { if (m.isSkinnedMesh) m.skeleton.calculateInverses(); });
 }
 
 /** Pose the bones at frame f of a clip; w < 1 blends over whatever pose the bones hold now. */
 export function applyClip(part, name, f, w = 1) {
   const clip = part.clips[name], tr = part.tracks[name]; if (!clip || !tr) return;
   const dt = clip.dt;
-  for (const { bone, ch } of tr) {
+  for (const { bone, ch, root } of tr) {
     v.set(evalChannel(ch[0], f, dt), evalChannel(ch[1], f, dt), -evalChannel(ch[2], f, dt));
     q.set(-evalChannel(ch[3], f, dt), -evalChannel(ch[4], f, dt), evalChannel(ch[5], f, dt), evalChannel(ch[6], f, dt)).normalize();
+    if (root) { v.set(-v.x, v.y, -v.z); q.premultiply(Y180); }   // see needsFlip
     if (w >= 1) { bone.position.copy(v); bone.quaternion.copy(q); } else { bone.position.lerp(v, w); bone.quaternion.slerp(q, w); }
   }
 }
@@ -75,28 +101,18 @@ export function walkSpeed(clone, part) {
   return stride > 1 ? stride / (0.6 * clip.period) : null;
 }
 
-/** Which way the model's front points along its own z axis: 1 = +Z, -1 = -Z (the meshes are mixed, ~55% / 45%).  The walk clip knows: a foot on the ground travels
- *  backwards relative to the body.  Without a clip (or too little foot travel) vote on rest-pose cues that sit ahead of their joint: toes, fingers, jaw, head.
- *  Quadrupeds with static feet get it wrong sometimes, so FACE_FIX overrides (checked by eye).  Call on an unposed clone. */
-const FACE_FIX = { wolf: 1, akathar: 1, hivekin_queen: 1, gorra_slave: 1, evil_eye: 1 };
-export function facing(clone, part, file) {
-  if (FACE_FIX[file]) return FACE_FIX[file];
-  const feet = [], by = {}; clone.traverse(n => { if (!n.isBone) return; by[n.name.replace(/^[a-z]+_f/, '')] ??= n; if (/(Leg|Arm)Ankle$/.test(n.name)) feet.push(n); });
-  clone.updateMatrixWorld(true);
-  const z = n => v.setFromMatrixPosition(by[n].matrixWorld).z, ahead = (a, b) => by[a] && by[b] ? z(a) - z(b) : 0;
-  const digit = (k, p) => Object.keys(by).find(n => n.startsWith(k + 'Digit') || n.startsWith(p));
-  const toe = digit('LLegAnkle'), finger = Object.keys(by).find(n => n.startsWith('LArmPalmDigit'));
-  const vote = Math.sign(toe ? ahead(toe, 'LLegAnkle') : 0) * 2 + Math.sign(finger ? ahead(finger, 'LArmPalm') : 0) * 2 + Math.sign(ahead('Jaw', 'Head')) + Math.sign(ahead('Head', 'Pelvis'));
-  const clip = part?.clips.walk; let stance = 0;
-  if (clip && feet.length) {
-    for (const ank of feet) {
-      const ys = [], zs = [];
-      for (let f = 0; f < clip.nk; f++) { applyClip(part, 'walk', f); clone.updateMatrixWorld(true); v.setFromMatrixPosition(ank.matrixWorld); ys.push(v.y); zs.push(v.z); }
-      const thr = [...ys].sort((a, b) => a - b)[Math.floor(ys.length * 0.4)]; let s = 0, n = 0;
-      for (let f = 0; f < ys.length - 1; f++) if (ys[f] <= thr && ys[f + 1] <= thr) { s += zs[f + 1] - zs[f]; n++; }
-      if (n) stance += s / n;
-    }
+/** Which way the model's front points along its own z axis (after flipSkeleton nearly every model faces +Z, so that is the default).  A walk clip that moves the
+ *  stance foot clearly the other way overrides it: a foot on the ground travels backwards relative to the body.  Call on an unposed clone. */
+export function facing(clone, part) {
+  const clip = part?.clips.walk, feet = []; clone.traverse(n => { if (n.isBone && /(Leg|Arm)Ankle$/.test(n.name)) feet.push(n); });
+  if (!clip || !feet.length) return 1;
+  let stance = 0;
+  for (const ank of feet) {
+    const ys = [], zs = [];
+    for (let f = 0; f < clip.nk; f++) { applyClip(part, 'walk', f); clone.updateMatrixWorld(true); v.setFromMatrixPosition(ank.matrixWorld); ys.push(v.y); zs.push(v.z); }
+    const thr = [...ys].sort((a, b) => a - b)[Math.floor(ys.length * 0.4)]; let s = 0, n = 0;
+    for (let f = 0; f < ys.length - 1; f++) if (ys[f] <= thr && ys[f + 1] <= thr) { s += zs[f + 1] - zs[f]; n++; }
+    if (n) stance += s / n;
   }
-  if (Math.abs(stance) > 0.05) return stance > 0 ? -1 : 1;   // the stance foot moves towards the back
-  return vote > 0 ? 1 : -1;
+  return stance > 0.5 ? -1 : 1;
 }
