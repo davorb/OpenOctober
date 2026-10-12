@@ -1,11 +1,12 @@
 // Server-owned mobs (see ../../game-server/src/mobs.rs and proto.rs OP_MOBS): the server streams the ones inside our interest radius at ~5 Hz;
 // we interpolate them, drop them onto the terrain and show the game's own monster model (data/mobmodels.json <- tools/build_mobmodels.js,
-// converted/animated/<name>.glb, skinned, textures embedded). The game's keyframes (export/mesh/sfa/*.sfas) are a compressed curve format nobody has
-// decoded, so the walk is procedural: nearly every monster skeleton uses the humanoid bone names (quadrupeds' front legs are the 'arms'), and we swing
-// legs / arms, twist the spine and sway the tail about fixed model axes, the same way avatars.js poses players.
+// converted/animated/<name>.glb, skinned, textures embedded), playing the game's own idle / walk clips (mobanim.js). Models without clips (flying
+// and swimming ones) fall back to a procedural walk: nearly every monster skeleton uses the humanoid bone names (quadrupeds' front legs are the 'arms'),
+// and gait() swings legs / arms, twists the spine and sways the tail about fixed model axes, the same way avatars.js poses players.
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { AVATAR_SCALE, cloneSkinned } from './avatars.js';
+import { loadClips, bindClips, applyClip, walkSpeed } from './mobanim.js';
 
 export const OP_MOBS = 3;
 const FLAG_SNAP = 4;
@@ -14,7 +15,7 @@ const MODEL_NEAR = 300, TAG_NEAR = 45, SHADOW_NEAR = 70, MAX_BUILD = 3;
 const AX_X = new THREE.Vector3(1, 0, 0), AX_Y = new THREE.Vector3(0, 1, 0), AX_Z = new THREE.Vector3(0, 0, 1);
 const qa = new THREE.Quaternion(), qb = new THREE.Quaternion();
 const GAIT = ['Pelvis', 'LLeg1', 'RLeg1', 'LLeg2', 'RLeg2', 'LArm1', 'RArm1', 'Spine1', 'Spine2', 'Ribcage', 'Neck1', 'Head', 'Tail1', 'Tail2', 'Tail3', 'Tail4', 'Tail5'];
-const POSE_NEAR = 140;
+const POSE_NEAR = 140, FADE = 0.25;   // clip crossfade (s)
 const lerpAngle = (a, b, t) => a + Math.atan2(Math.sin(b - a), Math.cos(b - a)) * t;
 const DIFF_COLOR = { 'Very Easy': '#9fd68a', Easy: '#9fd68a', Medium: '#f1dfae', Hard: '#f0b070', 'Very Hard': '#e88a6a', Boss: '#e0607a', Champion: '#d070e0' };
 
@@ -69,7 +70,7 @@ export class MobWorld {
   constructor({ scene, camera, world }) {
     Object.assign(this, { scene, camera, world });
     this.gltf = new GLTFLoader(); this.types = new Map(); this.mobs = new Map(); this.tpl = new Map(); this.tags = new Map();
-    this.models = null; this.building = 0; this.tmp = {};
+    this.models = null; this.building = 0; this.tmp = {}; this.stride = new Map();
   }
 
   clear() { for (const m of this.mobs.values()) this.release(m); this.mobs.clear(); this.types.clear(); }
@@ -96,13 +97,15 @@ export class MobWorld {
     m.building = true; this.building++;
     try {
       const files = (await this.models)[m.kind]?.models || [], root = new THREE.Group();
-      const bones = {};
+      const bones = {}, parts = []; let ref = null;
       for (const f of files) {
         const t = await this.template(f); if (!t) continue;
         const o = cloneSkinned(t); root.add(o); collectBones(o, t, bones);
+        const clips = await loadClips(f);
+        if (clips) { const part = bindClips(o, clips); parts.push(part); if (!ref) { if (!this.stride.has(f)) this.stride.set(f, walkSpeed(o, part)); ref = this.stride.get(f); } }
       }
       root.scale.setScalar(AVATAR_SCALE); const holder = new THREE.Group(); holder.add(root);
-      if (this.mobs.get(m.id) === m) { m.obj = holder; m.model = root; m.bones = bones; m.rigged = Object.keys(bones).some(k => /^[LR](Leg|Arm)1$/.test(k)); } else m.dead = true;
+      if (this.mobs.get(m.id) === m) { m.obj = holder; m.model = root; m.bones = bones; m.parts = parts.length ? parts : null; m.refSpeed = ref ? ref * AVATAR_SCALE : null; m.rigged = Object.keys(bones).some(k => /^[LR](Leg|Arm)1$/.test(k)); } else m.dead = true;
     } catch (e) { console.warn('mob model', m.kind, e); } finally { m.building = false; m.tried = true; this.building--; }
   }
   tagFor(kind) {
@@ -144,7 +147,8 @@ export class MobWorld {
       const moving = st.speed > 0.15; m.amp += ((moving ? 1 : 0) - m.amp) * Math.min(1, dt * 6);
       if (moving) m.phase += dt * Math.PI * st.speed / (0.4 * Math.max(0.8, m.height));   // ~0.4 body heights per step; the phase covers two steps
       m.breath += dt;
-      if (m.rigged) { if (dist < POSE_NEAR || !m.posed) { gait(m, Math.sin(m.phase), Math.cos(m.phase), m.amp); m.posed = true; } }
+      if (m.parts) this.animate(m, st, dt, dist);
+      else if (m.rigged) { if (dist < POSE_NEAR || !m.posed) { gait(m, Math.sin(m.phase), Math.cos(m.phase), m.amp); m.posed = true; } }
       else { m.obj.position.y += Math.abs(Math.sin(m.phase)) * 0.05 * m.amp; m.model.rotation.z = Math.sin(m.phase) * 0.04 * m.amp; }   // spiders, serpents, ...: no leg bones to swing, so bob and sway
       const shadow = dist < SHADOW_NEAR; if (shadow !== m.cast) { m.cast = shadow; m.obj.traverse(n => { if (n.isMesh) n.castShadow = shadow; }); }
       if (dist < TAG_NEAR) {
@@ -153,6 +157,25 @@ export class MobWorld {
         const th = 20 * fovK * dist; m.tag.position.set(st.x, st.y + m.height + 0.2, st.z); m.tag.scale.set(th * m.tag.userData.aspect, th, 1);
       } else if (m.tag?.parent) this.scene.remove(m.tag);
     }
+  }
+
+  /** Idle / walk clips: the one for the current ground speed, crossfaded from the previous one. The walk plays at the rate that keeps the feet on the ground. */
+  animate(m, st, dt, dist) {
+    const part = m.parts[0], c = part.clips;
+    let want = st.speed > 0.15 && c.walk ? 'walk' : 'idle';
+    if (!c[want]) want = c.walk ? 'walk' : 'idle';
+    m.t ||= {};
+    if (m.clip == null) { m.clip = want; m.t[want] = Math.random() * c[want].period; m.fade = 1; }
+    if (want !== m.clip) { m.prev = m.clip; m.clip = want; m.fade = 0; m.t[want] ??= 0; }
+    const rate = want === 'walk' && m.refSpeed ? Math.min(2.2, Math.max(0.45, st.speed / m.refSpeed)) : 1;
+    for (const k of [m.clip, m.prev]) if (k) m.t[k] = (m.t[k] + dt * (k === 'idle' ? 1 : rate)) % c[k].period;
+    if (dist >= POSE_NEAR && m.posed) return;
+    m.posed = true; m.fade = Math.min(1, m.fade + dt / FADE);
+    for (const p of m.parts) {
+      if (m.fade < 1 && m.prev && p.clips[m.prev]) { applyClip(p, m.prev, m.t[m.prev] / p.clips[m.prev].dt); applyClip(p, m.clip, m.t[m.clip] / p.clips[m.clip].dt, m.fade); }
+      else applyClip(p, m.clip, m.t[m.clip] / p.clips[m.clip].dt);
+    }
+    if (m.fade >= 1) m.prev = null;
   }
 
   /** Radar points: x/z of every streamed mob. */

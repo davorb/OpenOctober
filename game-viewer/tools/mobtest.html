@@ -1,12 +1,13 @@
 <!doctype html>
-<!-- Dev harness for the mob walk cycle (js/mobs.js gait()): four copies of one monster at different stride phases.  http://localhost:8080/tools/mobtest.html?m=troll  (m = converted/animated/<name>.glb) --><meta charset="utf-8"><body style="margin:0;background:#789"><canvas id="c" style="width:100vw;height:100vh;display:block"></canvas>
+<!-- Dev harness for the mob animations: four copies of one monster at different phases of a clip (js/mobanim.js; ?g=1 uses the procedural gait() instead).  http://localhost:8080/tools/mobtest.html?m=troll&c=walk  (m = converted/animated/<name>.glb, c = idle|walk) --><meta charset="utf-8"><body style="margin:0;background:#789"><canvas id="c" style="width:100vw;height:100vh;display:block"></canvas>
 <script type="importmap">{"imports":{"three":"/vendor/three/build/three.module.js","three/addons/":"/vendor/three/examples/jsm/"}}</script>
 <script type="module">
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { cloneSkinned } from '/js/avatars.js';
 import { prepareTemplate, collectBones, gait } from '/js/mobs.js';
-const name = new URLSearchParams(location.search).get('m') || 'tiger', N = 4;
+import { loadClips, bindClips, applyClip, walkSpeed } from '/js/mobanim.js';
+const q = new URLSearchParams(location.search), name = q.get('m') || 'tiger', clipName = q.get('c') || 'walk', N = 4, clips = q.get('g') ? null : await loadClips(name);
 const r = new THREE.WebGLRenderer({ canvas: document.getElementById('c'), antialias: true, preserveDrawingBuffer: true }); r.setSize(innerWidth, innerHeight, false); r.outputColorSpace = THREE.SRGBColorSpace;
 const sc = new THREE.Scene(); sc.background = new THREE.Color(0x7788aa); sc.add(new THREE.HemisphereLight(0xffffff, 0x665544, 3)); const dl = new THREE.DirectionalLight(0xffffff, 2); dl.position.set(3, 5, 4); sc.add(dl);
 const g = await new GLTFLoader().loadAsync(`/converted/animated/${name}.glb`), tpl = prepareTemplate(g.scene), S = 0.0254 * 1.5;
@@ -15,8 +16,10 @@ for (let i = 0; i < N; i++) {
   const o = cloneSkinned(tpl), root = new THREE.Group(); o.traverse(n => { if (n.isMesh) n.frustumCulled = false; }); root.add(o); root.scale.setScalar(S);
   const h = new THREE.Group(); h.add(root); h.position.x = (i - (N - 1) / 2) * 4.2; h.rotation.y = Math.PI / 2;   // face +X (screen right)
   sc.add(h); const m = { bones: {}, breath: 0, phase: (i / N) * Math.PI * 2 }; collectBones(o, tpl, m.bones); ms.push(m);
-  gait(m, Math.sin(m.phase), Math.cos(m.phase), 1);
+  if (clips) { m.part = bindClips(o, clips); m.o = o; } else gait(m, Math.sin(m.phase), Math.cos(m.phase), 1);
 }
 const cam = new THREE.PerspectiveCamera(36, innerWidth / innerHeight, 0.1, 100); cam.position.set(0, 2.0, 30); cam.lookAt(0, 1.0, 0);
+if (clips) { const c = clips[clipName]; window.__info = { name, clip: c?.name, nk: c?.nk, speed: walkSpeed(ms[0].o, ms[0].part) };
+  const live = !!q.get('live'); const set = t => ms.forEach((m, i) => applyClip(m.part, clipName, ((i / N) * c.period + t) % c.period / c.dt)); set(0); if (live) setInterval(() => set(performance.now() / 1000), 33); }
 (function loop(){ r.render(sc, cam); requestAnimationFrame(loop); })(); document.title = 'ready'; window.__d = { sc, ms, r, cam, tpl };
 </script>
