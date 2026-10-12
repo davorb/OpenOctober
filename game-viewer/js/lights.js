@@ -63,7 +63,7 @@ export class DynLights {
       u.uDynRad.value[n] = K.r;
       if (gl) {   // corona sits on the flame, slightly toward the camera so the torch model does not clip it; brighter at night, size grows a little with distance
         const dist = Math.sqrt(l.d2) + 1, c = u.uDynCol.value[n], a = Math.min(1, 0.35 + night * 0.65) * flick;
-        gl.position.set(l.x, l.y + 0.3, l.z).addScaledVector(this._d.set(camera.position.x - l.x, camera.position.y - l.y, camera.position.z - l.z).normalize(), 0.6);
+        gl.position.set(l.x, l.y, l.z).addScaledVector(this._d.set(camera.position.x - l.x, camera.position.y - l.y, camera.position.z - l.z).normalize(), 0.6);
         gl.scale.setScalar((K.r * 0.15 + dist * 0.008) * (0.7 + 0.3 * a)); gl.visible = true;
         const col = gl.geometry.attributes.color3, m = Math.max(c.r, c.g, c.b, 1e-3);
         for (let v = 0; v < 4; v++) col.setXYZ(v, c.r / m * a, c.g / m * a, c.b / m * a); col.needsUpdate = true;
