@@ -7,6 +7,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{interval, MissedTickBehavior};
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::mobs::Mobs;
 use crate::proto::*;
 
 #[derive(Clone, Debug)]
@@ -15,7 +16,12 @@ pub struct Config {
     pub radius: f32,
     pub max_players: usize,
     pub tick_hz: u32,
+    /// Path of the mob spawn JSON (`game-viewer/data/mobspawns.json`); `None` runs without mobs.
+    pub spawns: Option<String>,
 }
+
+/// Mob positions are sent every this many ticks (they walk at ~1 m/s, so clients interpolate).
+const MOB_EVERY: u32 = 3;
 
 pub struct JoinReq {
     pub name: String,
@@ -40,6 +46,7 @@ struct Player {
     tx: mpsc::Sender<Message>,
     last_chat: Instant,
     last_sent: usize,
+    last_mobs: usize,
     dead: bool,
 }
 
@@ -59,11 +66,20 @@ struct World {
     online: usize,
     cursor: usize,
     tick: u32,
+    mobs: Mobs,
     stats: Stats,
 }
 
 pub async fn run(cfg: Config, mut rx: mpsc::Receiver<Cmd>) {
-    let mut world = World { players: (0..cfg.max_players).map(|_| None).collect(), cfg: cfg.clone(), online: 0, cursor: 0, tick: 0, stats: Stats::default() };
+    let mobs = match &cfg.spawns {
+        Some(path) => Mobs::load(path, cfg.radius).unwrap_or_else(|e| {
+            eprintln!("no mobs: {e}");
+            Mobs::empty()
+        }),
+        None => Mobs::empty(),
+    };
+    println!("{} mobs of {} types", mobs.mobs.len(), mobs.types.len());
+    let mut world = World { players: (0..cfg.max_players).map(|_| None).collect(), cfg: cfg.clone(), online: 0, cursor: 0, tick: 0, mobs, stats: Stats::default() };
     let mut ticker = interval(Duration::from_secs_f64(1.0 / cfg.tick_hz as f64));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut report = interval(Duration::from_secs(5));
@@ -116,7 +132,7 @@ impl World {
             name = format!("Player{id}");
         }
         let info = PlayerInfo { id: id as u16, name, race: req.race, gender: req.gender, gear: clean(&req.gear, MAX_GEAR) };
-        self.players[id] = Some(Player { info, pos: PosUpdate::default(), has_pos: false, tx: req.tx, last_chat: Instant::now() - Duration::from_secs(10), last_sent: 0, dead: false });
+        self.players[id] = Some(Player { info, pos: PosUpdate::default(), has_pos: false, tx: req.tx, last_chat: Instant::now() - Duration::from_secs(10), last_sent: 0, last_mobs: 0, dead: false });
         self.online += 1;
         let _ = req.reply.send(Ok(id as u16));
 
@@ -126,6 +142,13 @@ impl World {
         if me.tx.try_send(Message::Text(welcome)).is_err() {
             self.players[id].as_mut().unwrap().dead = true;
             return;
+        }
+        if !self.mobs.types.is_empty() {
+            let types = serde_json::to_string(&ServerMsg::Mobtypes { types: &self.mobs.types }).unwrap();
+            if self.players[id].as_ref().unwrap().tx.try_send(Message::Text(types)).is_err() {
+                self.players[id].as_mut().unwrap().dead = true;
+                return;
+            }
         }
         let joined = ServerMsg::Joined { player: &me.info };
         let text = serde_json::to_string(&joined).unwrap();
@@ -179,6 +202,7 @@ impl World {
     /// One network tick: build a per-recipient snapshot of everybody within the interest radius (spatial hash, 3x3 cells).
     fn step(&mut self) {
         self.tick = self.tick.wrapping_add(1);
+        self.mobs.step(1.0 / self.cfg.tick_hz as f32);
         let cell = self.cfg.radius.max(1.0);
         let r2 = self.cfg.radius * self.cfg.radius;
         let ents: Vec<(u16, PosUpdate)> = self.players.iter().flatten().filter(|p| p.has_pos).map(|p| (p.info.id, p.pos)).collect();
@@ -213,11 +237,42 @@ impl World {
                     }
                 }
             }
-            if count == 0 && p.last_sent == 0 {
-                continue; // nobody around now or last time: nothing to say
+            if count > 0 || p.last_sent != 0 {
+                p.last_sent = count as usize;
+                buf[5..7].copy_from_slice(&count.to_le_bytes());
+                match p.tx.try_send(Message::Binary(buf.clone())) {
+                    Ok(()) => {
+                        self.stats.bytes_out += buf.len() as u64;
+                        self.stats.snapshots_out += 1;
+                    }
+                    Err(mpsc::error::TrySendError::Full(_)) => self.stats.dropped += 1,
+                    Err(mpsc::error::TrySendError::Closed(_)) => p.dead = true,
+                }
             }
-            p.last_sent = count as usize;
-            buf[5..7].copy_from_slice(&count.to_le_bytes());
+            if self.tick % MOB_EVERY != 0 || self.mobs.mobs.is_empty() {
+                continue;
+            }
+            buf.clear();
+            buf.push(OP_MOBS);
+            buf.extend_from_slice(&self.tick.to_le_bytes());
+            buf.extend_from_slice(&[0, 0]);
+            let mut n: u16 = 0;
+            for i in self.mobs.candidates(p.pos.x, p.pos.z) {
+                let m = &self.mobs.mobs[i as usize];
+                let (ddx, ddz) = (m.pos.x - p.pos.x, m.pos.z - p.pos.z);
+                if ddx * ddx + ddz * ddz > r2 {
+                    continue;
+                }
+                buf.extend_from_slice(&m.id.to_le_bytes());
+                buf.extend_from_slice(&m.kind.to_le_bytes());
+                m.pos.write_body(&mut buf);
+                n += 1;
+            }
+            if n == 0 && p.last_mobs == 0 {
+                continue;
+            }
+            p.last_mobs = n as usize;
+            buf[5..7].copy_from_slice(&n.to_le_bytes());
             match p.tx.try_send(Message::Binary(buf.clone())) {
                 Ok(()) => {
                     self.stats.bytes_out += buf.len() as u64;

@@ -24,7 +24,7 @@ const AX_X = new THREE.Vector3(1, 0, 0), AX_Y = new THREE.Vector3(0, 1, 0), AX_Z
 const qa = new THREE.Quaternion(), qb = new THREE.Quaternion();
 const base = f => f.replace(/\\/g, '/').replace(/^.*\//, '').replace(/\.(sfam|xml|sfm)$/i, '');
 
-function cloneSkinned(src) {
+export function cloneSkinned(src) {
   const clone = src.clone(true), a = [], b = [];
   src.traverse(n => a.push(n)); clone.traverse(n => b.push(n));
   const map = new Map(a.map((n, i) => [n, b[i]]));

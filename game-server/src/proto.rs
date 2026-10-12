@@ -4,6 +4,8 @@
 //!
 //! * client -> server  `OP_POS`       `[1][x f32][y f32][z f32][yaw f32][speed u8][flags u8]`            (19 bytes)
 //! * server -> client  `OP_SNAPSHOT`  `[2][tick u32][count u16]` then `count` x `[id u16][x][y][z][yaw][speed][flags]`
+//! * server -> client  `OP_MOBS`      `[3][tick u32][count u16]` then `count` x `[id u16][type u16][x][y][z][yaw][speed][flags]`
+//!   (mob ids are their own id space; `type` indexes the `mobtypes` roster; y is 0 with `FLAG_SNAP`, i.e. snap to the terrain)
 //!
 //! Coordinates are the viewer's three.js world space (game x, height y, *negated* game z). The server never interprets
 //! them except for the x/z interest filter. `speed` is metres/second * 10 (clamped to 255).
@@ -11,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 pub const OP_POS: u8 = 1;
 pub const OP_SNAPSHOT: u8 = 2;
+pub const OP_MOBS: u8 = 3;
 
 pub const FLAG_SWIM: u8 = 1;
 pub const FLAG_AIR: u8 = 2;
@@ -81,6 +84,13 @@ pub struct PlayerInfo {
     pub gear: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct MobType {
+    pub id: u16,
+    pub name: String,
+    pub difficulty: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum ClientMsg {
@@ -93,6 +103,8 @@ pub enum ClientMsg {
 pub enum ServerMsg<'a> {
     /// Sent once after a successful join: your id, the interest radius, and everybody already online (incl. you).
     Welcome { id: u16, radius: f32, tick_hz: u32, players: Vec<&'a PlayerInfo> },
+    /// Sent once after `Welcome` when the server runs mobs: the roster of mob types referenced by `OP_MOBS` frames.
+    Mobtypes { types: &'a [MobType] },
     Joined { player: &'a PlayerInfo },
     Left { id: u16 },
     Chat { id: u16, name: &'a str, text: &'a str },

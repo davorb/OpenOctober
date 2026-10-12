@@ -4,6 +4,7 @@
 //   - name tags + chat bubbles over heads, a chat log (Enter), a radar and an online list (Tab)
 import * as THREE from 'three';
 import { AvatarFactory, RACES, AVATAR_HEIGHT, pose } from './avatars.js';
+import { MobWorld, OP_MOBS } from './mobs.js';
 
 const OP_POS = 1, OP_SNAPSHOT = 2, FLAG_SWIM = 1, FLAG_AIR = 2, FLAG_SNAP = 4;
 const SEND_HZ = 15, INTERP = 0.13;                  // render remote players this many seconds in the past (a bit over one tick)
@@ -43,7 +44,7 @@ export class Multiplayer {
     Object.assign(this, { scene, camera, world, getSelf, toast, $ });
     const q = new URLSearchParams(location.search);
     this.url = q.get('server') || `ws://${location.hostname || 'localhost'}:9000`;
-    this.factory = new AvatarFactory();
+    this.factory = new AvatarFactory(); this.mobs = new MobWorld({ scene, camera, world });
     this.players = new Map(); this.me = null; this.ws = null; this.sendAcc = 0; this.last = null; this.speed = 0; this.dotMat = null;
     let saved = {}; try { saved = JSON.parse(localStorage.getItem('dfProfile') || '{}'); } catch {}
     this.profile = { name: q.get('name') || saved.name || '', race: q.get('race') || saved.race || 'hum', gender: q.get('gender') || saved.gender || 'm', gear: q.get('gear') ?? saved.gear ?? '' };
@@ -109,7 +110,7 @@ export class Multiplayer {
     ws.onerror = () => {};
   }
   status(s) { this.online = s === 'online'; const e = this.$('mpnet'); e.textContent = this.online ? `● ${this.players.size + 1} online` : `○ ${s}`; e.classList.toggle('up', this.online); }
-  dropAll() { for (const p of this.players.values()) this.removeAvatar(p); this.players.clear(); this.me = null; }
+  dropAll() { for (const p of this.players.values()) this.removeAvatar(p); this.players.clear(); this.me = null; this.mobs.clear(); }
 
   onJson(m) {
     if (m.t === 'welcome') {
@@ -123,10 +124,11 @@ export class Multiplayer {
     } else if (m.t === 'chat') {
       const p = this.players.get(m.id); this.log(`<b${m.id === this.me ? ' class="me"' : ''}>${esc(m.name)}</b>: ${esc(m.text)}`);
       if (p) this.say(p, m.text);
+    } else if (m.t === 'mobtypes') { this.mobs.setTypes(m.types);
     } else if (m.t === 'error') { this.fatal = true; this.ws?.close(); this.status(m.msg); }
   }
   onBinary(buf) {
-    const v = new DataView(buf); if (v.getUint8(0) !== OP_SNAPSHOT) return;
+    const v = new DataView(buf); if (v.getUint8(0) === OP_MOBS) return this.mobs.onFrame(buf); if (v.getUint8(0) !== OP_SNAPSHOT) return;
     const n = v.getUint16(5, true), now = performance.now() / 1000;
     for (let i = 0, o = 7; i < n; i++, o += 20) {
       const p = this.players.get(v.getUint16(o, true)); if (!p) continue;
@@ -229,7 +231,7 @@ export class Multiplayer {
         else { a.bubble.visible = true; const bh = 16 * fovK * dist * (a.bubble.material.map.image.height / 34); a.bubble.center.set(0.5, 0); a.bubble.position.set(st.x, topY + ty * 0.9, st.z); a.bubble.scale.set(bh * a.bubble.userData.aspect, bh, 1); }
       }
     }
-    this.drawRadar(); if (this.$('plist').classList.contains('on')) { this.listAcc = (this.listAcc || 0) + dt; if (this.listAcc > 0.5) { this.listAcc = 0; this.renderList(); } }
+    this.mobs.update(dt, now); this.drawRadar(); if (this.$('plist').classList.contains('on')) { this.listAcc = (this.listAcc || 0) + dt; if (this.listAcc > 0.5) { this.listAcc = 0; this.renderList(); } }
   }
 
   // ---------------------------------------------------------------- radar + list
@@ -245,6 +247,10 @@ export class Multiplayer {
       const k = 66 / R, px = 70 + rx * k, py = 70 + rz * k; if (Math.hypot(px - 70, py - 70) > 66) continue;
       c.fillStyle = '#ffd98a'; c.beginPath(); c.arc(px, py, 2.5, 0, 7); c.fill();
     }
+    c.fillStyle = '#d0584a'; this.mobs.each((x, z) => {
+      const dx = x - cam.position.x, dz = z - cam.position.z, k = 66 / R, px = 70 + (dx * cs - dz * sn) * k, py = 70 + (dx * sn + dz * cs) * k;
+      if (Math.hypot(px - 70, py - 70) <= 66) c.fillRect(px - 1, py - 1, 2, 2);
+    });
     c.fillStyle = '#fff'; c.beginPath(); c.moveTo(70, 63); c.lineTo(74, 73); c.lineTo(66, 73); c.fill();
   }
   renderList() {
