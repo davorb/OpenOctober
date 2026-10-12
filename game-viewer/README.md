@@ -28,6 +28,8 @@ self-training) and `tools/decrypt_all.js` writes the plain files to `data/`. ~0.
 | terrain shader | `shaders/roa_1d_terrain.teq` | `js/terrain.js`: triplanar 0.058 tiling, height-contest blend (sharp 3, bias .3), baked AO, shared detail map, world-continuous UVs |
 | water shader | `shaders/roa_water.teq` | `js/water.js`: Gerstner constants, shallow/deep palette, sea level 215 |
 
+Underground (Shoal's cavern): the terrain mesh has stacked surfaces (cave floor ≈153, ceiling ≈235, outer roof ≈364 over the city), so `terrain-worker.js` keeps every up-facing surface per grid point in `layers` for tiles that need it (`World.groundHeight(x, z, maxY)` picks the floor below you, `World.covered()` says whether terrain is overhead). Walk/fly clamping, swimming and the open-sea plane all use that, so you can enter the city and it isn't flooded by the ocean plane.
+
 Not done: the deep parts (>~40 KB) of the longest shader files decode poorly, so cascaded shadows, parallax and dynamic lights aren't ported;
 grass/vegetation placement (`export/veg`) and the Java/native `classes` aren't decoded; music day-part boundaries follow the clear-sky keyframes.
 

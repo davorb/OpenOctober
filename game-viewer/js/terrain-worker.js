@@ -26,10 +26,13 @@ self.onmessage = async ({ data: { id, url } }) => {
       return { index: small ? Uint16Array.from(ix) : ix, ...mesh.extras.groups[i] };
     });
     // 4 m height grid, rasterised from the actual triangles (used for walking, ground clamping and altitude queries)
-    const G = 256, cell = 1024 / G, W = G + 1, hg = new Float32Array(W * W).fill(-1e9), P = pos.arr;
+    // Also keeps every up-facing surface per grid point (cave floors under a roof, bridges, overhangs) in `layers`, but only for tiles that
+    // actually have stacked surfaces (Shoal's cavern); everywhere else the single max height is exact.
+    const G = 256, cell = 1024 / G, W = G + 1, hg = new Float32Array(W * W).fill(-1e9), P = pos.arr, NA = nrm.arr, LAYERS = 6, lay = new Map();
     for (const g of groups) {
       const ix = g.index;
       for (let t = 0; t < ix.length; t += 3) {
+        const up = (NA[ix[t] * 3 + 1] + NA[ix[t + 1] * 3 + 1] + NA[ix[t + 2] * 3 + 1]) / 3 > 0.2;
         const a = ix[t] * 3, b = ix[t + 1] * 3, c = ix[t + 2] * 3;
         const ax = (P[a] + 512) / cell, az = (P[a + 2] + 512) / cell, bx = (P[b] + 512) / cell, bz = (P[b + 2] + 512) / cell, cx = (P[c] + 512) / cell, cz = (P[c + 2] + 512) / cell;
         const x0 = Math.max(0, Math.ceil(Math.min(ax, bx, cx))), x1 = Math.min(G, Math.floor(Math.max(ax, bx, cx)));
@@ -39,6 +42,7 @@ self.onmessage = async ({ data: { id, url } }) => {
           const l1 = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / den, l2 = ((cz - az) * (x - cx) + (ax - cx) * (z - cz)) / den, l3 = 1 - l1 - l2;
           if (l1 < -1e-4 || l2 < -1e-4 || l3 < -1e-4) continue;
           const y = l1 * P[a + 1] + l2 * P[b + 1] + l3 * P[c + 1], k = z * W + x; if (y > hg[k]) hg[k] = y;
+          if (up) { let l = lay.get(k); if (!l) lay.set(k, l = []); l.push(y); }
         }
       }
     }
@@ -51,9 +55,15 @@ self.onmessage = async ({ data: { id, url } }) => {
       }
       if (!holes) break;
     }
+    let layers = null;
+    for (const l of lay.values()) { if (l.length < 2) continue; let lo = 1e9, hi = -1e9; for (const v of l) { if (v < lo) lo = v; if (v > hi) hi = v; } if (hi - lo > 12) { layers = new Float32Array(W * W * LAYERS).fill(-1e9); break; } }
+    if (layers) for (const [k, l] of lay) {
+      l.sort((p, q) => p - q); const u = []; for (const v of l) if (!u.length || v - u[u.length - 1] > 1) u.push(v);
+      const from = Math.max(0, u.length - LAYERS); for (let i = from; i < u.length; i++) layers[k * LAYERS + i - from] = u[i];
+    }
     const node = json.nodes[0];
-    const out = { id, pos: pos.arr, nrm: n8, col: col.arr, w0: w0.arr, w1: w1.arr, groups, heights: hg, min: pos.min, max: pos.max, translation: node.translation || [0, 0, 0] };
-    const tr = [out.pos.buffer, n8.buffer, out.col.buffer, hg.buffer, out.w0.buffer, out.w1.buffer, ...groups.map(g => g.index.buffer)];
+    const out = { id, pos: pos.arr, nrm: n8, col: col.arr, w0: w0.arr, w1: w1.arr, groups, heights: hg, layers, min: pos.min, max: pos.max, translation: node.translation || [0, 0, 0] };
+    const tr = [out.pos.buffer, n8.buffer, out.col.buffer, hg.buffer, ...(layers ? [layers.buffer] : []), out.w0.buffer, out.w1.buffer, ...groups.map(g => g.index.buffer)];
     self.postMessage(out, tr);
   } catch (e) { self.postMessage({ id, error: String(e) }); }
 };

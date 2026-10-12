@@ -77,7 +77,7 @@ export class Player {
   }
   // highest walkable surface under (x,z) that is not above maxY (terrain or static geometry)
   floor(x, z, maxY) {
-    let best = this.world.groundHeight(x, z); if (best == null) best = -1e9;
+    let best = this.world.groundHeight(x, z, maxY); if (best == null) best = -1e9;
     if (best > maxY) best = -1e9;
     for (const t of this._tiles(x, z, 0.3)) {
       const [r0, r1] = cellRange(t.coll, x, z), A = t.coll.f32, L = t.coll.list;
@@ -143,9 +143,9 @@ export class Player {
     let fl = this.floor(p.x, p.z, p.y + this.step);
     const th = w.groundHeight(p.x, p.z);
     if (th == null) { this.vy = 0; return; }                 // tile not streamed in yet: hold still
-    if (fl < -1e8) { p.y = th; fl = th; this.vy = 0; }       // pushed below the surface: pop back up
+    if (fl < -1e8) { const f = w.groundHeight(p.x, p.z, p.y + 30); fl = p.y = f > -1e8 ? f : th; this.vy = 0; }   // pushed below the surface: pop back up to the nearest floor
     const water = SEA_LEVEL - 0.2;
-    this.swim = fl < water - 1.3 * PLAYER_SCALE && fl > -1e8;
+    this.swim = fl < water - 1.3 * PLAYER_SCALE && fl > -1e8 && !w.covered(p.x, p.y + this.eye, p.z);   // no swimming up through a cavern roof
     if (this.swim) {
       this.vy = 0; p.y += ((water - 1.2 * PLAYER_SCALE) - p.y) * Math.min(1, dt * 5); this.onGround = false;
     } else {

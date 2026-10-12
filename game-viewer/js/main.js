@@ -145,7 +145,12 @@ function frameInner() {
     const sp = baseSpeed * (run ? 5 : 1) * (keys.has('ControlLeft') ? 0.2 : 1);
     vel.lerp(mv.multiplyScalar(sp), 1 - Math.exp(-dt * 6));
     camera.position.addScaledVector(vel, dt);
-    if (!noclip && gh != null) camera.position.y = Math.max(camera.position.y, Math.max(gh, SEA_LEVEL) + 1.8);
+    if (!noclip && gh != null) {
+      const cy = camera.position.y, cx = camera.position.x, cz = camera.position.z, under = world.covered(cx, cy, cz);
+      let fh = world.groundHeight(cx, cz, cy);                       // surface below the camera: the cavern floor inside Shoal, not its roof
+      if (!(fh > -1e8)) fh = gh;
+      camera.position.y = Math.max(cy, (under ? fh : Math.max(fh, SEA_LEVEL)) + 1.8);
+    }
   }
   camera.updateMatrixWorld(true);
 
@@ -160,6 +165,7 @@ function frameInner() {
   dyn.count = S.lights; dyn.update(dt, camera);
   sky.update(camera);
   ocean.position.set(Math.round(camera.position.x / 64) * 64, SEA_LEVEL - 5.0, Math.round(camera.position.z / 64) * 64);
+  ocean.visible = !world.covered(camera.position.x, camera.position.y, camera.position.z);   // underground (Shoal): the open-sea plane would flood the cavern
 
   world.update(Math.min(raw, 0.5), camera);
 

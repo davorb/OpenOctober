@@ -36,12 +36,30 @@ export class World {
   }
 
   tileAt(x, z) { return this.byXZ.get(Math.floor(x / 1024) + ',' + Math.floor(z / 1024)); }
-  groundHeight(x, z) {
+  // Terrain height at (x, z). Without maxY: the topmost surface. With maxY: the highest surface at or below it (-1e9 if none), so a cave
+  // floor under a roof is found from inside the cave; tiles without stacked surfaces just return the top surface.
+  groundHeight(x, z, maxY) {
     const t = this.tileAt(x, z); if (!t || !t.heights) return null;
     const G = 256, c = 1024 / G, fx = (x - (t.rect.x0 + 512)) / c + G / 2, fz = (z - (t.rect.z0 + 512)) / c + G / 2;
     const x0 = Math.max(0, Math.min(G - 1, Math.floor(fx))), z0 = Math.max(0, Math.min(G - 1, Math.floor(fz))), tx = fx - x0, tz = fz - z0, h = t.heights, W = G + 1;
-    const a = h[z0 * W + x0], b = h[z0 * W + x0 + 1], d = h[(z0 + 1) * W + x0], e = h[(z0 + 1) * W + x0 + 1];
-    return (a * (1 - tx) + b * tx) * (1 - tz) + (d * (1 - tx) + e * tx) * tz;
+    if (maxY === undefined || !t.layers) {
+      const a = h[z0 * W + x0], b = h[z0 * W + x0 + 1], d = h[(z0 + 1) * W + x0], e = h[(z0 + 1) * W + x0 + 1];
+      return (a * (1 - tx) + b * tx) * (1 - tz) + (d * (1 - tx) + e * tx) * tz;
+    }
+    const L = t.layers, K = 6;
+    const at = k => { for (let i = K - 1; i >= 0; i--) { const v = L[k * K + i]; if (v > -1e8 && v <= maxY) return v; } return L[k * K] < -1e8 && h[k] <= maxY ? h[k] : -1e9; };
+    let sum = 0, wt = 0;
+    for (const [k, w] of [[z0 * W + x0, (1 - tx) * (1 - tz)], [z0 * W + x0 + 1, tx * (1 - tz)], [(z0 + 1) * W + x0, (1 - tx) * tz], [(z0 + 1) * W + x0 + 1, tx * tz]]) {
+      const v = at(k); if (v > -1e8) { sum += v * w; wt += w; }
+    }
+    return wt > 1e-6 ? sum / wt : -1e9;
+  }
+  // true if there is terrain above (x, y, z): inside Shoal's cavern, under the dome
+  covered(x, y, z) {
+    const t = this.tileAt(x, z); if (!t || !t.layers) return false;
+    const G = 256, c = 1024 / G, k = Math.round((z - (t.rect.z0 + 512)) / c + G / 2) * (G + 1) + Math.round((x - (t.rect.x0 + 512)) / c + G / 2);
+    for (let i = 5; i >= 0; i--) { const v = t.layers[k * 6 + i]; if (v > -1e8) return v > y + 3; }   // ascending, left-aligned: last filled slot is the topmost surface
+    return false;
   }
 
   rectDist(t, x, z) { const r = t.rect, dx = Math.max(r.x0 - x, 0, x - r.x1), dz = Math.max(r.z0 - z, 0, z - r.z1); return Math.hypot(dx, dz); }
@@ -98,7 +116,7 @@ export class World {
     const t = wk.busy; wk.busy = null;
     if (!t || data.error) { if (t) t.tState = 4; if (data.error) console.warn('terrain', data.id, data.error); this._pump(); return; }
     if (t.tState !== 1) { this._pump(); return; }       // cancelled while loading
-    t.heights = data.heights;
+    t.heights = data.heights; t.layers = data.layers;
     if (t.waterMats) { for (const m of t.waterMats) this.water.bind(m, t); t.waterMats = null; }
     t.terrain = buildTerrain(data, this.tex, this.env, t.fade);
     this.group.add(t.terrain); t.tState = 2;
@@ -121,7 +139,7 @@ export class World {
     } catch (e) { console.warn('mesh terrain', t.name, e); t.tState = 4; }
     this.meshBusy = false;
   }
-  _dropTerrain(t) { if (t.terrain) { this.group.remove(t.terrain); t.terrain.userData.dispose(); t.terrain = null; } t.heights = null; if (t.waterTex) { t.waterTex.dispose(); t.waterTex = null; } t.waterMats = null; t.tState = 0; t.fade.value = 0; for (const u of t.turis || []) { /* shared textures released with objects */ } }
+  _dropTerrain(t) { if (t.terrain) { this.group.remove(t.terrain); t.terrain.userData.dispose(); t.terrain = null; } t.heights = null; t.layers = null; if (t.waterTex) { t.waterTex.dispose(); t.waterTex = null; } t.waterMats = null; t.tState = 0; t.fade.value = 0; for (const u of t.turis || []) { /* shared textures released with objects */ } }
 
   // ---- objects
   _objMaterial(src, fade) {
