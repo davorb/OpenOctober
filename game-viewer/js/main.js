@@ -28,8 +28,8 @@ camera.rotation.order = 'YXZ';
 function resize() { renderer.setSize(innerWidth, innerHeight, false); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); }
 addEventListener('resize', resize); resize();
 
-const [worldData, musicAreas, tileNames, envData, terrainManifest, props] = await Promise.all(
-  ['world', 'music', 'tiles', 'env', 'terrain_textures', 'props'].map(n => J(`/data/${n}.json`)));
+const [worldData, musicAreas, tileNames, envData, terrainManifest, props, spawns] = await Promise.all(
+  ['world', 'music', 'tiles', 'env', 'terrain_textures', 'props', 'spawns'].map(n => J(`/data/${n}.json`)));
 
 // ---- lights for ordinary (object) materials; terrain/water do their own lighting from the same uniforms
 const env = new Environment(envData);
@@ -218,17 +218,39 @@ setTimeout(setModeLabel, 0);
 // ---- boot: preload around the start, then wait for the click (also unlocks audio)
 window.dbg = { player, tp: (x, y, z) => { camera.position.set(x, y, -z); player.pos.set(x, y - player.eye, -z); player.vy = 0; }, camera, world, env, music, scene, renderer, ambience, set: (x, y, z) => camera.position.set(x, y, -z), look: (yw, pt) => { yaw = yw; pitch = pt; } };
 const intro = $('intro');
-let ready = false;
+let ready = false, started = false;
+let bootTimer = 0;
 function bootProgress() {
+  clearTimeout(bootTimer);
   world.update(0.25, camera); env.update(0, VIEW);
   const near = [...world.tiles.values()].filter(t => t.hasTerrain && t.dist < 1500);
   const done = near.filter(t => t.tState === 2).length;
   $('load').textContent = `Reading the world… ${done}/${near.length || 1}`;
   if (!ready && (done >= near.length || performance.now() > 30000)) { ready = true; $('load').style.display = 'none'; $('enter').style.display = ''; }
-  else if (!ready) setTimeout(bootProgress, 250);
+  else if (!ready) bootTimer = setTimeout(bootProgress, 250);
 }
 bootProgress();
-let started = false;
+
+// ---- spawn picker: the six racial capitals (bindstones) plus the default start; picking one moves the camera and re-preloads
+const spawnBox = $('spawns');
+const spawnList = [{ name: 'World start', race: 'Default', x: start.x, y: start.y, z: -start.z }, ...spawns];
+function pickSpawn(i) {
+  const sp = spawnList[i];
+  camera.position.set(sp.x, (sp.y || 512) + (sp.y ? 8 : 0), -sp.z);
+  player.pos.set(sp.x, camera.position.y - player.eye, -sp.z); player.vy = 0; vel.set(0, 0, 0);
+  [...spawnBox.children].forEach((el, j) => el.classList.toggle('on', j === i));
+  if (started) return;
+  ready = false; $('enter').style.display = 'none'; $('load').style.display = '';
+  bootProgress();
+}
+spawnList.forEach((sp, i) => {
+  const el = document.createElement('div'); el.className = 'sp';
+  el.innerHTML = `${sp.name}<small>${sp.race === 'Default' ? 'free-fly start' : sp.race + ' capital'}</small>`;
+  el.addEventListener('click', e => { e.stopPropagation(); pickSpawn(i); });
+  spawnBox.appendChild(el);
+});
+const pre = q.get('spawn') && spawnList.findIndex(s => s.name.toLowerCase() === q.get('spawn').toLowerCase() || s.race.toLowerCase() === q.get('spawn').toLowerCase());
+if (pre > 0) pickSpawn(pre); else if (!q.get('x')) spawnBox.children[0].classList.add('on');
 function begin() {
   if (started || !ready) return; started = true;
   document.body.classList.add('playing'); intro.classList.add('hide');

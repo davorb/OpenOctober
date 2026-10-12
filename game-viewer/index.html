@@ -25,6 +25,11 @@
   #intro .btn { border:1px solid var(--gold); padding:10px 34px; letter-spacing:.2em; color:var(--gold); }
   #intro .keys { opacity:.7; max-width:560px; line-height:1.8; }
   #intro .keys b { color:var(--gold); font-weight:400; border:1px solid #d9b86a55; border-radius:3px; padding:0 6px; margin:0 2px; }
+  #spawns { display:flex; flex-wrap:wrap; justify-content:center; gap:8px; max-width:640px; }
+  #spawns .sp { border:1px solid #d9b86a55; padding:6px 14px; cursor:pointer; background:#0006; text-align:center; line-height:1.3; }
+  #spawns .sp small { display:block; opacity:.6; letter-spacing:.05em; }
+  #spawns .sp:hover { border-color:var(--gold); }
+  #spawns .sp.on { border-color:var(--gold); background:#d9b86a22; color:var(--gold); }
   #load { opacity:.7; letter-spacing:.1em; }
   #cfg { position:fixed; right:14px; top:64px; width:250px; padding:12px 14px; background:#0b0d10d8; border:1px solid #d9b86a55; display:none; font:12px/1.5 ui-monospace,Menlo,monospace; }
   #cfg.on { display:block; }
@@ -53,6 +58,7 @@
 <div id="intro">
   <h1>DARKFALL</h1>
   <div id="load">Reading the world…</div>
+  <div id="spawns"></div>
   <div class="btn" id="enter" style="display:none">ENTER THE WORLD</div>
   <div class="keys modes"><div style="color:var(--gold);letter-spacing:.15em;margin-bottom:4px">TWO WAYS TO EXPLORE</div><b>G</b> toggles <b>Fly</b> (free camera, <b>Shift</b> = fast) and <b>Walk</b> (gravity, collision, <b>Space</b> jumps, <b>Shift</b> sprints, <b>Ctrl</b> walks slowly). Press it any time — or click the mode button on screen.</div>
   <div class="keys"><b>W</b><b>A</b><b>S</b><b>D</b> fly &nbsp; <b>Shift</b> faster &nbsp; <b>Space</b>/<b>E</b> up &nbsp; <b>C</b>/<b>Q</b> down &nbsp; mouse to look<br>

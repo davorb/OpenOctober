@@ -23,7 +23,8 @@ self-training) and `tools/decrypt_all.js` writes the plain files to `data/`. ~0.
 | music | `zones/env_music_settings.xml` (area → tile list → Sunrise/Midday/Sunset/Midnight tracks) | `js/music.js` |
 | ambience | `zones/env_audio_list.xml` + `audio/environmental` | forest/river/mountain wind loops, gusts, wolves |
 | day cycle | `object/environment/*.xml` + `objectspace/environment/*.xml` | sun/moons, light, ambient, fog, clouds (`js/env.js`) |
-| start point | `worldconfig/worldconfig.xml` `SFDefaultPosition` | spawn |
+| start point | `worldconfig/worldconfig.xml` `SFDefaultPosition` | default spawn |
+| starting cities | `zones/dynamic_objects_bindstones.xml` (`r_bindstone capital <race>`) | intro-screen spawn picker (`tools/build_spawns.js` → `data/spawns.json`); `?spawn=Human` / `?spawn=Sanguine` preselects |
 | terrain shader | `shaders/roa_1d_terrain.teq` | `js/terrain.js`: triplanar 0.058 tiling, height-contest blend (sharp 3, bias .3), baked AO, shared detail map, world-continuous UVs |
 | water shader | `shaders/roa_water.teq` | `js/water.js`: Gerstner constants, shallow/deep palette, sea level 215 |
 
