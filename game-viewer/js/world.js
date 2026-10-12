@@ -28,6 +28,7 @@ export class World {
     this.workers = Array.from({ length: this.opts.workers }, () => ({ w: new Worker('/js/terrain-worker.js'), busy: null }));
     this.workers.forEach(wk => { wk.w.onmessage = e => this._terrainDone(wk, e.data); });
     this.qT = []; this.qM = []; this.meshBusy = false; this.objBusy = false; this.gltf = new GLTFLoader();
+    this.alphaCov = new WeakMap();
     this.texCache = new Map();   // uri -> {tex, refs}
     this.sceneObjects = new THREE.Group(); scene.add(this.sceneObjects);
     this.objMats = new Map();
@@ -142,9 +143,24 @@ export class World {
   _dropTerrain(t) { if (t.terrain) { this.group.remove(t.terrain); t.terrain.userData.dispose(); t.terrain = null; } t.heights = null; t.layers = null; if (t.waterTex) { t.waterTex.dispose(); t.waterTex = null; } t.waterMats = null; t.tState = 0; t.fade.value = 0; for (const u of t.turis || []) { /* shared textures released with objects */ } }
 
   // ---- objects
+  // Some textures (e.g. Shoal's spires) carry non-opacity data in alpha: a MASK material on them eats most of the mesh. Real cutouts (foliage, fences) stay mostly or partly opaque.
+  _maskIsBogus(tex) {
+    const img = tex && tex.image; if (!img) return false;
+    let v = this.alphaCov.get(img);
+    if (v === undefined) {
+      try {
+        const c = document.createElement('canvas'); c.width = c.height = 32;
+        const x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(img, 0, 0, 32, 32);
+        const d = x.getImageData(0, 0, 32, 32).data; let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] >= 128) n++;
+        v = n / 1024;
+      } catch { v = 1; }
+      this.alphaCov.set(img, v);
+    }
+    return v < 0.15;
+  }
   _objMaterial(src, fade) {
     // MeshStandardMaterial from glTF -> cheaper Lambert with the game's fog
-    const m = new THREE.MeshLambertMaterial({ map: src.map, color: src.color, side: src.side, alphaTest: src.alphaTest, transparent: src.transparent, opacity: src.opacity, emissive: src.emissive, emissiveMap: src.emissiveMap, vertexColors: src.vertexColors });
+    const m = new THREE.MeshLambertMaterial({ map: src.map, color: src.color, side: THREE.DoubleSide, alphaTest: src.alphaTest && this._maskIsBogus(src.map) ? 0 : src.alphaTest, transparent: src.transparent, opacity: src.opacity, emissive: src.emissive, emissiveMap: src.emissiveMap, vertexColors: src.vertexColors });
     m.name = src.name;
     m.customProgramCacheKey = () => 'dfobj';
     m.onBeforeCompile = sh => {
