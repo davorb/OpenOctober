@@ -53,7 +53,7 @@ async fn connection(stream: TcpStream, cmds: mpsc::Sender<Cmd>) {
         None
     })
     .await;
-    let Ok(Some(ClientMsg::Join { name, race, gender })) = first else { return };
+    let Ok(Some(ClientMsg::Join { name, race, gender, gear })) = first else { return };
 
     let (tx, mut rx) = mpsc::channel::<Message>(128);
     let mut writer = tokio::spawn(async move {
@@ -65,7 +65,7 @@ async fn connection(stream: TcpStream, cmds: mpsc::Sender<Cmd>) {
         let _ = sink.close().await;
     });
     let (reply, reply_rx) = oneshot::channel();
-    if cmds.send(Cmd::Join(JoinReq { name, race, gender, tx: tx.clone(), reply })).await.is_err() {
+    if cmds.send(Cmd::Join(JoinReq { name, race, gender, gear, tx: tx.clone(), reply })).await.is_err() {
         return;
     }
     let id = match reply_rx.await {

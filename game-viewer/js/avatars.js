@@ -1,29 +1,28 @@
-// Player avatars: the game's racial body-part meshes (head / torso / legs / arms, skinned to one shared skeleton) assembled per race+gender,
-// skin-tinted from the head texture, with a small procedural walk cycle.
-//   /converted/animated/<race>_<g>_<part>.glb   race: hum alf dwf ork mir mhm   g: m f   (hum_* is the human set; hands are first-person only, so unused)
-//   /converted/textures/a*_<race>_<g>_head.png  real face skins. The torso/legs/arms textures in the data are armour atlases / unusable, so
-//   the body takes the average colour of the head skin and a per-player cloth colour.
+// Player avatars, composed the way the game does it (data/paperdoll.json <- common/paperdoll/*.xml, see tools/build_paperdoll.js):
+// the naked body of a race+gender is four skinned part meshes sharing one skeleton (converted/animated/<race>_<g>_<part>.glb) with the game's skin
+// textures (export/texture/dds, served at /dds/), plus hair as a static mesh on the head frame. A worn armour set swaps part textures / meshes and hangs
+// static pieces (helmet, shoulders, ...) on skeleton frames. Not ported: armour dye colour masks, the game's skin/metal shaders (plain PBR here).
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DDSLoader } from 'three/addons/loaders/DDSLoader.js';
 
 export const RACES = [
   { id: 'hum', name: 'Human' }, { id: 'alf', name: 'Alfar' }, { id: 'dwf', name: 'Dwarf' },
   { id: 'ork', name: 'Orc' }, { id: 'mir', name: 'Mirdain' }, { id: 'mhm', name: 'Mahirim' },
 ];
-const HEAD_TEX = { hum_m: 'a1_hum_m_head', alf_m: 'a9_alf_m_head', alf_f: 'a1_alf_f_head', dwf_m: 'a15_dwf_m_head', dwf_f: 'a15_dwf_f_head',
-  ork_m: 'a13_ork_m_head', ork_f: 'a1_ork_f_head', mir_m: 'a10_mir_m_head', mhm_m: 'a10_mhm_m_head', mhm_f: 'a13_mhm_f_head' };
-// the face skins are near-neutral; the game tints them per race, so the viewer does too (head map multiplied, body flat)
-const TINT = { hum: 0xffffff, alf: 0xd4d6ff, dwf: 0xffe2c8, ork: 0xa4d27c, mir: 0xaed0f0, mhm: 0xf0c48c };
-const FILE = { hum: 'hum', alf: 'alfar', dwf: 'dwarf', ork: 'ork', mir: 'mirdain', mhm: 'mahirim' };   // mesh file prefix (textures use the short ids)
+// armour sets offered in the picker (the data also has monster / mastery sets that make no sense for a player)
+export const GEAR = ['Cloth', 'Leather', 'Padded', 'Studded', 'Chain', 'Scale', 'Banded', 'Plate', 'Full Plate', 'Bone', 'Barbaric', 'Dragon', 'Black Knight', 'Infernal', 'Melechars', 'Severii Centurion'];
+const SUBSET = { 'Subset Torso': 'torso', 'Subset Arms': 'arms', 'Subset Legs': 'legs', 'Subset Head': 'head' };
 const PARTS = ['legs', 'torso', 'arms', 'head'];
-const CLOTH = [0x7a2e2e, 0x2e4a7a, 0x3b6b3b, 0x6b5a2e, 0x5a2e6b, 0x2e6b6b, 0x4a4a4a, 0x8a6a3a];
 
-// model units are inches-ish (human ~68 tall); the world is scaled so a 1.75 m human reads as the player's PLAYER_SCALE 1.5 giant
+// model units are inches (a human is ~68 tall); the world is scaled so that reads as the player's PLAYER_SCALE 1.5 giant
 export const AVATAR_SCALE = 0.0254 * 1.5;
 export const AVATAR_HEIGHT = 69 * AVATAR_SCALE;
+const ATTACH_SCALE = 1 / 0.0254;                  // attached pieces are modelled in metres, bones live in inches
 
 const AX_X = new THREE.Vector3(1, 0, 0), AX_Y = new THREE.Vector3(0, 1, 0), AX_Z = new THREE.Vector3(0, 0, 1);
-const qa = new THREE.Quaternion(), qb = new THREE.Quaternion(), qc = new THREE.Quaternion();
+const qa = new THREE.Quaternion(), qb = new THREE.Quaternion();
+const base = f => f.replace(/\\/g, '/').replace(/^.*\//, '').replace(/\.(sfam|xml|sfm)$/i, '');
 
 function cloneSkinned(src) {
   const clone = src.clone(true), a = [], b = [];
@@ -40,12 +39,15 @@ function cloneSkinned(src) {
 const POSE_BONES = ['LLeg1', 'RLeg1', 'LLeg2', 'RLeg2', 'LArm1', 'RArm1', 'LArm20', 'RArm20'];
 
 export class AvatarFactory {
-  constructor() { this.gltf = new GLTFLoader(); this.parts = new Map(); this.skins = new Map(); this.mats = new Map(); this.tl = new THREE.TextureLoader(); }
+  constructor() { this.gltf = new GLTFLoader(); this.dds = new DDSLoader(); this.parts = new Map(); this.statics = new Map(); this.tex = new Map(); this.mats = new Map(); this.pd = null; }
 
-  // one template per race/gender/part; poses need each bone's rest local rotation and its parent's rest world rotation
-  part(race, g, part) {
-    const key = `${race}_${g}_${part}`;
-    if (!this.parts.has(key)) this.parts.set(key, this.gltf.loadAsync(`/converted/animated/${FILE[race]}_${g}_${part}.glb`).then(gl => {
+  paperdoll() { return this.pd ||= fetch('/data/paperdoll.json').then(r => r.json()); }
+  /** armour sets this race/gender can wear (from the game data), in picker order */
+  async gearFor(race, g) { const c = (await this.paperdoll()).chars[`${race}_${g}`]; return GEAR.filter(n => c.sets[n]); }
+
+  // one template per mesh file; poses need each bone's rest local rotation and its parent's rest world rotation
+  part(name) {
+    if (!this.parts.has(name)) this.parts.set(name, this.gltf.loadAsync(`/converted/animated/${name}.glb`).then(gl => {
       const scene = gl.scene; scene.updateMatrixWorld(true);
       scene.userData.rig = {};
       scene.traverse(n => {
@@ -57,49 +59,79 @@ export class AvatarFactory {
       });
       return scene;
     }));
-    return this.parts.get(key);
+    return this.parts.get(name);
+  }
+  // attached pieces are static meshes: models/ first, animated/ for the ones converted with the character set
+  static(name) {
+    if (!this.statics.has(name)) this.statics.set(name, this.gltf.loadAsync(`/converted/models/${name}.glb`).catch(() => this.gltf.loadAsync(`/converted/animated/${name}.glb`)).then(g => g.scene, () => null));
+    return this.statics.get(name);
+  }
+  texture(name) {
+    if (!this.tex.has(name)) this.tex.set(name, new Promise(res => this.dds.load(`/dds/${name}.dds`, t => {
+      t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = 4; t.needsUpdate = true; res(t);
+    }, undefined, () => res(null))));
+    return this.tex.get(name);
+  }
+  mat(name, kind) {
+    const key = name + '|' + kind;
+    if (!this.mats.has(key)) this.mats.set(key, this.texture(name).then(map => {
+      const worn = !name.startsWith('a1_'), m = new THREE.MeshStandardMaterial({ map, color: map ? 0xffffff : 0x8a8478, roughness: worn ? 0.55 : 0.8, metalness: worn ? 0.25 : 0, side: THREE.DoubleSide });
+      if (kind === 'hair') { m.alphaTest = 0.45; m.roughness = 0.9; }
+      return m;
+    }));
+    return this.mats.get(key);
   }
 
-  // face skin + its average colour (for the body); falls back to the other gender's skin of the same race, then to a flat tone
-  skin(race, g) {
-    const k = `${race}_${g}`; if (this.skins.has(k)) return this.skins.get(k);
-    const file = HEAD_TEX[k] || HEAD_TEX[`${race}_${g === 'm' ? 'f' : 'm'}`];
-    const p = !file ? Promise.resolve({ map: null, color: new THREE.Color(0xc89a7c) }) : new Promise(res => {
-      this.tl.load(`/converted/textures/${file}.png`, t => {
-        t.flipY = false; t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
-        const c = document.createElement('canvas'); c.width = c.height = 8; const x = c.getContext('2d'); x.drawImage(t.image, 0, 0, 8, 8);
-        const d = x.getImageData(0, 0, 8, 8).data; let r = 0, gg = 0, b = 0, n = 0;
-        for (let i = 0; i < d.length; i += 4) { r += d[i]; gg += d[i + 1]; b += d[i + 2]; n++; }
-        res({ map: t, color: new THREE.Color().setRGB(r / n / 255, gg / n / 255, b / n / 255, THREE.SRGBColorSpace) });
-      }, undefined, () => res({ map: null, color: new THREE.Color(0xc89a7c) }));
-    });
-    this.skins.set(k, p); return p;
+  /** What a character shows: { parts: { torso: { file, mats: {id: texture} }, ... }, attach: { point: item } } for a race/gender wearing `gear` ('' = naked). */
+  async compose(race, g, gear) {
+    const c = (await this.paperdoll()).chars[`${race}_${g}`], parts = {}, attach = {};
+    const apply = list => { for (const it of list) {
+      if (it.a) { attach[it.a] = it; continue; }
+      const k = SUBSET[it.s]; if (!k) continue;
+      const p = parts[k] ||= { file: null, mats: {} };
+      if (it.f !== 'NULL') p.file = base(it.f);
+      for (const [id, t] of it.m) p.mats[id] = t;
+    } };
+    apply(c.body);
+    const body = JSON.parse(JSON.stringify(parts));
+    for (const n of (gear && c.sets[gear]) || []) apply(c.items[n]);
+    return { parts, body, attach, c };
   }
 
-  mat(key, make) { if (!this.mats.has(key)) this.mats.set(key, make()); return this.mats.get(key); }
-
-  /** -> { root, rigs, ... }. `seed` picks the cloth colour. Resolves once every part has loaded. */
-  async build(race, g, seed = 0) {
-    const [skin, ...tpl] = await Promise.all([this.skin(race, g), ...PARTS.map(p => this.part(race, g, p))]);
-    const cloth = CLOTH[Math.abs(seed) % CLOTH.length], k = `${race}_${g}`;
-    const skinMat = this.mat('s' + k, () => new THREE.MeshStandardMaterial({ color: skin.color.clone().multiply(new THREE.Color(TINT[race])), roughness: 0.85, side: THREE.DoubleSide }));
-    const headMat = this.mat('h' + k, () => new THREE.MeshStandardMaterial({ map: skin.map, color: skin.map ? TINT[race] : skin.color, roughness: 0.8, side: THREE.DoubleSide }));
-    const std = (color, r = 0.9) => new THREE.MeshStandardMaterial({ color, roughness: r, side: THREE.DoubleSide });
-    const clothMat = this.mat('c' + cloth, () => std(cloth)), pantsMat = this.mat('p' + cloth, () => std(new THREE.Color(cloth).multiplyScalar(0.55))), bootMat = this.mat('boot', () => std(0x3a2c20));
+  /** -> { root, rigs, phase, ... }. Resolves once every piece has loaded. */
+  async build(race, g, gear = '') {
+    const { parts, body, attach } = await this.compose(race, g, gear), A = (await this.paperdoll()).attach;
     const root = new THREE.Group(); root.scale.setScalar(AVATAR_SCALE);
     const rigs = [];
-    PARTS.forEach((p, i) => {
-      const o = cloneSkinned(tpl[i]); o.userData = { rig: tpl[i].userData.rig, bones: {} };
+    for (const p of PARTS) {
+      const spec = parts[p]; if (!spec?.file) continue;
+      let tpl = await this.part(spec.file).catch(() => null), mats = spec.mats;
+      if (!tpl && body[p]?.file) { tpl = await this.part(body[p].file); mats = body[p].mats; }   // armour mesh missing from the export: wear the body mesh
+      if (!tpl) continue;
+      const o = cloneSkinned(tpl); o.userData = { rig: tpl.userData.rig, bones: {} };
+      const jobs = [];
       o.traverse(n => {
         if (n.isBone) { const kk = n.name.replace(/^[a-z]+_f/, ''); if (POSE_BONES.includes(kk)) o.userData.bones[kk] = n; }
         if (!n.isMesh) return;
         n.frustumCulled = false;                                   // bind-pose bounds don't follow the pose; avatars are culled by distance instead
-        const sub = /_(\d+)$/.exec(n.material?.name || '')?.[1];   // legs: _0 legs, _1 feet; arms: _0 arms, _1 hands
-        n.material = p === 'head' ? headMat : p === 'torso' ? clothMat : p === 'legs' ? (sub === '1' ? bootMat : pantsMat) : skinMat;
+        const id = +(/_(\d+)$/.exec(n.material?.name || '')?.[1] ?? 0), tex = mats[id] ?? mats[0];
+        jobs.push(this.mat(tex, 'body').then(m => { n.material = m; }));
       });
-      rigs.push(o); root.add(o);
-    });
-    return { root, rigs, phase: Math.random() * 6.28, meshes: [], race, g };
+      await Promise.all(jobs); rigs.push(o); root.add(o);
+    }
+    // attached pieces (hair, helmet, shoulders, ...): static meshes parented to a skeleton frame
+    const host = rigs.find(r => r.userData.bones.LLeg1) || rigs[0];
+    for (const [point, it] of Object.entries(attach)) {
+      const ap = A[point]; if (!ap || !host) continue;
+      const bone = host.getObjectByName(ap.frame); if (!bone) continue;
+      const src = await this.static(base(it.f)); if (!src) continue;
+      const mesh = src.clone(true), holder = new THREE.Group();
+      holder.position.fromArray(ap.t); holder.rotation.set(ap.r[0], ap.r[1], ap.r[2]); holder.scale.setScalar(ATTACH_SCALE); holder.add(mesh);
+      const hair = point === 'AttachPoint_Hair', jobs = [];
+      mesh.traverse(n => { if (n.isMesh) { n.frustumCulled = false; const id = +(/_(\d+)$/.exec(n.material?.name || '')?.[1] ?? 0), tex = (it.m.find(m => m[0] === id) || it.m[0])?.[1]; if (tex) jobs.push(this.mat(tex, hair ? 'hair' : 'worn').then(m => { n.material = m; })); } });
+      await Promise.all(jobs); bone.add(holder);
+    }
+    return { root, rigs, phase: Math.random() * 6.28, race, g, gear };
   }
 }
 

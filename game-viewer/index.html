@@ -42,9 +42,9 @@
   #help { position:fixed; left:16px; top:12px; opacity:.0; transition:opacity .4s; text-shadow:0 1px 3px #000; pointer-events:none; line-height:1.7; }
   #help.on { opacity:.85; }
   #help b { color:var(--gold); font-weight:400; }
-  #mp { display:flex; gap:18px; align-items:center; border:1px solid #d9b86a44; padding:12px 18px; background:#0006; cursor:default; text-align:left; }
+  #mp { max-width:min(720px,92vw); box-sizing:border-box; display:flex; gap:18px; align-items:center; border:1px solid #d9b86a44; padding:12px 18px; background:#0006; cursor:default; text-align:left; }
   #mp canvas { border:1px solid #d9b86a33; background:radial-gradient(ellipse at 50% 70%,#3a2e1c88,#0000 70%); }
-  #mp .f { display:flex; flex-direction:column; gap:6px; min-width:250px; }
+  #mp .f { display:flex; flex-direction:column; gap:6px; flex:1; min-width:0; }
   #mp .t { color:var(--gold); letter-spacing:.18em; font-size:11px; margin-top:4px; }
   #mp input { background:#0b0d10; color:var(--ink); border:1px solid #d9b86a77; padding:6px 10px; font:inherit; font-size:15px; outline:none; }
   #mp input:focus { border-color:var(--gold); }

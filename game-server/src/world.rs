@@ -21,6 +21,7 @@ pub struct JoinReq {
     pub name: String,
     pub race: String,
     pub gender: String,
+    pub gear: String,
     pub tx: mpsc::Sender<Message>,
     pub reply: oneshot::Sender<Result<u16, &'static str>>,
 }
@@ -114,7 +115,7 @@ impl World {
         if name.is_empty() {
             name = format!("Player{id}");
         }
-        let info = PlayerInfo { id: id as u16, name, race: req.race, gender: req.gender };
+        let info = PlayerInfo { id: id as u16, name, race: req.race, gender: req.gender, gear: clean(&req.gear, MAX_GEAR) };
         self.players[id] = Some(Player { info, pos: PosUpdate::default(), has_pos: false, tx: req.tx, last_chat: Instant::now() - Duration::from_secs(10), last_sent: 0, dead: false });
         self.online += 1;
         let _ = req.reply.send(Ok(id as u16));

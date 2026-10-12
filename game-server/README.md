@@ -17,7 +17,7 @@ Then `node ../game-viewer/serve.js 8080`, open http://localhost:8080/, pick a ch
   each owns a bounded outbox the world writes into with `try_send`: a slow client just drops position snapshots, and is kicked if it can't keep up with events.
 * **Relay, not simulation.** Clients are authoritative for their own position (x, y, z, yaw, speed, flags) and send it at 15 Hz. Every tick the server builds,
   per client, one binary snapshot of the players inside the **interest radius** (900 m by default; spatial hash with radius-sized cells, 3x3 lookup).
-  Roster changes (join / leave / model / name) and chat are small JSON events sent to everybody, so avatars can be built before a player enters range.
+  Roster changes (join / leave, plus each player's name, race, gender and armour set) and chat are small JSON events sent to everybody, so avatars can be built before a player enters range.
 * **Chat** is global (rate-limited, 200 chars, control characters stripped); the viewer also shows it as a bubble over the speaker's head when in view.
 * **Wire format** is documented at the top of `src/proto.rs`. Positions are in the viewer's three.js space (game z negated); the server never interprets them beyond x/z distance.
 

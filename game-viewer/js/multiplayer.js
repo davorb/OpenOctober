@@ -46,7 +46,7 @@ export class Multiplayer {
     this.factory = new AvatarFactory();
     this.players = new Map(); this.me = null; this.ws = null; this.sendAcc = 0; this.last = null; this.speed = 0; this.dotMat = null;
     let saved = {}; try { saved = JSON.parse(localStorage.getItem('dfProfile') || '{}'); } catch {}
-    this.profile = { name: q.get('name') || saved.name || '', race: q.get('race') || saved.race || 'hum', gender: q.get('gender') || saved.gender || 'm' };
+    this.profile = { name: q.get('name') || saved.name || '', race: q.get('race') || saved.race || 'hum', gender: q.get('gender') || saved.gender || 'm', gear: q.get('gear') ?? saved.gear ?? '' };
     this.dotTex = null; this.started = false; this.typing = false; this.radius = 900;
     this.buildPicker(); this.buildChat(); this.buildRadar();
   }
@@ -54,26 +54,33 @@ export class Multiplayer {
   // ---------------------------------------------------------------- picker (intro screen)
   buildPicker() {
     const $ = this.$, box = $('mp'), P = this.profile;
-    box.innerHTML = `<canvas id="mpprev" width="260" height="360"></canvas><div class="f"><div class="t">YOUR CHARACTER</div>
+    box.innerHTML = `<canvas id="mpprev" width="190" height="262"></canvas><div class="f"><div class="t">YOUR CHARACTER</div>
       <input id="mpname" maxlength="16" placeholder="Name" spellcheck="false" autocomplete="off"><div class="t">RACE</div><div id="mprace" class="opts"></div>
-      <div class="t">BODY</div><div id="mpgender" class="opts"></div><div id="mpstat"></div></div>`;
+      <div class="t">BODY</div><div id="mpgender" class="opts"></div><div class="t">ARMOUR</div><div id="mpgear" class="opts"></div><div id="mpstat"></div></div>`;
     box.addEventListener('click', e => e.stopPropagation());
     box.addEventListener('keydown', e => e.stopPropagation());
     const name = $('mpname'); name.value = P.name; name.addEventListener('input', () => { P.name = name.value; this.saveProfile(); });
-    const opts = (id, list, key, after) => { const c = $(id); c.innerHTML = ''; list.forEach(([v, label]) => { const b = el('div', 'o' + (P[key] === v ? ' on' : ''), label); b.addEventListener('click', () => { P[key] = v; [...c.children].forEach(x => x.classList.toggle('on', x === b)); this.saveProfile(); this.refreshPreview(); }); c.appendChild(b); }); };
-    opts('mprace', RACES.map(r => [r.id, r.name]), 'race'); opts('mpgender', [['m', 'Male'], ['f', 'Female']], 'gender');
+    const opts = (id, list, key) => { const c = $(id); c.innerHTML = ''; list.forEach(([v, label]) => { const b = el('div', 'o' + (P[key] === v ? ' on' : ''), label); b.addEventListener('click', () => { P[key] = v; [...c.children].forEach(x => x.classList.toggle('on', x === b)); this.saveProfile(); if (key !== 'gear') this.gearRow(); this.refreshPreview(); }); c.appendChild(b); }); };
+    this.opts = opts;
+    opts('mprace', RACES.map(r => [r.id, r.name]), 'race'); opts('mpgender', [['m', 'Male'], ['f', 'Female']], 'gender'); this.gearRow();
     // live preview in its own small renderer
-    const cv = $('mpprev'); this.pr = new THREE.WebGLRenderer({ canvas: cv, antialias: true, alpha: true }); this.pr.setPixelRatio(Math.min(devicePixelRatio, 2)); this.pr.setSize(130, 180, false);
-    cv.style.width = '130px'; cv.style.height = '180px'; this.pr.outputColorSpace = THREE.SRGBColorSpace;
-    this.ps = new THREE.Scene(); this.pc = new THREE.PerspectiveCamera(28, 130 / 180, 0.5, 50); this.pc.position.set(0, AVATAR_HEIGHT * 0.52, 7.4);
-    this.ps.add(new THREE.HemisphereLight(0xfff2dc, 0x302820, 2.2)); const d = new THREE.DirectionalLight(0xffe2b0, 2.4); d.position.set(2, 4, 5); this.ps.add(d);
+    const cv = $('mpprev'); this.pr = new THREE.WebGLRenderer({ canvas: cv, antialias: true, alpha: true }); this.pr.setPixelRatio(Math.min(devicePixelRatio, 2)); this.pr.setSize(190, 262, false);
+    cv.style.width = '190px'; cv.style.height = '262px'; this.pr.outputColorSpace = THREE.SRGBColorSpace;
+    this.ps = new THREE.Scene(); this.pc = new THREE.PerspectiveCamera(28, 190 / 262, 0.5, 50); this.pc.position.set(0, AVATAR_HEIGHT * 0.52, 7.4);
+    this.ps.add(new THREE.HemisphereLight(0xfff2dc, 0x6a5a48, 3.2)); const d = new THREE.DirectionalLight(0xffe2b0, 3.2); d.position.set(2, 4, 6); this.ps.add(d);
     this.pav = null; this.previewLoop(); this.refreshPreview();
+  }
+  /** armour choices depend on race/gender (the game data defines which sets exist for each) */
+  async gearRow() {
+    const P = this.profile, list = await this.factory.gearFor(P.race, P.gender);
+    if (P.gear && !list.includes(P.gear)) P.gear = '';
+    this.opts('mpgear', [['', 'None'], ...list.map(n => [n, n])], 'gear');
   }
   saveProfile() { try { localStorage.setItem('dfProfile', JSON.stringify(this.profile)); } catch {} }
   async refreshPreview() {
     const k = (this.pk = (this.pk || 0) + 1), { race, gender } = this.profile;
     try {
-      const av = await this.factory.build(race, gender, 0);
+      const av = await this.factory.build(race, gender, this.profile.gear);
       if (k !== this.pk) return;
       if (this.pav) this.ps.remove(this.pav.root);
       this.pav = av; av.root.position.y = -0.05; this.ps.add(av.root);
@@ -96,7 +103,7 @@ export class Multiplayer {
     clearTimeout(this.retry);
     let ws; try { ws = new WebSocket(this.url); } catch { return this.status('Server address invalid'); }
     ws.binaryType = 'arraybuffer'; this.ws = ws; this.status('Connecting…');
-    ws.onopen = () => ws.send(JSON.stringify({ t: 'join', name: this.profile.name, race: this.profile.race, gender: this.profile.gender }));
+    ws.onopen = () => ws.send(JSON.stringify({ t: 'join', name: this.profile.name, race: this.profile.race, gender: this.profile.gender, gear: this.profile.gear }));
     ws.onmessage = e => typeof e.data === 'string' ? this.onJson(JSON.parse(e.data)) : this.onBinary(e.data);
     ws.onclose = () => { if (this.ws !== ws) return; this.ws = null; this.dropAll(); if (this.fatal) return; this.status('Offline — retrying…'); this.retry = setTimeout(() => this.open(), 3000); };
     ws.onerror = () => {};
@@ -163,7 +170,7 @@ export class Multiplayer {
   async ensureAvatar(p) {
     if (p.av || p.building) return; p.building = true;
     try {
-      const av = await this.factory.build(p.info.race, p.info.gender, p.info.id * 7 + p.info.name.length);
+      const av = await this.factory.build(p.info.race, p.info.gender, p.info.gear);
       if (!this.players.has(p.info.id)) return;
       av.tag = nameSprite(p.info.name); av.dot = dotSprite(); av.pos = new THREE.Vector3(); av.cast = null;
       p.av = av; av.attached = false;

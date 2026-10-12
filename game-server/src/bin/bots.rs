@@ -31,6 +31,7 @@ impl Rng {
     }
 }
 
+const GEAR: [&str; 8] = ["", "Cloth", "Leather", "Chain", "Plate", "Banded", "Bone", "Dragon"];
 const LINES: [&str; 6] = ["anyone near the keep?", "o/", "nice view up here", "heading north", "gg", "lag check"];
 
 #[tokio::main]
@@ -62,7 +63,7 @@ async fn bot(i: usize, url: String, (cx, cz, spread): (f32, f32, f32), net: Arc<
     let mut rng = Rng(0x9E3779B97F4A7C15 ^ ((i as u64 + 1) * 0xD1B54A32D192ED03));
     let Ok((ws, _)) = connect_async(url.as_str()).await else { eprintln!("bot {i}: connect failed"); return };
     let (mut tx, mut rx) = ws.split();
-    let join = serde_json::json!({ "t": "join", "name": format!("Bot{i}"), "race": RACES[rng.next() as usize % 6], "gender": GENDERS[rng.next() as usize % 2] });
+    let join = serde_json::json!({ "t": "join", "name": format!("Bot{i}"), "race": RACES[rng.next() as usize % 6], "gender": GENDERS[rng.next() as usize % 2], "gear": GEAR[rng.next() as usize % GEAR.len()] });
     if tx.send(Message::Text(join.to_string())).await.is_err() { return }
     net.connected.fetch_add(1, Relaxed);
 

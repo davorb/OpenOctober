@@ -21,6 +21,7 @@ pub const RACES: [&str; 6] = ["hum", "alf", "dwf", "ork", "mir", "mhm"];
 pub const GENDERS: [&str; 2] = ["m", "f"];
 pub const MAX_NAME: usize = 16;
 pub const MAX_CHAT: usize = 200;
+pub const MAX_GEAR: usize = 24;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PosUpdate {
@@ -76,12 +77,14 @@ pub struct PlayerInfo {
     pub name: String,
     pub race: String,
     pub gender: String,
+    /// Armour set name from the game data ("" = none). Opaque to the server; clients ignore names they can't resolve.
+    pub gear: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum ClientMsg {
-    Join { name: String, race: String, gender: String },
+    Join { name: String, race: String, gender: String, #[serde(default)] gear: String },
     Chat { text: String },
 }
 
