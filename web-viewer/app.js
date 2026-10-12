@@ -173,7 +173,59 @@ function makeTerrainMaterial(group) {
   return new THREE.ShaderMaterial({ vertexShader: terrainVS, fragmentShader: terrainFS, uniforms, side: THREE.DoubleSide });
 }
 
+// The tile mesh is split into groups by material set and vertices aren't shared between groups, so a vertex on a
+// group boundary only carries weights for its own group's materials: the neighbour's materials are dropped and
+// the transition becomes a hard, triangle-shaped edge. Fix: merge weights of coincident vertices (world space, so
+// it also works across tiles), then give every group the union of materials its vertices touch.
+const comp = (a, i, c) => [a.getX, a.getY, a.getZ, a.getW][c].call(a, i);
+function stitchTerrain(meshes) {
+  const key = (v, m) => { v.applyMatrix4(m); return Math.round(v.x * 50) + ',' + Math.round(v.y * 50) + ',' + Math.round(v.z * 50); };
+  const matTex = new Map();
+  const field = new Map(); // position key -> Map(materialId -> weight)
+  const per = [];
+  const v = new THREE.Vector3();
+  for (const { o, grp } of meshes) {
+    o.updateWorldMatrix(true, false);
+    const g = o.geometry, pos = g.getAttribute('position'), w0 = g.getAttribute('w0'), w1 = g.getAttribute('w1');
+    grp.materials.forEach((m, i) => { if (grp.textures[i]) matTex.set(m, grp.textures[i]); });
+    const keys = new Map(); // vertex index -> key (only vertices this primitive uses)
+    const idx = g.index ? g.index.array : null;
+    const n = idx ? idx.length : pos.count;
+    for (let t = 0; t < n; t++) {
+      const vi = idx ? idx[t] : t;
+      if (keys.has(vi)) continue;
+      const k = key(v.fromBufferAttribute(pos, vi), o.matrixWorld);
+      keys.set(vi, k);
+      let f = field.get(k); if (!f) field.set(k, f = new Map());
+      grp.materials.forEach((m, i) => {
+        const s = grp.slots[i]; if (s == null) return;
+        const w = s < 4 ? comp(w0, vi, s) : comp(w1, vi, s - 4);
+        if (w > (f.get(m) || 0)) f.set(m, w);
+      });
+    }
+    per.push({ o, grp, keys });
+  }
+  for (const { o, grp, keys } of per) {
+    const g = o.geometry, count = g.getAttribute('position').count;
+    const tot = new Map();
+    for (const k of keys.values()) for (const [m, w] of field.get(k)) if (matTex.has(m)) tot.set(m, (tot.get(m) || 0) + w);
+    const mats = [...tot].filter(([, w]) => w > 1e-3).sort((a, b) => b[1] - a[1]).slice(0, MAXT).map(([m]) => m).sort((a, b) => a - b);
+    if (!mats.length) continue;
+    const a0 = new Float32Array(count * 4), a1 = new Float32Array(count * 4);
+    for (const [vi, k] of keys) {
+      const f = field.get(k); let sum = 0;
+      for (const m of mats) sum += f.get(m) || 0;
+      mats.forEach((m, s) => { const w = sum > 1e-5 ? (f.get(m) || 0) / sum : (s === 0 ? 1 : 0); (s < 4 ? a0 : a1)[vi * 4 + (s % 4)] = w; });
+    }
+    g.setAttribute('w0', new THREE.BufferAttribute(a0, 4));
+    g.setAttribute('w1', new THREE.BufferAttribute(a1, 4));
+    o.userData.stitched = { materials: mats, slots: mats.map((_, i) => i), textures: mats.map(m => matTex.get(m)) };
+  }
+}
+
 function upgradeTerrain(root, out) {
+  const found = [];
+  root.updateMatrixWorld(true);
   root.traverse(o => {
     if (!o.isMesh || !o.geometry.getAttribute('_weights0')) return;
     const g = o.geometry;
@@ -187,11 +239,16 @@ function upgradeTerrain(root, out) {
     const groups = o.userData.groups;
     const grp = groups && groups[o.parent.children.filter(c => c.isMesh).indexOf(o)];
     if (!grp) return;
-    o.material = makeTerrainMaterial(grp);
+    found.push({ o, grp });
+  });
+  try { stitchTerrain(found); } catch (e) { console.warn('terrain stitching failed', e); }
+  for (const { o, grp } of found) {
+    const st = o.userData.stitched || grp;
+    o.material = makeTerrainMaterial(st);
     o.userData.terrain = true;
     out.terrain.push(o);
-    for (const t of grp.textures) if (t) out.terrainTextures.add(t.replace(/\.dds$/i, '.png'));
-  });
+    for (const t of st.textures) if (t) out.terrainTextures.add(t.replace(/\.dds$/i, '.png'));
+  }
 }
 
 // ───────────────────────── loading ─────────────────────────
