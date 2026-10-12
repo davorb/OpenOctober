@@ -184,6 +184,7 @@ export class AvatarFactory {
       const src = await this.static(base(it.f)); if (!src) continue;
       const mesh = src.clone(true), holder = new THREE.Group();
       holder.position.fromArray(ap.t); holder.rotation.set(ap.r[0], ap.r[1], ap.r[2]); holder.scale.setScalar(ATTACH_SCALE); holder.add(mesh);
+      if (point === 'AttachPoint_Helmet') mesh.rotation.y = Math.PI;   // helmet meshes face the opposite way to the head frame (identity attach rotation)
       const hair = point === 'AttachPoint_Hair', jobs = [];
       mesh.traverse(n => { if (n.isMesh) { n.frustumCulled = false; const id = +(/_(\d+)$/.exec(n.material?.name || '')?.[1] ?? 0), tex = (it.m.find(m => m[0] === id) || it.m[0])?.[1]; if (tex) jobs.push(this.mat(tex, hair ? 'hair' : 'worn').then(m => { n.material = m; })); } });
       await Promise.all(jobs); bone.add(holder);
