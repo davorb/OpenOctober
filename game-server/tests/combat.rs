@@ -7,7 +7,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 
 const WEAPONS: &str = r#"{"weapons":{"r_Test Sword":{"group":"sword","kind":"melee","reach":2.1,"angle":60,"rank":30},
-    "r_Test Bow":{"group":"bow","kind":"ranged","rank":30}},"clipDur":{"singlehand_attack_01":1.0,"bow_fire":0.83}}"#;
+    "r_Test Bow":{"group":"bow","kind":"ranged","rank":30},
+    "r_Test Doom":{"group":"sword","kind":"melee","reach":2.1,"angle":60,"rank":400}},"clipDur":{"singlehand_attack_01":1.0,"bow_fire":0.83}}"#;
 
 struct Client {
     id: u16,
@@ -231,4 +232,28 @@ async fn bots_without_height_are_hit_by_arrows_at_real_terrain_height() {
     let hit = texts(&mut a).into_iter().find(|t| t.contains("\"t\":\"hit\"")).expect("the arrow hit the bot");
     assert!(hit.contains("\"snap\":true") && hit.contains(&format!("\"i\":{}", bot.id)), "{hit}");
     let _ = &mut bot;
+}
+
+#[tokio::test]
+async fn a_dead_player_leaves_a_corpse_that_stays_put_and_late_joiners_see() {
+    let cmds = start(None, "corpse").await;
+    let mut a = join(&cmds, (300.0, -300.0), 0.0).await;
+    let mut b = join(&cmds, (300.0, -302.5), std::f32::consts::PI).await;
+    cmds.send(Cmd::Equip(a.id, "r_Test Doom".into(), true)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    texts(&mut a);
+    cmds.send(Cmd::Attack(a.id, "slash".into(), "singlehand_attack_01".into())).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    let seen = texts(&mut a);
+    let corpse = seen.iter().find(|t| t.contains("\"t\":\"corpse\"")).expect("a corpse message");
+    let v: serde_json::Value = serde_json::from_str(corpse).unwrap();
+    assert!((v["x"].as_f64().unwrap() - 300.0).abs() < 0.01 && (v["z"].as_f64().unwrap() + 302.5).abs() < 0.01);
+    // the dead player "walks away" (a bot keeps sending positions): the body does not move
+    cmds.send(Cmd::Pos(b.id, PosUpdate { x: 350.0, y: 0.0, z: -350.0, ..Default::default() })).await.unwrap();
+    // a player who joins later is told about the body
+    let mut c = join(&cmds, (310.0, -310.0), 0.0).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let late = texts(&mut c);
+    assert!(late.iter().any(|t| t.contains("\"t\":\"corpse\"") && t.contains(&format!("\"cid\":{}", v["cid"]))), "{late:?}");
+    let _ = &mut b;
 }

@@ -56,6 +56,16 @@ struct Pending {
     owner: u16,
 }
 
+/// How long a body stays on the ground after its owner died.
+pub const CORPSE_SECS: u64 = 600;
+
+struct Corpse {
+    cid: u32,
+    expires: Instant,
+    /// The JSON of its `Corpse` message, kept for players who join later.
+    msg: String,
+}
+
 /// Seconds a dead player lies there before he gets up (a Respawn message may bring it forward after DOWN_MIN).
 const DOWN_SECS: f32 = 6.0;
 const DOWN_MIN: f32 = 2.5;
@@ -100,6 +110,8 @@ struct World {
     weapons: Weapons,
     pending: Vec<Pending>,
     shots: Vec<Projectile>,
+    corpses: Vec<Corpse>,
+    next_corpse: u32,
 }
 
 pub async fn run(cfg: Config, mut rx: mpsc::Receiver<Cmd>) {
@@ -119,7 +131,7 @@ pub async fn run(cfg: Config, mut rx: mpsc::Receiver<Cmd>) {
         None => Weapons::default(),
     };
     println!("{} weapons", weapons.defs.len());
-    let mut world = World { players: (0..cfg.max_players).map(|_| None).collect(), cfg: cfg.clone(), online: 0, cursor: 0, tick: 0, mobs, stats: Stats::default(), weapons, pending: Vec::new(), shots: Vec::new() };
+    let mut world = World { players: (0..cfg.max_players).map(|_| None).collect(), cfg: cfg.clone(), online: 0, cursor: 0, tick: 0, mobs, stats: Stats::default(), weapons, pending: Vec::new(), shots: Vec::new(), corpses: Vec::new(), next_corpse: 1 };
     let mut ticker = interval(Duration::from_secs_f64(1.0 / cfg.tick_hz as f64));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut report = interval(Duration::from_secs(5));
@@ -146,8 +158,11 @@ impl World {
             Cmd::Join(req) => self.join(req),
             Cmd::Pos(id, p) => {
                 if let Some(Some(pl)) = self.players.get_mut(id as usize) {
-                    pl.pos = p;
-                    pl.has_pos = true;
+                    // a dead player lies where he fell (bots keep "walking": ignored)
+                    if pl.down_until.is_none() || !pl.has_pos {
+                        pl.pos = p;
+                        pl.has_pos = true;
+                    }
                 }
             }
             Cmd::Chat(id, text) => self.chat(id, &text),
@@ -196,6 +211,14 @@ impl World {
                 return;
             }
         }
+        let bodies: Vec<String> = self.corpses.iter().map(|c| c.msg.clone()).collect();
+        for b in bodies {
+            if self.players[id].as_ref().unwrap().tx.try_send(Message::Text(b)).is_err() {
+                self.players[id].as_mut().unwrap().dead = true;
+                return;
+            }
+        }
+        let me = self.players[id].as_ref().unwrap();
         let joined = ServerMsg::Joined { player: &me.info };
         let text = serde_json::to_string(&joined).unwrap();
         self.broadcast_text(text, Some(id as u16));
@@ -327,7 +350,18 @@ impl World {
         self.send_near(at[0], at[2], msg, None);
         if killed {
             self.send_near(at[0], at[2], serde_json::to_string(&ServerMsg::Died { v: "p", i: vid }).unwrap(), None);
+            self.leave_corpse(vid);
         }
+    }
+
+    /// The body of a player who just died stays for CORPSE_SECS, visible to everybody.
+    fn leave_corpse(&mut self, id: u16) {
+        let Some(Some(p)) = self.players.get(id as usize) else { return };
+        let cid = self.next_corpse;
+        self.next_corpse += 1;
+        let msg = serde_json::to_string(&ServerMsg::Corpse { cid, name: &p.info.name, race: &p.info.race, gender: &p.info.gender, gear: &p.info.gear, x: p.pos.x, y: p.pos.y, z: p.pos.z, yaw: p.pos.yaw, snap: p.pos.flags & FLAG_SNAP != 0 }).unwrap();
+        self.corpses.push(Corpse { cid, expires: Instant::now() + Duration::from_secs(CORPSE_SECS), msg: msg.clone() });
+        self.broadcast_text(msg, None);
     }
 
     fn hit_mob(&mut self, owner: u16, mid: u16, dmg: f32, grp: &str) {
@@ -440,6 +474,14 @@ impl World {
             false
         });
         self.shots.append(&mut shots);
+        // bodies rot away
+        let gone: Vec<u32> = self.corpses.iter().filter(|c| c.expires <= now).map(|c| c.cid).collect();
+        if !gone.is_empty() {
+            self.corpses.retain(|c| c.expires > now);
+            for cid in gone {
+                self.broadcast_text(serde_json::to_string(&ServerMsg::CorpseGone { cid }).unwrap(), None);
+            }
+        }
         // get up
         let up: Vec<u16> = self.players.iter().flatten().filter(|p| p.down_until.map_or(false, |t| t <= now)).map(|p| p.info.id).collect();
         for id in up {

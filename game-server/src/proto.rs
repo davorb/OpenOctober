@@ -140,6 +140,9 @@ pub enum ServerMsg<'a> {
     Died { v: &'a str, i: u16 },
     /// A player got up again (full health) - the client puts itself back at a spawn point.
     Respawn { id: u16, hp: f32, max: f32 },
+    /// A player died here: his body stays on the ground (CORPSE_SECS) for everybody, joiners get the existing ones too. `snap`: the body has no height of its own (bots).
+    Corpse { cid: u32, name: &'a str, race: &'a str, gender: &'a str, gear: &'a str, x: f32, y: f32, z: f32, yaw: f32, snap: bool },
+    CorpseGone { cid: u32 },
     /// Your own health (after joining).
     Hp { hp: f32, max: f32 },
 }
