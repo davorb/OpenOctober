@@ -13,13 +13,13 @@ import { newColl, addCollision, finishColl } from './collision.js';
 const OBJ_DIR = '/converted/maps/';
 
 export class World {
-  constructor({ scene, env, tex, water, tiles, names, props = {}, alphaMode = null, opts = {} }) {
+  constructor({ scene, env, tex, water, tiles, names, props = {}, alphaMode = null, fullTiles = [], opts = {} }) {
     this.scene = scene; this.env = env; this.tex = tex; this.water = water;
     // Subsets whose shader does not alpha-test. `all` is every subset of that mesh; `solid` is one subset; `keep` wins over both.
     const am = alphaMode || {};
     this.solidAll = new Set(am.all || []); this.solidSub = new Set(am.solid || []); this.solidKeep = new Set(am.keep || []);
     this.opts = { terrainRadius: 3600, objectRadius: 1500, workers: 3, ...opts };
-    this.tiles = new Map();
+    this.tiles = new Map(); this.fullTiles = new Set(fullTiles);   // tiles that also have <tile>_full.glb: the level incl. clan cities, hamlets, village/bind/chaos stones
     for (const [name, t] of Object.entries(tiles)) {
       // game (x, z) -> three (x, -z)
       this.tiles.set(name, { name, info: t, display: names[name] || name,
@@ -193,7 +193,7 @@ export class World {
   async _loadObjects(t) {
     this.objBusy = true; t.oState = 3;
     try {
-      const gltf = await this.gltf.loadAsync(OBJ_DIR + t.name + '.glb');
+      const gltf = await this.gltf.loadAsync(OBJ_DIR + t.name + (this.fullTiles.has(t.name) ? '_full' : '') + '.glb');
       if (t.oState !== 3) { this._disposeScene(gltf.scene); this.objBusy = false; return; }
       const root = gltf.scene, json = gltf.parser.json, assoc = gltf.parser.associations;
       const liquids = t.info.liquids || {};

@@ -10,6 +10,7 @@ import { DynLights } from './lights.js';
 import { Post } from './post.js';
 import { Vegetation } from './vegetation.js';
 import { Multiplayer } from './multiplayer.js';
+import { Pois } from './pois.js';
 
 const $ = id => document.getElementById(id);
 const q = new URLSearchParams(location.search);
@@ -34,8 +35,8 @@ const post = new Post(renderer); post.enabled = q.get('post') ? q.get('post') !=
 function resize() { renderer.setSize(innerWidth, innerHeight, false); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); const d = renderer.getDrawingBufferSize(new THREE.Vector2()); post.resize(d.x, d.y); }
 addEventListener('resize', resize); resize();
 
-const [worldData, musicAreas, tileNames, envData, terrainManifest, props, spawns, vegData, alphaMode] = await Promise.all(
-  ['world', 'music', 'tiles', 'env', 'terrain_textures', 'props', 'spawns', 'veg', 'alphamode'].map(n => J(`/data/${n}.json`)));
+const [worldData, musicAreas, tileNames, envData, terrainManifest, props, spawns, vegData, alphaMode, poiData, fullTiles] = await Promise.all(
+  ['world', 'music', 'tiles', 'env', 'terrain_textures', 'props', 'spawns', 'veg', 'alphamode', 'pois', 'fulltiles'].map(n => J(`/data/${n}.json`)));
 
 // ---- lights for ordinary (object) materials; terrain/water do their own lighting from the same uniforms
 const env = new Environment(envData);
@@ -53,8 +54,9 @@ const loader = new THREE.TextureLoader();
 const sky = new Sky(env, loader); scene.add(sky.group);
 const tex = new TerrainTextures(renderer, terrainManifest);
 const water = new WaterFactory(env, sky.uniforms.uZenith); water.linearFloat = renderer.extensions.has('OES_texture_float_linear');
-const world = new World({ scene, env, tex, water, tiles: worldData, names: tileNames, props, alphaMode, opts: { terrainRadius: VIEW * 0.9, objectRadius: S.obj } });
+const world = new World({ scene, env, tex, water, tiles: worldData, names: tileNames, props, alphaMode, fullTiles: q.get('full') === '0' ? [] : fullTiles, opts: { terrainRadius: VIEW * 0.9, objectRadius: S.obj } });
 
+const pois = new Pois({ scene, world, data: poiData }); pois.setEnabled(q.get('pois') === '1');
 const veg = new Vegetation({ scene, env, world, data: vegData }); veg.enabled = q.get('veg') !== '0';
 
 // open ocean everywhere (terrain-only far tiles carry no water plane of their own)
@@ -105,6 +107,7 @@ addEventListener('keydown', e => {
   if (hit('KeyJ')) { veg.enabled = !veg.enabled; toast(veg.enabled ? 'Vegetation on' : 'Vegetation off'); }
   if (hit('KeyN')) { noclip = !noclip; toast(noclip ? 'No clipping' : 'Ground clamp'); }
   if (hit('KeyO')) $('cfg').classList.toggle('on');
+  if (hit('KeyL')) { pois.setEnabled(!pois.enabled); toast(pois.enabled ? 'Landmarks on' : 'Landmarks off'); }
   if (hit('KeyH')) $('help').classList.toggle('on');
   if (hit('KeyP')) console.log(JSON.stringify({ x: camera.position.x, y: camera.position.y, z: -camera.position.z, yaw, pitch }));
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
@@ -182,7 +185,7 @@ function frameInner() {
   ocean.visible = !world.covered(camera.position.x, camera.position.y, camera.position.z);   // underground (Shoal): the open-sea plane would flood the cavern
 
   world.update(Math.min(raw, 0.5), camera);
-  veg.update(dt, camera);
+  veg.update(dt, camera); pois.update(dt, camera);
 
   // place / music / ambience
   const t = world.tileAt(camera.position.x, camera.position.z);
