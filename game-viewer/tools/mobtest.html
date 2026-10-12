@@ -1,0 +1,22 @@
+<!doctype html>
+<!-- Dev harness for the mob walk cycle (js/mobs.js gait()): four copies of one monster at different stride phases.  http://localhost:8080/tools/mobtest.html?m=troll  (m = converted/animated/<name>.glb) --><meta charset="utf-8"><body style="margin:0;background:#789"><canvas id="c" style="width:100vw;height:100vh;display:block"></canvas>
+<script type="importmap">{"imports":{"three":"/vendor/three/build/three.module.js","three/addons/":"/vendor/three/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { cloneSkinned } from '/js/avatars.js';
+import { prepareTemplate, collectBones, gait } from '/js/mobs.js';
+const name = new URLSearchParams(location.search).get('m') || 'tiger', N = 4;
+const r = new THREE.WebGLRenderer({ canvas: document.getElementById('c'), antialias: true, preserveDrawingBuffer: true }); r.setSize(innerWidth, innerHeight, false); r.outputColorSpace = THREE.SRGBColorSpace;
+const sc = new THREE.Scene(); sc.background = new THREE.Color(0x7788aa); sc.add(new THREE.HemisphereLight(0xffffff, 0x665544, 3)); const dl = new THREE.DirectionalLight(0xffffff, 2); dl.position.set(3, 5, 4); sc.add(dl);
+const g = await new GLTFLoader().loadAsync(`/converted/animated/${name}.glb`), tpl = prepareTemplate(g.scene), S = 0.0254 * 1.5;
+const ms = [];
+for (let i = 0; i < N; i++) {
+  const o = cloneSkinned(tpl), root = new THREE.Group(); o.traverse(n => { if (n.isMesh) n.frustumCulled = false; }); root.add(o); root.scale.setScalar(S);
+  const h = new THREE.Group(); h.add(root); h.position.x = (i - (N - 1) / 2) * 4.2; h.rotation.y = Math.PI / 2;   // face +X (screen right)
+  sc.add(h); const m = { bones: {}, breath: 0, phase: (i / N) * Math.PI * 2 }; collectBones(o, tpl, m.bones); ms.push(m);
+  gait(m, Math.sin(m.phase), Math.cos(m.phase), 1);
+}
+const cam = new THREE.PerspectiveCamera(36, innerWidth / innerHeight, 0.1, 100); cam.position.set(0, 2.0, 30); cam.lookAt(0, 1.0, 0);
+(function loop(){ r.render(sc, cam); requestAnimationFrame(loop); })(); document.title = 'ready'; window.__d = { sc, ms, r, cam, tpl };
+</script>
