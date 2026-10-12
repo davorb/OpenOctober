@@ -28,7 +28,7 @@ renderer.info.autoReset = false;   // post-processing renders several passes per
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(70, 1, 1.5, VIEW * 1.05);
 camera.rotation.order = 'YXZ';
-const post = new Post(renderer); post.enabled = q.get('post') ? q.get('post') !== '0' : S.post !== false;
+const post = new Post(renderer); post.enabled = q.get('post') ? q.get('post') !== '0' : S.post !== false; post.ssao = q.get('ssao') ? q.get('ssao') !== '0' : S.ssao !== false;
 function resize() { renderer.setSize(innerWidth, innerHeight, false); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); const d = renderer.getDrawingBufferSize(new THREE.Vector2()); post.resize(d.x, d.y); }
 addEventListener('resize', resize); resize();
 
@@ -97,6 +97,7 @@ addEventListener('keydown', e => {
   if (hit('KeyM')) toast(music.toggle() ? 'Music on' : 'Music muted');
   if (hit('KeyG')) toggleMode();
   if (hit('KeyB')) { post.enabled = S.post = !post.enabled; try { localStorage.setItem('dfSettings2', JSON.stringify(S)); } catch {} toast(post.enabled ? 'Post-processing on (bloom, god rays, vignette)' : 'Post-processing off'); }
+  if (hit('KeyK')) { post.ssao = S.ssao = !post.ssao; try { localStorage.setItem('dfSettings2', JSON.stringify(S)); } catch {} toast(post.ssao ? 'SSAO on' : 'SSAO off'); }
   if (hit('KeyN')) { noclip = !noclip; toast(noclip ? 'No clipping' : 'Ground clamp'); }
   if (hit('KeyO')) $('cfg').classList.toggle('on');
   if (hit('KeyH')) $('help').classList.toggle('on');
@@ -227,11 +228,11 @@ function hud(t, gh) {
   $('stats').textContent = `${fps} fps   ${world.stats.terrain} terrain · ${world.stats.objects} object tiles${world.stats.loading ? '   loading ' + world.stats.loading : ''}\n` +
     `x ${p.x.toFixed(0)}  y ${p.y.toFixed(0)}  z ${(-p.z).toFixed(0)}   ${Math.round(baseSpeed)} m/s\n${renderer.info.render.calls} calls · ${(renderer.info.render.triangles / 1e6).toFixed(2)}M tris`;
 }
-$('help').innerHTML = `<b>WASD</b> fly · <b>Shift</b> fast · <b>Ctrl</b> slow · <b>Space/E</b> up · <b>C/Q</b> down · <b>Wheel</b> base speed · <b>G</b> walk with collision (Space jumps, Shift sprints, Ctrl slow walk)<br><b>T</b> pause/resume time · <b>[ ]</b> ±30 min (Shift ±2 h) · <b>V</b> atmosphere · <b>M</b> music · <b>B</b> post-processing · <b>N</b> noclip · <b>H</b> hide this`;
+$('help').innerHTML = `<b>WASD</b> fly · <b>Shift</b> fast · <b>Ctrl</b> slow · <b>Space/E</b> up · <b>C/Q</b> down · <b>Wheel</b> base speed · <b>G</b> walk with collision (Space jumps, Shift sprints, Ctrl slow walk)<br><b>T</b> pause/resume time · <b>[ ]</b> ±30 min (Shift ±2 h) · <b>V</b> atmosphere · <b>M</b> music · <b>B</b> post-processing · <b>K</b> SSAO · <b>N</b> noclip · <b>H</b> hide this`;
 setTimeout(setModeLabel, 0);
 
 // ---- boot: preload around the start, then wait for the click (also unlocks audio)
-window.dbg = { player, tp: (x, y, z) => { camera.position.set(x, y, -z); player.pos.set(x, y - player.eye, -z); player.vy = 0; }, camera, world, env, music, scene, renderer, ambience, set: (x, y, z) => camera.position.set(x, y, -z), look: (yw, pt) => { yaw = yw; pitch = pt; } };
+window.dbg = { post, player, tp: (x, y, z) => { camera.position.set(x, y, -z); player.pos.set(x, y - player.eye, -z); player.vy = 0; }, camera, world, env, music, scene, renderer, ambience, set: (x, y, z) => camera.position.set(x, y, -z), look: (yw, pt) => { yaw = yw; pitch = pt; } };
 const intro = $('intro');
 let ready = false, started = false;
 let bootTimer = 0;
