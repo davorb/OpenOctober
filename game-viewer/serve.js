@@ -2,12 +2,12 @@
 // Darkfall game-viewer dev server (no dependencies).  usage: node serve.js [port]
 //   /            -> this folder          /data/       -> ./data  (decrypted game data + built json)
 //   /converted/  -> ../converted         /dds/        -> ../export/texture/dds
-//   /audio/      -> ../export/audio
+//   /tex/        -> ../export/texture (colour-grade LUTs)     /audio/      -> ../export/audio
 const http = require('http'), fs = require('fs'), path = require('path');
 const HERE = __dirname, ROOT = path.resolve(HERE, '..');
 const MOUNTS = [
   ['/data/', path.join(HERE, 'data')], ['/converted/', path.join(ROOT, 'converted')],
-  ['/dds/', path.join(ROOT, 'export/texture/dds')], ['/audio/', path.join(ROOT, 'export/audio')],
+  ['/dds/', path.join(ROOT, 'export/texture/dds')], ['/tex/', path.join(ROOT, 'export/texture')], ['/audio/', path.join(ROOT, 'export/audio')],
   ['/', HERE],
 ];
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json', '.css': 'text/css', '.png': 'image/png',

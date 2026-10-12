@@ -30,7 +30,7 @@ renderer.info.autoReset = false;   // post-processing renders several passes per
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(70, 1, 1.5, VIEW * 1.05);
 camera.rotation.order = 'YXZ';
-const post = new Post(renderer); post.enabled = q.get('post') ? q.get('post') !== '0' : S.post !== false; post.ssao = q.get('ssao') ? q.get('ssao') !== '0' : S.ssao !== false;
+const post = new Post(renderer); post.enabled = q.get('post') ? q.get('post') !== '0' : S.post !== false; post.ssao = q.get('ssao') ? q.get('ssao') !== '0' : S.ssao !== false; post.grade = q.get('grade') !== '0';
 function resize() { renderer.setSize(innerWidth, innerHeight, false); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); const d = renderer.getDrawingBufferSize(new THREE.Vector2()); post.resize(d.x, d.y); }
 addEventListener('resize', resize); resize();
 
@@ -197,7 +197,7 @@ function frameInner() {
 
   underAmt += ((ocean.visible && camera.position.y < SEA_LEVEL - 4 ? 1 : 0) - underAmt) * (1 - Math.exp(-dt * 8));
   renderer.info.reset();
-  post.render(scene, camera, { sunDir: env.u.uSunDir.value, sunColor: env.u.uSunColor.value, daylight: env.state.daylight ?? 1, under: underAmt, time: env.u.uTime.value });
+  post.setGrade(env.moodMix(), env.todMix());  post.render(scene, camera, { sunDir: env.u.uSunDir.value, sunColor: env.u.uSunColor.value, daylight: env.state.daylight ?? 1, under: underAmt, time: env.u.uTime.value });
 
   fpsAcc += dt; fpsN++;
   if (fpsAcc > 0.5) { fps = Math.round(fpsN / fpsAcc); fpsAcc = 0; fpsN = 0; hud(t, gh); }

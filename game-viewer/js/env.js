@@ -32,6 +32,16 @@ const REGION_FRAMES = {
 };
 for (const [a, b] of [['Ork Starting Area', 'Ork Land'], ['Alfar Starting Area', 'Alfar Land'], ['Human Starting Area', 'Human Land'], ['Mirdain Starting Area', 'Mirdain Land'],
   ['Mahirim Starting Area', 'Mahirim Land'], ['Dwarf Starting Area', 'Dwarven Land']]) REGION_FRAMES[a] = REGION_FRAMES[b];
+// pp_grade colour LUT (export/texture/lut_<name>.dds) per music area. The game's zone -> mood table lives in the native client, so this is inferred
+// from the LUT and area names; areas without a mood of their own get the default filmic LUT.
+const REGION_MOOD = {
+  'Alfar Land': 'mood_alfar', 'Alfar Starting Area': 'mood_alfar', 'Dwarven Land': 'mood_dwarf', 'Dwarf Starting Area': 'mood_dwarf',
+  'Ork Land': 'mood_ork', 'Ork Starting Area': 'mood_ork', 'Mirdain Land': 'mood_mirdain', 'Mirdain Starting Area': 'mood_mirdain',
+  'Mahirim Land': 'mood_mahirim', 'Mahirim Starting Area': 'mood_mahirim', 'Dawnshore': 'mood_dawnshore', 'Desert Continent': 'mood_rubayiat',
+  'Ice continent': 'mood_niflheim', 'The Frostheld': 'mood_frostheld', 'Sea Area': 'mood_sea',
+};
+// time-of-day LUT keyframes (minutes of day); the game's phase boundaries are native too, these follow the clear-sky keyframes used for the music slots
+const TOD_LUT = [[270, 'tod_night'], [360, 'tod_dawn'], [540, 'tod_day'], [900, 'tod_day'], [1120, 'tod_dusk'], [1290, 'tod_night'], [1710, 'tod_night']];
 const REF_FRAME = 'env_human_clear01_a.xml';       // noon of the default clear-sky cycle
 const clampR = v => Math.max(0.4, Math.min(2.4, v));
 
@@ -68,6 +78,22 @@ export class Environment {
   // music slot, boundaries follow the clear-sky keyframes (dawn 6:00 -> noon -> warm 15:00 -> dusk 18:40 -> night 22:00)
   slot() { const t = this.time % 1440; return t >= 300 && t < 660 ? 'sunrise' : t >= 660 && t < 900 ? 'midday' : t >= 900 && t < 1200 ? 'sunset' : 'midnight'; }
 
+  // [lutA, lutB, blend] for the zone mood stage: the two heaviest moods among the (smoothed) region weights
+  moodMix() {
+    const w = new Map();
+    for (const [name, v] of this.regionW) { const m = REGION_MOOD[name] || 'filmic_default'; w.set(m, (w.get(m) || 0) + v); }
+    const top = [...w].sort((a, b) => b[1] - a[1]);
+    if (!top.length) return ['filmic_default', 'filmic_default', 0];
+    const [a, b] = [top[0], top[1] || top[0]];
+    return [a[0], b[0], a === b ? 0 : b[1] / Math.max(a[1] + b[1], 1e-6)];
+  }
+  // [lutA, lutB, blend] for the time-of-day stage
+  todMix() {
+    const t = this.time % 1440 < TOD_LUT[0][0] ? this.time % 1440 + 1440 : this.time % 1440;
+    let i = 0; while (i < TOD_LUT.length - 2 && TOD_LUT[i + 1][0] <= t) i++;
+    const [t0, a] = TOD_LUT[i], [t1, b] = TOD_LUT[i + 1];
+    return [a, b, smooth(Math.max(0, Math.min(1, (t - t0) / (t1 - t0))))];
+  }
   frame(file) { return this.data.frames[file]; }
   // colour set of a keyframe pair: sun light, ambient, fog, clouds
   colors(A, B, k) {

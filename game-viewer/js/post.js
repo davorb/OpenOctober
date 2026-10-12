@@ -2,7 +2,8 @@
 //   scene (HDR, MSAA, depth texture) -> SSAO (half res, bilateral blur) -> pp_brightpass (+ pp_down4) -> pp_gaussianh/v -> pp_godray (half res) ->
 //   pp_up4tonemapping (CombineToneMap2: extended Reinhard, white cutoff 0.8, middle grey 0.18) + vignette + pp_finalhdrl (scene + bloom) ->
 //   pp_final_underwater (horizontal sine wobble, bloom x0.5) when the camera is below the sea.
-// Not ported: pp_grade (64^3 colour LUTs are not in the extracted data), pp_fxaa (MSAA on the HDR target instead).
+//   -> pp_grade (zone "mood" LUT at strength 0.75, then the time-of-day LUT; 64^3 volume LUTs from export/texture/lut_*.dds) on the final LDR colour.
+// Not ported: pp_grade's edge fade (it keeps silhouettes against bright backgrounds ungraded), pp_fxaa (MSAA on the HDR target instead).
 import * as THREE from 'three';
 
 const VS = `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
@@ -102,6 +103,7 @@ void main() {
 const FINAL = `
 uniform sampler2D tScene; uniform sampler2D tBloom; uniform sampler2D tGod; uniform sampler2D tAO;
 uniform float uBloom, uExposure, uVignette, uUnder, uTime, uAspect; uniform vec3 uUnderTint;
+uniform highp sampler3D tMoodA, tMoodB, tTodA, tTodB; uniform float uMoodBlend, uMoodStrength, uTodBlend, uTodStrength;
 varying vec2 vUv; ${LUMA}
 void main() {
   vec2 uv = vUv;
@@ -116,7 +118,27 @@ void main() {
   if (uUnder > 0.0) { float l = dot(c, LUMA); c = mix(c, uUnderTint * (l + 0.04) * 1.6, 0.55 * uUnder); }
   gl_FragColor = vec4(c, 1.0);
   #include <colorspace_fragment>
+  // pp_grade: the LUTs map the display-encoded LDR frame; mood (zone) stage, then the time-of-day stage on top of it
+  vec3 g = gl_FragColor.rgb;
+  if (uMoodStrength > 0.0) { vec3 q = g * (63.0 / 64.0) + 0.5 / 64.0; g = mix(g, mix(texture(tMoodA, q).rgb, texture(tMoodB, q).rgb, uMoodBlend), uMoodStrength); }
+  if (uTodStrength > 0.0) { vec3 q = g * (63.0 / 64.0) + 0.5 / 64.0; g = mix(g, mix(texture(tTodA, q).rgb, texture(tTodB, q).rgb, uTodBlend), uTodStrength); }
+  gl_FragColor.rgb = g;
 }`;
+
+// 64^3 BGRA8 volume LUTs (DDS, 128 byte header); cached by name. Resolves null if the file is missing.
+const LUTS = new Map();
+function loadLUT(name) {
+  if (!LUTS.has(name)) LUTS.set(name, fetch(`/tex/lut_${name}.dds`).then(r => r.ok ? r.arrayBuffer() : null).then(buf => {
+    if (!buf || buf.byteLength < 128 + 64 * 64 * 64 * 4) return null;
+    const bgra = new Uint8Array(buf, 128, 64 * 64 * 64 * 4), rgba = new Uint8Array(bgra.length);
+    for (let i = 0; i < bgra.length; i += 4) { rgba[i] = bgra[i + 2]; rgba[i + 1] = bgra[i + 1]; rgba[i + 2] = bgra[i]; rgba[i + 3] = 255; }
+    const t = new THREE.Data3DTexture(rgba, 64, 64, 64);
+    t.format = THREE.RGBAFormat; t.type = THREE.UnsignedByteType; t.minFilter = t.magFilter = THREE.LinearFilter;
+    t.wrapS = t.wrapT = t.wrapR = THREE.ClampToEdgeWrapping; t.unpackAlignment = 1; t.needsUpdate = true;
+    return t;
+  }).catch(() => null));
+  return LUTS.get(name);
+}
 
 export class Post {
   constructor(renderer) {
@@ -133,8 +155,12 @@ export class Post {
     this.mAO = mk(AO, { tDepth: { value: null }, uProj: { value: new THREE.Matrix4() }, uProjInv: { value: new THREE.Matrix4() }, uTexel: { value: new THREE.Vector2() }, uNear: { value: 1 }, uFar: { value: 1000 }, uRadius: { value: 3.0 }, uStrength: { value: 1 } });
     this.mAOBlur = mk(AOBLUR, { tAO: { value: null }, uDir: { value: new THREE.Vector2() } });
     this.white = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1); this.white.needsUpdate = true;
+    this.blank3 = new THREE.Data3DTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, 1); this.blank3.format = THREE.RGBAFormat; this.blank3.type = THREE.UnsignedByteType; this.blank3.needsUpdate = true;
+    this.grade = true;
     this.mFinal = mk(FINAL, { tScene: { value: null }, tBloom: { value: null }, tGod: { value: null }, tAO: { value: null }, uBloom: { value: 0.9 }, uExposure: { value: 1.3 }, uVignette: { value: 0.4 },
-      uUnder: { value: 0 }, uTime: { value: 0 }, uAspect: { value: 1 }, uUnderTint: { value: new THREE.Color(0.25, 0.65, 0.7) } });
+      uUnder: { value: 0 }, uTime: { value: 0 }, uAspect: { value: 1 }, uUnderTint: { value: new THREE.Color(0.25, 0.65, 0.7) },
+      tMoodA: { value: this.blank3 }, tMoodB: { value: this.blank3 }, tTodA: { value: this.blank3 }, tTodB: { value: this.blank3 },
+      uMoodBlend: { value: 0 }, uMoodStrength: { value: 0 }, uTodBlend: { value: 0 }, uTodStrength: { value: 0 } });
     this.quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2)); this.quad.frustumCulled = false;
     this.cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1); this.qs = new THREE.Scene(); this.qs.add(this.quad);
     this.sunScreen = new THREE.Vector3();
@@ -147,6 +173,21 @@ export class Post {
     this.ao.setSize(Math.max(2, w >> 1), Math.max(2, h >> 1)); this.aoB.setSize(Math.max(2, w >> 1), Math.max(2, h >> 1));
     this.god.setSize(Math.max(2, w >> 1), Math.max(2, h >> 1));
     this.mFinal.uniforms.uAspect.value = this.mGod.uniforms.uAspect.value = w / h;
+  }
+  // mood: [nameA, nameB, blend], tod: [nameA, nameB, blend] (LUT names without the lut_ prefix). The game's mood strength is 0.75; the tod stage runs at 1.
+  setGrade(mood, tod) {
+    const f = this.mFinal.uniforms, on = this.grade && mood && tod;
+    const names = this._gn ||= {};
+    for (const [key, name] of [['tMoodA', on && mood[0]], ['tMoodB', on && mood[1]], ['tTodA', on && tod[0]], ['tTodB', on && tod[1]]]) {
+      if (names[key] === name) continue;
+      names[key] = name;
+      if (!name) { f[key].value = this.blank3; continue; }
+      loadLUT(name).then(t => { if (t && names[key] === name) f[key].value = t; });
+    }
+    f.uMoodBlend.value = on ? mood[2] : 0; f.uTodBlend.value = on ? tod[2] : 0;
+    const ready = k => f[k].value !== this.blank3;
+    f.uMoodStrength.value = on && ready('tMoodA') && ready('tMoodB') ? 0.75 : 0;
+    f.uTodStrength.value = on && ready('tTodA') && ready('tTodB') ? 1 : 0;
   }
   pass(mat, target) { this.quad.material = mat; this.r.setRenderTarget(target); this.r.render(this.qs, this.cam); }
   // sun: world direction (three space), sunColor, daylight 0..1; underwater 0..1
