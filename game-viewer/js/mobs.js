@@ -10,7 +10,7 @@ import { Player } from './collision.js';
 import { loadClips, bindClips, applyClip, walkSpeed, facing, needsFlip, flipSkeleton, uprightClips } from './mobanim.js';
 
 export const OP_MOBS = 3;
-const FLAG_SNAP = 4;
+const FLAG_SNAP = 4, FLAG_DEAD = 8;
 const INTERP = 0.4, GONE = 1.5;                    // snapshots are 0.2 s apart; a mob unseen this long left the interest radius
 const MODEL_NEAR = 300, TAG_NEAR = 45, SHADOW_NEAR = 70, MAX_BUILD = 3;
 const AX_X = new THREE.Vector3(1, 0, 0), AX_Y = new THREE.Vector3(0, 1, 0), AX_Z = new THREE.Vector3(0, 0, 1), NX = new THREE.Vector3(-1, 0, 0), NZ = new THREE.Vector3(0, 0, -1);
@@ -127,7 +127,7 @@ export class MobWorld {
     }
     return this.tags.get(kind);
   }
-  release(m) { if (m.obj) this.scene.remove(m.obj); if (m.tag) this.scene.remove(m.tag); m.obj = m.tag = m.model = null; m.shown = false; m.tried = false; }
+  release(m) { if (m.obj) this.scene.remove(m.obj); if (m.tag) this.scene.remove(m.tag); if (m.hpBar) this.scene.remove(m.hpBar.s); m.obj = m.tag = m.model = null; m.shown = false; m.tried = false; }
 
   sample(m, rt, out) {
     const S = m.states; let a = S[0], b = S[S.length - 1];
@@ -160,11 +160,18 @@ export class MobWorld {
       const moving = st.speed > 0.15; m.amp += ((moving ? 1 : 0) - m.amp) * Math.min(1, dt * 6);
       if (moving) m.phase += dt * Math.PI * st.speed / (0.4 * Math.max(0.8, m.height));   // ~0.4 body heights per step; the phase covers two steps
       m.breath += dt;
-      if (m.parts) this.animate(m, st, dt, dist);
+      const dead = !!(st.flags & FLAG_DEAD);
+      if (dead) { m.deadT = (m.deadT ?? 0) + dt; }
+      else if (m.deadT != null) { m.deadT = null; m.model.rotation.z = 0; m.obj.visible = true; }
+      if (dead) { /* lie where it fell: no clip for dying is decoded, so topple sideways and sink */ }
+      else if (m.parts) this.animate(m, st, dt, dist);
       else if (m.rigged) { if (dist < POSE_NEAR || !m.posed) { gait(m, Math.sin(m.phase), Math.cos(m.phase), m.amp); m.posed = true; } }
       else { m.obj.position.y += Math.abs(Math.sin(m.phase)) * 0.05 * m.amp; m.model.rotation.z = Math.sin(m.phase) * 0.04 * m.amp; }   // spiders, serpents, ...: no leg bones to swing, so bob and sway
+      if (dead) { const k = Math.min(1, m.deadT / 0.6); m.model.rotation.z = (m.side ??= Math.random() < 0.5 ? 1 : -1) * k * Math.PI / 2; m.obj.position.y = st.y + Math.sin(k * Math.PI / 2) * 0.1 * m.height - Math.max(0, m.deadT - 6) * 0.5; m.obj.visible = m.deadT < 9; }
       const shadow = dist < SHADOW_NEAR; if (shadow !== m.cast) { m.cast = shadow; m.obj.traverse(n => { if (n.isMesh) n.castShadow = shadow; }); }
-      if (dist < TAG_NEAR) {
+      if (m.hpBar) { const show = !dead && now < m.hpBar.until && dist < 120; if (show) { if (!m.hpBar.s.parent) this.scene.add(m.hpBar.s); const th = 9 * fovK * dist; m.hpBar.s.position.set(st.x, st.y + m.height + 0.2 + 26 * fovK * dist, st.z); m.hpBar.s.scale.set(th * 8, th, 1); } else if (m.hpBar.s.parent) this.scene.remove(m.hpBar.s); }
+      if (dead) { if (m.tag?.parent) this.scene.remove(m.tag); }
+      else if (dist < TAG_NEAR) {
         if (!m.tag) { const t = this.tagFor(m.kind); m.tag = new THREE.Sprite(t.mat); m.tag.renderOrder = 20; m.tag.center.set(0.5, 0); m.tag.userData.aspect = t.aspect; }
         if (!m.tag.parent) this.scene.add(m.tag);
         const th = 20 * fovK * dist; m.tag.position.set(st.x, st.y + m.height + 0.2, st.z); m.tag.scale.set(th * m.tag.userData.aspect, th, 1);
@@ -191,6 +198,13 @@ export class MobWorld {
     if (m.fade >= 1) m.prev = null;
   }
 
+  /** Show a health bar over mob `id` for a few seconds (after it was hit). */
+  showHp(id, hp, max, now) {
+    const m = this.mobs.get(id); if (!m) return;
+    if (!m.hpBar) { const c = document.createElement('canvas'); c.width = 128; c.height = 16; const tex = new THREE.CanvasTexture(c); m.hpBar = { c, tex, s: new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, fog: false })) }; m.hpBar.s.renderOrder = 21; }
+    const x = m.hpBar.c.getContext('2d'); x.clearRect(0, 0, 128, 16); x.fillStyle = '#000b'; x.fillRect(0, 0, 128, 16); x.fillStyle = hp / max > 0.35 ? '#c33a2e' : '#e0a030'; x.fillRect(2, 2, 124 * Math.max(0, hp / max), 12);
+    m.hpBar.tex.needsUpdate = true; m.hpBar.until = now + 6;
+  }
   /** Radar points: x/z of every streamed mob. */
   each(cb) { for (const m of this.mobs.values()) { const s = m.states[m.states.length - 1]; cb(s.x, s.z); } }
 }

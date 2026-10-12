@@ -36,6 +36,8 @@ export function cloneSkinned(src) {
   return clone;
 }
 
+// attach point per weapon class (the game's own names; two-handed grips differ from the one-handed one)
+const WEAPON_POINT = { sword: 'AttachPoint_Weapon', axe: 'AttachPoint_Weapon', club: 'AttachPoint_Weapon', sithra: 'AttachPoint_Weapon', knife: 'AttachPoint_Weapon', greatsword: 'AttachPoint_Weapon TwoHanded', greataxe: 'AttachPoint_Weapon TwoHanded', greatclub: 'AttachPoint_Weapon TwoHanded', polearm: 'AttachPoint_Weapon Halberd', bow: 'AttachPoint_Weapon Bow', staff: 'AttachPoint_Weapon Staff', thrown: 'AttachPoint_Weapon Grenade', shield: 'AttachPoint_Shield' };
 const ARM_SPLAY = 0.1;   // rad the hanging arms stay away from the body
 const POSE_BONES = ['LLeg1', 'RLeg1', 'LLeg2', 'RLeg2', 'LArm1', 'RArm1', 'LArm20', 'RArm20'];
 
@@ -88,6 +90,23 @@ export class AvatarFactory {
       return m;
     }));
     return this.mats.get(key);
+  }
+
+  /** Hang a weapon model (an entry of data/weapons.json) in the avatar's hand(s): the game's attach point for its class (data/paperdoll.json `attach`,
+   *  frames on the palm bones), so it follows whatever pose the skeleton is in.  null / a weapon without model takes the old one off.  Knives are held in pairs. */
+  async wield(av, w) {
+    for (const h of av.held || []) h.removeFromParent();
+    av.held = [];
+    if (!w?.mesh) return;
+    const A = (await this.paperdoll()).attach, host = av.rigs.find(r => r.userData.bones.LLeg1) || av.rigs[0], src = await this.static(w.mesh);
+    if (!src || !host) return;
+    for (const point of w.group === 'knife' ? [WEAPON_POINT.sword, 'AttachPoint_Weapon Left'] : [WEAPON_POINT[w.group] || WEAPON_POINT.sword]) {
+      const ap = A[point], bone = ap && host.getObjectByName(ap.frame); if (!bone) continue;
+      const mesh = src.clone(true), holder = new THREE.Group();
+      holder.position.fromArray(ap.t); holder.rotation.set(ap.r[0], ap.r[1], ap.r[2]); holder.scale.setScalar(ATTACH_SCALE); holder.add(mesh);
+      mesh.traverse(n => { if (n.isMesh) n.frustumCulled = false; });
+      bone.add(holder); av.held.push(holder);
+    }
   }
 
   /** What a character shows: { parts: { torso: { file, mats: {id: texture} }, ... }, attach: { point: item } } for a race/gender wearing `gear` ('' = naked). */

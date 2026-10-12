@@ -5,8 +5,9 @@
 import * as THREE from 'three';
 import { AvatarFactory, RACES, AVATAR_HEIGHT, pose } from './avatars.js';
 import { MobWorld, OP_MOBS } from './mobs.js';
+import { PlayerAnim } from './playeranim.js';
 
-const OP_POS = 1, OP_SNAPSHOT = 2, FLAG_SWIM = 1, FLAG_AIR = 2, FLAG_SNAP = 4;
+const OP_POS = 1, OP_SNAPSHOT = 2, FLAG_SWIM = 1, FLAG_AIR = 2, FLAG_SNAP = 4, FLAG_FLY = 32;
 const SEND_HZ = 15, INTERP = 0.13;                  // render remote players this many seconds in the past (a bit over one tick)
 const AVATAR_NEAR = 420, NAME_NEAR = 260, DOT_FAR = 1500, SHADOW_NEAR = 90, POSE_NEAR = 180;
 const RUN = 3.7 * 1.5;                              // m/s of a full-speed stride (matches SPEEDS.run)
@@ -45,10 +46,16 @@ export class Multiplayer {
     const q = new URLSearchParams(location.search);
     this.url = q.get('server') || `ws://${location.hostname || 'localhost'}:9000`;
     this.factory = new AvatarFactory(); this.mobs = new MobWorld({ scene, camera, world });
-    this.players = new Map(); this.me = null; this.ws = null; this.sendAcc = 0; this.last = null; this.speed = 0; this.dotMat = null;
+    this.players = new Map(); this.shots = new Map(); this.me = null; this.ws = null; this.sendAcc = 0; this.last = null; this.speed = 0; this.dotMat = null;
     let saved = {}; try { saved = JSON.parse(localStorage.getItem('dfProfile') || '{}'); } catch {}
     this.profile = { name: q.get('name') || saved.name || '', race: q.get('race') || saved.race || 'hum', gender: q.get('gender') || saved.gender || 'm', gear: q.get('gear') ?? saved.gear ?? '' };
     this.dotTex = null; this.started = false; this.typing = false; this.radius = 900;
+    // combat messages we send (see weapons.js; the server decides what they hit, game-server/src/world.rs)
+    this.weapons = this.fx = this.sfx = null; this.onRespawn = null;
+    this.combat = {
+      equip: (w, drawn) => this.sendJson({ t: 'equip', w, drawn }), attack: ({ kind, clip }) => this.sendJson({ t: 'attack', kind, clip }), block: on => this.sendJson({ t: 'block', on }),
+      bow: what => this.sendJson({ t: 'bow', what }), shoot: ({ dir, from, power, spell }) => this.sendJson({ t: 'shoot', dir, from, power, spell: !!spell }),
+    };
     this.buildPicker(); this.buildChat(); this.buildRadar();
   }
 
@@ -116,7 +123,7 @@ export class Multiplayer {
     if (m.t === 'welcome') {
       this.dropAll(); this.me = m.id; this.radius = m.radius;
       for (const p of m.players) if (p.id !== m.id) this.players.set(p.id, { info: p, states: [], av: null, seen: 0 });
-      this.last = null; this.status('online'); this.log(`Connected as <b>${esc(m.players.find(p => p.id === m.id)?.name || '')}</b> — ${m.players.length} online. Enter to chat, Tab for the player list.`, 'sys');
+      this.last = null; this.status('online'); if (this.weapons) { this.weapons.setHp(120, 120); if (this.weapons.id) this.combat.equip(this.weapons.id, this.weapons.drawn); } this.log(`Connected as <b>${esc(m.players.find(p => p.id === m.id)?.name || '')}</b> — ${m.players.length} online. Enter to chat, Tab for the player list.`, 'sys');
     } else if (m.t === 'joined') {
       if (m.player.id !== this.me) { this.players.set(m.player.id, { info: m.player, states: [], av: null, seen: 0 }); this.status('online'); this.log(`${esc(m.player.name)} joined`, 'sys'); }
     } else if (m.t === 'left') {
@@ -125,7 +132,46 @@ export class Multiplayer {
       const p = this.players.get(m.id); this.log(`<b${m.id === this.me ? ' class="me"' : ''}>${esc(m.name)}</b>: ${esc(m.text)}`);
       if (p) this.say(p, m.text);
     } else if (m.t === 'mobtypes') { this.mobs.setTypes(m.types);
+    } else if (this.weapons && this.onCombat(m)) {
     } else if (m.t === 'error') { this.fatal = true; this.ws?.close(); this.status(m.msg); }
+  }
+  /** Combat events from the server (game-server/src/proto.rs ServerMsg): other players' equip / swings / shots, blows landing, deaths. true = handled */
+  onCombat(m) {
+    const W = this.weapons, now = performance.now() / 1000, p = this.players.get(m.id), at = a => new THREE.Vector3(a[0], a[1], a[2]);
+    if (m.t === 'equip') { if (p) { p.info.weapon = m.w; p.info.drawn = m.drawn; this.wield(p); } return true; }
+    if (m.t === 'swing') {
+      const a = p?.av; if (!a) return true; a.anim?.play(m.clip);
+      const g = W.data.groups[m.group]; if (g?.sounds) setTimeout(() => this.sfx.play(this.sfx.pick(g.sounds), { at: a.pos.clone().setY(a.pos.y + 1.5), min: 2, max: 30, vol: 0.9 }), 180);
+      return true;
+    }
+    if (m.t === 'block') { const a = p?.av; if (a?.anim && m.on) a.anim.play(`${({ polearm: 'halberd', knife: '2daggers' })[W.data.weapons[p.info.weapon]?.group] || (/^great/.test(W.data.weapons[p.info.weapon]?.group) ? '2handed' : 'singlehand')}_parrying`); return true; }
+    if (m.t === 'bow') { const a = p?.av; if (a) { a.anim?.play('bow_load'); this.sfx.play('/weapons/archery/df_weapon_archery_bow&arrow_pullback.wav', { at: a.pos.clone().setY(a.pos.y + 1.5), min: 3, max: 40, vol: 0.6 }); } return true; }
+    if (m.t === 'shoot') {
+      const from = at(m.from), dir = at(m.dir), a = p?.av;
+      if (m.spell) this.shots.set(m.id, this.fx.bolt({ from, dir }));
+      else { this.sfx.play('/weapons/archery/df_weapon_archery_bow&arrow_shot.wav', { at: from, min: 3, max: 60, vol: 0.8 }); this.fx.arrow({ from, dir, speed: 100 * (0.45 + 0.55 * m.power) }).then(s => this.shots.set(m.id, s)); }
+      a?.anim?.play(m.spell ? 'magic_fire_01' : 'bow_fire'); return true;
+    }
+    if (m.t === 'hit') {
+      const self = m.v === 'p' && m.i === this.me, shot = this.shots.get(m.a); if (shot && !m.am) { shot.done = true; this.shots.delete(m.a); }
+      if (m.a === this.me && !m.am && W.lastShot) W.lastShot.done = true;
+      W.onHit({ ...m, self }); if (m.v === 'm') this.mobs.showHp(m.i, m.hp, m.max, now);
+      return true;
+    }
+    if (m.t === 'died') {
+      if (m.v === 'p') { if (m.i === this.me) W.died(); else { const q = this.players.get(m.i); if (q?.av?.anim) q.av.anim.dead = true; } }
+      return true;
+    }
+    if (m.t === 'respawn') {
+      if (m.id === this.me) { W.respawned(); W.setHp(m.hp, m.max); this.onRespawn?.(); } else { const q = this.players.get(m.id); if (q?.av?.anim) q.av.anim.dead = false; }
+      return true;
+    }
+    return false;
+  }
+  /** put the player's weapon into his avatar's hand (and pick the matching stance clips) */
+  async wield(p) {
+    const a = p.av; if (!a || !this.weapons) return; const w = this.weapons.data.weapons[p.info.weapon] || null;
+    await this.factory.wield(a, w && p.info.drawn ? w : null); a.anim?.setWeapon(w?.group || null); a.anim?.setDrawn(!!(w && p.info.drawn));
   }
   onBinary(buf) {
     const v = new DataView(buf); if (v.getUint8(0) === OP_MOBS) return this.mobs.onFrame(buf); if (v.getUint8(0) !== OP_SNAPSHOT) return;
@@ -142,9 +188,11 @@ export class Multiplayer {
     b.setFloat32(1, s.x, true); b.setFloat32(5, s.y, true); b.setFloat32(9, s.z, true); b.setFloat32(13, s.yaw, true);
     if (this.last) this.speed += (Math.hypot(s.x - this.last.x, s.z - this.last.z) / dt - this.speed) * 0.5;   // smoothed horizontal speed
     this.last = s;
-    b.setUint8(17, Math.min(255, Math.round(this.speed * 10))); b.setUint8(18, (s.swim ? FLAG_SWIM : 0) | (s.air ? FLAG_AIR : 0));
+    b.setUint8(17, Math.min(255, Math.round(this.speed * 10))); b.setUint8(18, (s.swim ? FLAG_SWIM : 0) | (s.air ? FLAG_AIR : 0) | (s.fly ? FLAG_FLY : 0));
     this.ws.send(b.buffer);
   }
+  sendJson(o) { if (this.online && this.ws?.readyState === 1) this.ws.send(JSON.stringify(o)); }
+  bindCombat(weapons, fx, sfx) { this.weapons = weapons; this.fx = fx; this.sfx = sfx; }
   chat(text) { if (this.ws?.readyState === 1 && text.trim()) this.ws.send(JSON.stringify({ t: 'chat', text })); }
 
   // ---------------------------------------------------------------- chat UI
@@ -176,6 +224,7 @@ export class Multiplayer {
       if (!this.players.has(p.info.id)) return;
       av.tag = nameSprite(p.info.name); av.dot = dotSprite(); av.pos = new THREE.Vector3(); av.cast = null;
       p.av = av; av.attached = false;
+      av.anim = await PlayerAnim.create(av).catch(() => null); if (p.info.weapon) await this.wield(p);
     } catch (e) { console.warn('avatar', p.info, e); p.failed = true; } finally { p.building = false; }
   }
   removeAvatar(p) {
@@ -220,7 +269,7 @@ export class Multiplayer {
       // animation: stride phase advances with distance travelled
       const amp = Math.min(1, st.speed / RUN), air = !!(st.flags & FLAG_AIR) && !(st.flags & FLAG_SWIM);
       if (st.speed > 0.15 && !air) a.phase += dt * (3 + st.speed * 1.9);
-      if (dist < POSE_NEAR || !a.posed) { pose(a, Math.sin(a.phase), st.speed > 0.15 ? Math.max(0.25, amp) : 0, air); a.posed = true; }
+      if (dist < POSE_NEAR || !a.posed) { if (a.anim) a.anim.update(dt, st.speed, air, !!(st.flags & FLAG_SWIM)); else pose(a, Math.sin(a.phase), st.speed > 0.15 ? Math.max(0.25, amp) : 0, air); a.posed = true; }
       const shadow = dist < SHADOW_NEAR; if (shadow !== a.cast) { a.cast = shadow; a.root.traverse(n => { if (n.isMesh) n.castShadow = shadow; }); }
       // tags above the head, constant on-screen size
       const topY = st.y + AVATAR_HEIGHT + 0.25, th = 22 * fovK * dist, ty = th + 0.1;

@@ -31,6 +31,9 @@
   #spawns .sp:hover { border-color:var(--gold); }
   #spawns .sp.on { border-color:var(--gold); background:#d9b86a22; color:var(--gold); }
   #load { opacity:.7; letter-spacing:.1em; }
+  #loadbar { width:260px; height:4px; margin:10px auto 18px; border:1px solid var(--gold); border-radius:2px; overflow:hidden; }
+  #loadbar i { display:block; height:100%; width:0; background:var(--gold); transition:width .25s; }
+  #intro .btn.disabled { opacity:.35; filter:grayscale(1); cursor:not-allowed; pointer-events:none; }
   #cfg { position:fixed; right:14px; top:64px; width:250px; padding:12px 14px; background:#0b0d10d8; border:1px solid #d9b86a55; display:none; font:12px/1.5 ui-monospace,Menlo,monospace; }
   #cfg.on { display:block; }
   #cfg label { display:flex; justify-content:space-between; margin-top:8px; } #cfg input[type=range] { width:100%; accent-color:#d9b86a; } #cfg select { background:#14181d; color:inherit; border:1px solid #d9b86a55; }
@@ -103,9 +106,10 @@
 <div id="intro">
   <h1>DARKFALL</h1>
   <div id="load">Reading the world…</div>
+  <div id="loadbar"><i></i></div>
   <div id="mp"></div>
   <div id="spawns"></div>
-  <div class="btn" id="enter" style="display:none">ENTER THE WORLD</div>
+  <div class="btn disabled" id="enter">ENTER THE WORLD</div>
   <div class="keys modes"><div style="color:var(--gold);letter-spacing:.15em;margin-bottom:4px">TWO WAYS TO EXPLORE</div><b>G</b> toggles <b>Fly</b> (free camera, <b>Shift</b> = fast) and <b>Walk</b> (gravity, collision, <b>Space</b> jumps, <b>Shift</b> sprints, <b>Ctrl</b> walks slowly). Press it any time — or click the mode button on screen.</div>
   <div class="keys"><b>W</b><b>A</b><b>S</b><b>D</b> fly &nbsp; <b>Shift</b> faster &nbsp; <b>Space</b>/<b>E</b> up &nbsp; <b>C</b>/<b>Q</b> down &nbsp; mouse to look<br>
   <b>Enter</b> chat &nbsp; <b>Tab</b> players &nbsp; <b>Wheel</b> speed &nbsp; <b>T</b> time of day &nbsp; <b>[</b> <b>]</b> scrub time &nbsp; <b>M</b> music &nbsp; <b>L</b> landmarks &nbsp; <b>H</b> help &nbsp; <b>Esc</b> release mouse</div>

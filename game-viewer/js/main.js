@@ -12,6 +12,9 @@ import { Vegetation } from './vegetation.js';
 import { Multiplayer } from './multiplayer.js';
 import { Pois } from './pois.js';
 import { TouchControls, touchWanted } from './touch.js';
+import { Sfx } from './sfx.js';
+import { CombatFx } from './effects.js';
+import { Weapons } from './weapons.js';
 
 const $ = id => document.getElementById(id);
 const q = new URLSearchParams(location.search);
@@ -33,7 +36,8 @@ const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(70, 1, 1.5, VIEW * 1.05);
 camera.rotation.order = 'YXZ';
 const post = new Post(renderer); post.enabled = q.get('post') ? q.get('post') !== '0' : S.post !== false; post.ssao = q.get('ssao') ? q.get('ssao') !== '0' : S.ssao !== false; post.grade = q.get('grade') !== '0';
-function resize() { renderer.setSize(innerWidth, innerHeight, false); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); const d = renderer.getDrawingBufferSize(new THREE.Vector2()); post.resize(d.x, d.y); }
+let weapons = null;   // js/weapons.js, created once the multiplayer / world exist
+function resize() { renderer.setSize(innerWidth, innerHeight, false); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); weapons?.resize(camera.aspect); const d = renderer.getDrawingBufferSize(new THREE.Vector2()); post.resize(d.x, d.y); }
 addEventListener('resize', resize); resize();
 
 const [worldData, musicAreas, tileNames, envData, terrainManifest, props, spawns, vegData, alphaMode, poiData, fullTiles] = await Promise.all(
@@ -93,15 +97,17 @@ const keys = new Set(); let baseSpeed = 70, vel = new THREE.Vector3(), locked = 
 
 // ---- input
 addEventListener('keydown', e => {
+  if (e.target.id === 'armq' && e.code === 'Escape') { weapons.toggleArmory(false); return; }
   if (e.repeat || e.target.tagName === 'INPUT') return;   // typing in the name / chat box
   keys.add(e.code);
+  if (document.body.classList.contains('playing') && weapons?.key(e.code)) { e.preventDefault(); return; }
   const hit = c => e.code === c;
   if (hit('KeyP')) { env.u.uParallax.value = env.u.uParallax.value ? 0 : parallaxOn; toast(env.u.uParallax.value ? 'Parallax on' : 'Parallax off'); }
   if (hit('KeyT')) env.auto = !env.auto;
   if (hit('BracketRight')) env.time = (env.time + (e.shiftKey ? 120 : 30)) % 1440;
   if (hit('BracketLeft')) env.time = (env.time - (e.shiftKey ? 120 : 30) + 1440) % 1440;
   if (hit('KeyV')) toast('Atmosphere: ' + env.cycleConfig());
-  if (hit('KeyM')) toast(music.toggle() ? 'Music on' : 'Music muted');
+  if (hit('KeyM')) { toast(music.toggle() ? 'Music on' : 'Music muted'); sfx.setMuted(music.muted); }
   if (hit('KeyG')) toggleMode();
   if (hit('KeyB')) { post.enabled = S.post = !post.enabled; try { localStorage.setItem('dfSettings2', JSON.stringify(S)); } catch {} toast(post.enabled ? 'Post-processing on (bloom, god rays, vignette)' : 'Post-processing off'); }
   if (hit('KeyK')) { post.ssao = S.ssao = !post.ssao; try { localStorage.setItem('dfSettings2', JSON.stringify(S)); } catch {} toast(post.ssao ? 'SSAO on' : 'SSAO off'); }
@@ -118,7 +124,9 @@ const touch = touchWanted() ? new TouchControls({ keys, look: (dx, dy) => { yaw 
 addEventListener('blur', () => keys.clear());
 addEventListener('mousemove', e => { if (!locked && !dragging) return; yaw -= e.movementX * 0.0022; pitch = Math.max(-1.55, Math.min(1.55, pitch - e.movementY * 0.0022)); });
 let dragging = false;
-$('view').addEventListener('mousedown', () => { if (!document.body.classList.contains('playing')) return; if (!locked) $('view').requestPointerLock?.(); });
+$('view').addEventListener('mousedown', e => { if (!document.body.classList.contains('playing')) return; if (!locked) $('view').requestPointerLock?.(); else weapons.mouse(e.button, true); });
+addEventListener('mouseup', e => { if (locked) weapons.mouse(e.button, false); });
+$('view').addEventListener('contextmenu', e => e.preventDefault());
 document.addEventListener('pointerlockchange', () => { locked = document.pointerLockElement === $('view'); });
 addEventListener('wheel', e => { baseSpeed = Math.max(4, Math.min(2500, baseSpeed * Math.exp(-e.deltaY * 0.0012))); toast(`Speed ${Math.round(baseSpeed)} m/s`); }, { passive: true });
 function toast(msg) { const t = $('banner'); t.textContent = msg; t.style.fontSize = '22px'; t.style.top = '10%'; t.classList.add('on'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('on'), 1600); }
@@ -174,6 +182,7 @@ function frameInner() {
   }
   camera.updateMatrixWorld(true);
   mp.update(dt, performance.now() / 1000);
+  weapons.canFight = mode === 'walk'; weapons.update(dt, { speed: mode === 'walk' ? Math.hypot(vel.x, vel.z) : 0, air: mode === 'fly' || !player.onGround }); fx.update(dt); sfx.listen(camera);
 
   env.update(dt, VIEW);
   env.u.uSunDirView.value.copy(env.u.uSunDir.value).transformDirection(camera.matrixWorldInverse);
@@ -250,8 +259,11 @@ setTimeout(setModeLabel, 0);
 window.dbg = { post, player, tp: (x, y, z) => { camera.position.set(x, y, -z); player.pos.set(x, y - player.eye, -z); player.vy = 0; }, camera, world, env, music, scene, renderer, ambience, set: (x, y, z) => camera.position.set(x, y, -z), look: (yw, pt) => { yaw = yw; pitch = pt; } };
 const intro = $('intro');
 const mp = new Multiplayer({ scene, camera, world, $, toast,
-  getSelf: () => ({ x: camera.position.x, y: camera.position.y - player.eye, z: camera.position.z, yaw: camera.rotation.y, swim: mode === 'walk' && player.swim, air: mode === 'fly' || !player.onGround }) });
+  getSelf: () => ({ x: camera.position.x, y: camera.position.y - player.eye, z: camera.position.z, yaw: camera.rotation.y, swim: mode === 'walk' && player.swim, air: mode === 'fly' || !player.onGround, fly: mode === 'fly' }) });
 window.dbg.mp = mp;
+const sfx = new Sfx(), fx = new CombatFx({ scene, world, sfx, factory: mp.factory, data: await J('/data/combatfx.json') });
+weapons = new Weapons({ camera, post, world, factory: mp.factory, sfx, fx, net: mp.combat, toast, $, light: { sun: sunL, hemi } });
+await weapons.init(); mp.bindCombat(weapons, fx, sfx); mp.onRespawn = () => { pickSpawn(curSpawn); toast('You got up again'); }; weapons.resize(camera.aspect); Object.assign(window.dbg, { weapons, fx, sfx });
 let ready = false, started = false;
 let bootTimer = 0;
 function bootProgress() {
@@ -260,7 +272,8 @@ function bootProgress() {
   const near = [...world.tiles.values()].filter(t => t.hasTerrain && t.dist < 1500);
   const done = near.filter(t => t.tState === 2).length;
   $('load').textContent = `Reading the world… ${done}/${near.length || 1}`;
-  if (!ready && (done >= near.length || performance.now() > 30000)) { ready = true; $('load').style.display = 'none'; $('enter').style.display = ''; }
+  $('loadbar').firstElementChild.style.width = `${Math.round(100 * done / (near.length || 1))}%`;
+  if (!ready && (done >= near.length || performance.now() > 30000)) { ready = true; $('load').textContent = 'World ready'; $('loadbar').firstElementChild.style.width = '100%'; $('enter').classList.remove('disabled'); }
   else if (!ready) bootTimer = setTimeout(bootProgress, 250);
 }
 bootProgress();
@@ -268,13 +281,14 @@ bootProgress();
 // ---- spawn picker: the six racial capitals (bindstones) plus the default start; picking one moves the camera and re-preloads
 const spawnBox = $('spawns');
 const spawnList = [{ name: 'World start', race: 'Default', x: start.x, y: start.y, z: -start.z }, ...spawns];
+let curSpawn = 0;
 function pickSpawn(i) {
-  const sp = spawnList[i];
+  const sp = spawnList[curSpawn = i];
   camera.position.set(sp.x, (sp.y || 512) + (sp.y ? 8 : 0), -sp.z);
   player.pos.set(sp.x, camera.position.y - player.eye, -sp.z); player.vy = 0; vel.set(0, 0, 0);
   [...spawnBox.children].forEach((el, j) => el.classList.toggle('on', j === i));
   if (started) return;
-  ready = false; $('enter').style.display = 'none'; $('load').style.display = '';
+  ready = false; $('enter').classList.add('disabled');
   bootProgress();
 }
 spawnList.forEach((sp, i) => {
@@ -288,7 +302,7 @@ if (pre > 0) pickSpawn(pre); else if (!q.get('x')) spawnBox.children[0].classLis
 function begin() {
   if (started || !ready) return; started = true;
   document.body.classList.add('playing'); intro.classList.add('hide');
-  music.enable(); ambience.enable(); mp.connect();
+  music.enable(); ambience.enable(); sfx.enable(); mp.connect();
   $('view').requestPointerLock?.()?.catch?.(() => {});
   clock.getDelta(); frame();
 }

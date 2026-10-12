@@ -7,7 +7,8 @@ const cache = new Map(), q = new THREE.Quaternion(), v = new THREE.Vector3();
 const Y180 = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
 export const CLIPS = ['idle', 'walk'];
 const json = u => fetch(u).then(r => r.ok ? r.json() : null).catch(() => null);
-let index = null;
+let index = null, pindex = null;
+const clipNames = raw => Object.keys(raw).filter(k => k !== 'dt');
 
 /** Fetch a model's clips (null if it has none).  Channels are prepared for evalChannel(). */
 export function loadClips(file) {
@@ -17,10 +18,19 @@ export function loadClips(file) {
   })());
   return cache.get(file);
 }
+/** Player clips (data/playeranims/ <- tools/build_playeranims.js), by '<race>_<m|f>' (race: hum, alfar, dwarf, mahirim, mirdain, ork): every clip of the file. */
+export function loadPlayerClips(key) {
+  const ck = 'player:' + key;
+  if (!cache.has(ck)) cache.set(ck, (async () => {
+    const hash = ((pindex ||= json('/data/playeranims/index.json')), (await pindex)?.[key]);
+    return hash ? prep(await json(`/data/playeranims/${hash}.json`)) : null;
+  })());
+  return cache.get(ck);
+}
 function prep(raw) {
   if (!raw) return null;
   const out = {};
-  for (const k of CLIPS) {
+  for (const k of clipNames(raw)) {
     const c = raw[k]; if (!c) continue;
     const bones = {};
     for (const [name, ch] of Object.entries(c.b)) bones[name] = ch.map(x => {
@@ -45,7 +55,7 @@ export function evalChannel(ch, f, dt) {
 export function bindClips(clone, clips, flip = false) {
   const byName = {}; clone.traverse(n => { if (n.isBone) byName[n.name] = n; });
   const tracks = {};
-  for (const k of CLIPS) if (clips[k]) tracks[k] = Object.entries(clips[k].bones).filter(([n]) => byName[n]).map(([n, ch]) => ({ bone: byName[n], ch, root: !byName[n].parent?.isBone }));
+  for (const k of Object.keys(clips)) tracks[k] = Object.entries(clips[k].bones).filter(([n]) => byName[n]).map(([n, ch]) => ({ bone: byName[n], ch, root: !byName[n].parent?.isBone }));
   return { clips, tracks, flip };
 }
 

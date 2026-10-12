@@ -172,7 +172,25 @@ export class World {
     }
     return v;
   }
+  // Clanstone light beam (subset 0 of the bindstone meshes, shadersfx_meshexplotion_slow): unlit, alpha-blended, no depth write, texture V scrolling with time.
+  _beamMaterial(src, fade) {
+    const m = new THREE.MeshBasicMaterial({ map: src.map, side: THREE.DoubleSide, transparent: true, depthWrite: false, opacity: 0.85 });
+    if (m.map) m.map.wrapT = THREE.RepeatWrapping;
+    m.name = src.name;
+    m.customProgramCacheKey = () => 'dfbeam';
+    m.onBeforeCompile = sh => {
+      Object.assign(sh.uniforms, { uTime: this.env.u.uTime, uFogColor: this.env.u.uFogColor, uFogRange: this.env.u.uFogRange, uFogDensity: this.env.u.uFogDensity, uFade: fade });
+      sh.fragmentShader = 'uniform float uTime; uniform float uFade;\n' + fogUniforms + fogFn + sh.fragmentShader
+        .replace('#include <map_fragment>', 'diffuseColor *= texture2D(map, vMapUv + vec2(0.0, fract(uTime * 0.15)));')
+        .replace('#include <tonemapping_fragment>', 'gl_FragColor.rgb = dfFog(gl_FragColor.rgb, -vViewPosition, uFade);\n#include <tonemapping_fragment>')
+        .replace('#include <fog_fragment>', '');
+      sh.vertexShader = sh.vertexShader.replace('#include <project_vertex>', '#include <project_vertex>\nvViewPosition = -mvPosition.xyz;').replace('void main() {', 'varying vec3 vViewPosition;\nvoid main() {');
+      sh.fragmentShader = 'varying vec3 vViewPosition;\n' + sh.fragmentShader;
+    };
+    return m;
+  }
   _objMaterial(src, fade) {
+    if (/bindstone_\w+\.sfm_0$/i.test(src.name || '')) return this._beamMaterial(src, fade);
     // MeshStandardMaterial from glTF -> cheaper Lambert with the game's fog
     const solid = this._shaderIsSolid(src.name);
     const m = new THREE.MeshLambertMaterial({ map: src.map, color: src.color, side: THREE.DoubleSide, alphaTest: solid ? 0 : (src.alphaTest && this._maskIsBogus(src.map) ? 0 : src.alphaTest), transparent: solid ? false : src.transparent, opacity: src.opacity, emissive: src.emissive, emissiveMap: src.emissiveMap, vertexColors: src.vertexColors });

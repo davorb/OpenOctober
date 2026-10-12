@@ -60,6 +60,9 @@ function parse(file) {
   return anims;
 }
 
+module.exports = { parse };
+if (require.main !== module) return;   // required by build_playeranims.js
+
 const PICK = {   // clip -> names to try, best first
   idle: ['normal_idle', 'neutral_idle', 'attackmode_idle', 'al_idle', 'idle_extra_01'],
   walk: ['neutral_walk_forward'],   // (neutral_run_forward would be the third; nothing here runs yet)

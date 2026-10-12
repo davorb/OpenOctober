@@ -193,8 +193,9 @@ export class Post {
   // sun: world direction (three space), sunColor, daylight 0..1; underwater 0..1
   render(scene, camera, { sunDir, sunColor, daylight, under, time }) {
     const r = this.r;
-    if (!this.enabled) { r.setRenderTarget(null); r.render(scene, camera); return; }
-    r.setRenderTarget(this.scene); r.render(scene, camera);
+    const ov = this.overlay, over = () => { if (ov?.visible) { r.autoClear = false; r.clearDepth(); r.render(ov.scene, ov.cam); r.autoClear = true; } };   // first-person weapon (js/viewmodel.js) over the world
+    if (!this.enabled) { r.setRenderTarget(null); r.render(scene, camera); over(); return; }
+    r.setRenderTarget(this.scene); r.render(scene, camera); over();
     // SSAO at half res + depth-aware blur
     let aoTex = this.white;
     if (this.ssao) {

@@ -1,0 +1,92 @@
+<!doctype html>
+<!-- Dev harness for the weapon data (data/weapons.json, tools/build_weapons.js): browse every weapon by group, see its model on a turntable
+     (grip origin = cross, game blade axis = -Z in the glb), stats, how its model was found (src), and play the group's swing sounds.
+     http://localhost:8080/tools/weapontest.html?w=r_Talon%20Axe   (g=<group> filters; ?av=1 shows it on a player avatar once avatars support it) -->
+<meta charset="utf-8"><title>weapon test</title>
+<style>
+  :root { --gold:#d9b86a; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:#161412; color:#ddd; font:13px/1.35 Palatino, Georgia, serif; display:flex; height:100vh; overflow:hidden; }
+  #list { width:290px; overflow:auto; border-right:1px solid #333; padding:6px; }
+  #list h4 { margin:10px 0 3px; color:var(--gold); font-weight:normal; letter-spacing:.06em; text-transform:uppercase; font-size:11px; }
+  #list a { display:block; padding:2px 6px; color:#bbb; cursor:pointer; border-radius:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #list a:hover { background:#2a2622; } #list a.sel { background:#3a3226; color:#fff; }
+  #list a.nomesh { color:#766; font-style:italic; }
+  #list a i { font-size:10px; color:#887; margin-left:6px; }
+  #filter { width:100%; background:#221f1b; border:1px solid #444; color:#ddd; padding:4px 6px; margin-bottom:4px; }
+  #main { flex:1; position:relative; }
+  canvas { width:100%; height:100%; display:block; }
+  #info { position:absolute; left:12px; top:10px; max-width:420px; pointer-events:none; text-shadow:0 1px 2px #000; }
+  #info h2 { margin:0; color:var(--gold); font-weight:normal; font-size:20px; }
+  #info dl { margin:6px 0 0; display:grid; grid-template-columns:auto 1fr; gap:1px 10px; } #info dt { color:#998; } #info dd { margin:0; }
+  #snd { position:absolute; left:12px; bottom:10px; display:flex; gap:4px; flex-wrap:wrap; max-width:60%; }
+  #av { position:absolute; right:10px; top:10px; width:340px; text-align:right; font-size:12px; } #av select,#av input { vertical-align:middle; } #clips { margin-top:6px; display:flex; flex-wrap:wrap; gap:3px; justify-content:flex-end; max-height:60vh; overflow:auto; }
+  #clips button { background:#2a2622; color:#ddd; border:1px solid #554; border-radius:3px; padding:1px 6px; cursor:pointer; font-size:11px; } #clips button.on { background:#5a4a2a; }
+  #snd button { background:#2a2622; color:#ddd; border:1px solid #554; border-radius:3px; padding:3px 8px; cursor:pointer; }
+</style>
+<div id="list"><input id="filter" placeholder="filter (name / group / src)"><div id="items"></div></div>
+<div id="main"><canvas id="c"></canvas><div id="info"></div><div id="snd"></div><div id="av"><label><input type="checkbox" id="avon"> on a player</label> <label><input type="checkbox" id="fpon"> first person</label> <select id="race"></select> <select id="gen"><option>m</option><option>f</option></select> <label>speed <input type="range" id="spd" min="0" max="9" step="0.05" value="0" style="width:90px"> <span id="spdv">0</span></label> <label><input type="checkbox" id="drawn" checked> drawn</label><div id="clips"></div></div></div>
+<script type="importmap">{"imports":{"three":"/vendor/three/build/three.module.js","three/addons/":"/vendor/three/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { AvatarFactory, RACES, AVATAR_SCALE } from '/js/avatars.js';
+import { ViewModel } from '/js/viewmodel.js';
+import { PlayerAnim, STANCE, FILE } from '/js/playeranim.js';
+const q = new URLSearchParams(location.search), $ = id => document.getElementById(id);
+const data = await fetch('/data/weapons.json').then(r => r.json()), W = data.weapons, ids = Object.keys(W);
+const r = new THREE.WebGLRenderer({ canvas: $('c'), antialias: true }); r.outputColorSpace = THREE.SRGBColorSpace;
+const sc = new THREE.Scene(); sc.background = new THREE.Color(0x2b2824); sc.add(new THREE.HemisphereLight(0xffffff, 0x665544, 3)); const dl = new THREE.DirectionalLight(0xffffff, 2.5); dl.position.set(3, 5, 4); sc.add(dl);
+const cam = new THREE.PerspectiveCamera(35, 1, 0.01, 100), pivot = new THREE.Group(); sc.add(pivot);
+sc.add(new THREE.GridHelper(4, 16, 0x554433, 0x3a332b)); sc.add(new THREE.AxesHelper(0.5));
+const grip = new THREE.Mesh(new THREE.SphereGeometry(0.02), new THREE.MeshBasicMaterial({ color: 0xff4444, depthTest: false })); grip.renderOrder = 9; sc.add(grip);
+const loader = new GLTFLoader(), cache = new Map(); let cur = null, spin = true, drag = null, yaw = 0.6, dist = 3, ctr = new THREE.Vector3();
+const model = m => cache.get(m) || (cache.set(m, loader.loadAsync(`/converted/models/${m}.glb`).then(g => g.scene)), cache.get(m));
+const FALLBACK = { axe: 'waw_axe_1h_01', greataxe: 'waw_axe_2handed_001', sword: 'waw_sword001', greatsword: 'waw_sword_2handed_001', club: 'waw_club_1h_01', greatclub: 'waw_warhammer_2h_special_01', knife: 'waw_dagger_001', polearm: 'waw_halberd_special_01', bow: 'waw_bow_01', staff: 'waw_staff_special_01', shield: 'waw_shield001', sithra: 'waw_sithras_01' };
+
+let show = async function (id) {
+  cur = id; const w = W[id]; document.querySelectorAll('#list a').forEach(a => a.classList.toggle('sel', a.dataset.id === id)); history.replaceState(0, '', '?w=' + encodeURIComponent(id) + ($('avon')?.checked ? '&av=1' : ''));
+  pivot.clear(); const mesh = w.mesh || FALLBACK[w.group];
+  $('info').innerHTML = `<h2>${w.name}</h2><div style="color:#aaa">${w.desc || ''}</div><dl><dt>id</dt><dd>${id}</dd><dt>kind / group</dt><dd>${w.kind} / ${w.group}, ${w.hands}h</dd><dt>reach / angle / rank</dt><dd>${w.reach ?? '-'} m / ${w.angle ?? '-'}° / ${w.rank ?? '-'}</dd><dt>model</dt><dd>${w.mesh || '<i>none - showing ' + mesh + '</i>'} <span style="color:#887">(${w.src})</span></dd><dt>icon</dt><dd>${w.icon || '-'}</dd></dl>`;
+  const g = data.groups[w.group] || {}; $('snd').innerHTML = (g.sounds || []).map((s, i) => `<button data-s="${s}">${g.swing ? g.swing.replace('se_weaponswing_', '') : 'swing'} ${i + 1}</button>`).join('');
+  if (!mesh) return; const o = (await model(mesh)).clone(true); if (cur !== id) return; pivot.add(o);
+  const b = new THREE.Box3().setFromObject(o), s = b.getSize(new THREE.Vector3()); if (!avatar) { dist = Math.max(0.6, s.length() * 1.8); b.getCenter(ctr); }
+};
+$('snd').onclick = e => { const s = e.target.dataset.s; if (s) new Audio('/audio' + s).play().catch(() => {}); };
+const draw = () => { const f = $('filter').value.toLowerCase(); let h = '', last = '';
+  for (const id of ids.slice().sort((a, b) => (W[a].group || 'zz').localeCompare(W[b].group || 'zz') || W[a].name.localeCompare(W[b].name))) { const w = W[id]; if (f && !(w.name + ' ' + id + ' ' + w.group + ' ' + w.src).toLowerCase().includes(f)) continue;
+    if (w.group !== last) { last = w.group; h += `<h4>${w.group || 'unknown'}</h4>`; } h += `<a data-id="${id}" class="${w.mesh ? '' : 'nomesh'}">${w.name}<i>${w.src}</i></a>`; }
+  $('items').innerHTML = h; if (cur) document.querySelector(`#list a[data-id="${CSS.escape(cur)}"]`)?.classList.add('sel'); };
+$('filter').oninput = draw; $('items').onclick = e => { const id = e.target.closest('a')?.dataset.id; if (id) show(id); };
+addEventListener('keydown', e => { if (e.target.id === 'filter') return; const a = [...document.querySelectorAll('#items a')], i = a.findIndex(x => x.dataset.id === cur); if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { const n = a[i + (e.key === 'ArrowDown' ? 1 : -1)]; if (n) { show(n.dataset.id); n.scrollIntoView({ block: 'nearest' }); } e.preventDefault(); } if (e.key === ' ') { spin = !spin; e.preventDefault(); } });
+const c = $('c'); c.onpointerdown = e => { drag = e.clientX; spin = false; }; addEventListener('pointerup', () => drag = null); addEventListener('pointermove', e => { if (drag != null) { yaw += (e.clientX - drag) * 0.01; drag = e.clientX; } }); c.onwheel = e => { dist *= e.deltaY > 0 ? 1.1 : 0.9; };
+// ---- on a player: the avatar holds the weapon and plays the game's clips (loco from the speed slider, buttons for the upper-body ones)
+const factory = new AvatarFactory(); let avatar = null, anim = null, avSeq = 0, loopClip = null;
+$('race').innerHTML = RACES.map(r => `<option value="${r.id}">${r.name}</option>`).join(''); $('race').value = q.get('race') || 'hum'; $('gen').value = q.get('g') || 'm'; $('avon').checked = !!q.get('av');
+async function loadAvatar() {
+  const my = ++avSeq; if ($('fpon')?.checked) { pivot.visible = false; return; } if (avatar) { sc.remove(avatar.root); avatar = anim = null; } $('clips').innerHTML = '';
+  if (!$('avon').checked) { pivot.visible = true; return; } pivot.visible = false;
+  const av = await factory.build($('race').value, $('gen').value, ''); if (my !== avSeq) return;
+  av.root.rotation.y = Math.PI; avatar = av; sc.add(av.root); anim = await PlayerAnim.create(av); await applyWeapon(); if (!anim) return;
+  $('clips').innerHTML = Object.keys(anim.clips).filter(n => !/^(normal|attackmode|jump|falling|swim|gank|get_up)/.test(n) && !/^dodge/.test(n)).map(n => `<button data-c="${n}">${n}</button>`).join('');
+}
+async function applyWeapon() { if (!avatar || !cur) return; const w = W[cur]; await factory.wield(avatar, w); if (anim) { anim.setWeapon(w.group); anim.setDrawn($('drawn').checked); } }
+for (const id of ['avon', 'race', 'gen']) $(id).onchange = loadAvatar; $('drawn').onchange = () => anim?.setDrawn($('drawn').checked);
+$('spd').oninput = () => { $('spdv').textContent = $('spd').value; };
+$('clips').onclick = e => { const n = e.target.dataset.c; if (n && anim) { anim.play(n); } };
+const vm = new ViewModel(factory); vm.scene.background = new THREE.Color(0x3a3834); $('fpon').checked = !!q.get('fp');
+async function applyVM() { const on = $('fpon').checked; $('clips').innerHTML = ''; if (!on || !cur) return; const w = W[cur]; await vm.setWeapon(w);
+  const kinds = { bow: ['shoot'], staff: ['cast'], thrown: ['throw'] }[w.group] || ['slash', 'backhand', 'chop', 'stab']; $('clips').innerHTML = kinds.map(k => `<button data-k="${k}">${k}</button>`).join('') + ['block', 'draw'].map(k => `<button data-hold="${k}">hold ${k}</button>`).join(''); }
+$('fpon').onchange = () => { $('avon').checked = false; loadAvatar(); applyVM(); };
+const _clk = $('clips').onclick; $('clips').onclick = e => { const b = e.target.dataset; if (b.k) vm.swing(b.k, 1.0); else if (b.hold) vm.setHold(vm.hold ? null : b.hold); else _clk(e); };
+const _show = show; show = async id => { await _show(id); applyWeapon(); applyVM(); };
+draw(); show(W[q.get('w')] ? q.get('w') : (ids.find(i => W[i].mesh) || ids[0]));
+const loop = function () { const m = $('main'); if (c.width !== m.clientWidth || c.height !== m.clientHeight) { r.setSize(m.clientWidth, m.clientHeight, false); cam.aspect = m.clientWidth / m.clientHeight; cam.updateProjectionMatrix(); }
+  const now = performance.now(), dt = Math.min(0.1, (now - (loop.t || now)) / 1000); loop.t = now;
+  if ($('fpon').checked) { vm.update(dt, +$('spd').value); vm.resize(cam.aspect); r.render(vm.scene, vm.cam); requestAnimationFrame(loop); return; }
+  if (avatar) { dist = 5.2; ctr.set(0, 1.4, 0); avatar.root.rotation.y = Math.PI + yaw; anim?.update(dt, +$('spd').value); }
+  if (spin) yaw += 0.008; pivot.rotation.y = yaw; cam.position.set(0, ctr.y + dist * 0.15, dist); cam.lookAt(0, ctr.y, 0); r.render(sc, cam); requestAnimationFrame(loop); }; loop();
+document.title = 'ready'; window.__d = { vm, show, W, data, get avatar() { return avatar; }, get anim() { return anim; }, loadAvatar };
+if ($('avon').checked) loadAvatar();
+if ($('fpon').checked) applyVM();
+</script>
