@@ -8,6 +8,7 @@ import { Music, Ambience } from './music.js';
 import { Player, SPEEDS } from './collision.js';
 import { DynLights } from './lights.js';
 import { Post } from './post.js';
+import { Vegetation } from './vegetation.js';
 
 const $ = id => document.getElementById(id);
 const q = new URLSearchParams(location.search);
@@ -32,8 +33,8 @@ const post = new Post(renderer); post.enabled = q.get('post') ? q.get('post') !=
 function resize() { renderer.setSize(innerWidth, innerHeight, false); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); const d = renderer.getDrawingBufferSize(new THREE.Vector2()); post.resize(d.x, d.y); }
 addEventListener('resize', resize); resize();
 
-const [worldData, musicAreas, tileNames, envData, terrainManifest, props, spawns] = await Promise.all(
-  ['world', 'music', 'tiles', 'env', 'terrain_textures', 'props', 'spawns'].map(n => J(`/data/${n}.json`)));
+const [worldData, musicAreas, tileNames, envData, terrainManifest, props, spawns, vegData] = await Promise.all(
+  ['world', 'music', 'tiles', 'env', 'terrain_textures', 'props', 'spawns', 'veg'].map(n => J(`/data/${n}.json`)));
 
 // ---- lights for ordinary (object) materials; terrain/water do their own lighting from the same uniforms
 const env = new Environment(envData);
@@ -52,6 +53,8 @@ const sky = new Sky(env, loader); scene.add(sky.group);
 const tex = new TerrainTextures(renderer, terrainManifest);
 const water = new WaterFactory(env, sky.uniforms.uZenith); water.linearFloat = renderer.extensions.has('OES_texture_float_linear');
 const world = new World({ scene, env, tex, water, tiles: worldData, names: tileNames, props, opts: { terrainRadius: VIEW * 0.9, objectRadius: S.obj } });
+
+const veg = new Vegetation({ scene, env, world, data: vegData }); veg.enabled = q.get('veg') !== '0';
 
 // open ocean everywhere (terrain-only far tiles carry no water plane of their own)
 const ocean = new THREE.Mesh(new THREE.PlaneGeometry(2, 2).rotateX(-Math.PI / 2), water.material('water', { value: 1 }));
@@ -98,6 +101,7 @@ addEventListener('keydown', e => {
   if (hit('KeyG')) toggleMode();
   if (hit('KeyB')) { post.enabled = S.post = !post.enabled; try { localStorage.setItem('dfSettings2', JSON.stringify(S)); } catch {} toast(post.enabled ? 'Post-processing on (bloom, god rays, vignette)' : 'Post-processing off'); }
   if (hit('KeyK')) { post.ssao = S.ssao = !post.ssao; try { localStorage.setItem('dfSettings2', JSON.stringify(S)); } catch {} toast(post.ssao ? 'SSAO on' : 'SSAO off'); }
+  if (hit('KeyJ')) { veg.enabled = !veg.enabled; toast(veg.enabled ? 'Vegetation on' : 'Vegetation off'); }
   if (hit('KeyN')) { noclip = !noclip; toast(noclip ? 'No clipping' : 'Ground clamp'); }
   if (hit('KeyO')) $('cfg').classList.toggle('on');
   if (hit('KeyH')) $('help').classList.toggle('on');
@@ -176,6 +180,7 @@ function frameInner() {
   ocean.visible = !world.covered(camera.position.x, camera.position.y, camera.position.z);   // underground (Shoal): the open-sea plane would flood the cavern
 
   world.update(Math.min(raw, 0.5), camera);
+  veg.update(dt, camera);
 
   // place / music / ambience
   const t = world.tileAt(camera.position.x, camera.position.z);
@@ -228,7 +233,7 @@ function hud(t, gh) {
   $('stats').textContent = `${fps} fps   ${world.stats.terrain} terrain · ${world.stats.objects} object tiles${world.stats.loading ? '   loading ' + world.stats.loading : ''}\n` +
     `x ${p.x.toFixed(0)}  y ${p.y.toFixed(0)}  z ${(-p.z).toFixed(0)}   ${Math.round(baseSpeed)} m/s\n${renderer.info.render.calls} calls · ${(renderer.info.render.triangles / 1e6).toFixed(2)}M tris`;
 }
-$('help').innerHTML = `<b>WASD</b> fly · <b>Shift</b> fast · <b>Ctrl</b> slow · <b>Space/E</b> up · <b>C/Q</b> down · <b>Wheel</b> base speed · <b>G</b> walk with collision (Space jumps, Shift sprints, Ctrl slow walk)<br><b>T</b> pause/resume time · <b>[ ]</b> ±30 min (Shift ±2 h) · <b>V</b> atmosphere · <b>M</b> music · <b>B</b> post-processing · <b>K</b> SSAO · <b>N</b> noclip · <b>H</b> hide this`;
+$('help').innerHTML = `<b>WASD</b> fly · <b>Shift</b> fast · <b>Ctrl</b> slow · <b>Space/E</b> up · <b>C/Q</b> down · <b>Wheel</b> base speed · <b>G</b> walk with collision (Space jumps, Shift sprints, Ctrl slow walk)<br><b>T</b> pause/resume time · <b>[ ]</b> ±30 min (Shift ±2 h) · <b>V</b> atmosphere · <b>M</b> music · <b>B</b> post-processing · <b>K</b> SSAO · <b>J</b> vegetation · <b>N</b> noclip · <b>H</b> hide this`;
 setTimeout(setModeLabel, 0);
 
 // ---- boot: preload around the start, then wait for the click (also unlocks audio)

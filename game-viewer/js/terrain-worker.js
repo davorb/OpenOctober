@@ -1,6 +1,11 @@
 // Parses a terrain-only tile GLB (<tile>_empty.glb) off the main thread and returns typed arrays.
 // Layout (see FORMATS.md / sfexport.py): one node, one mesh; all primitives share POSITION/NORMAL/COLOR_0/_WEIGHTS0/_WEIGHTS1
 // and differ by index buffer; mesh.extras.groups[i] = { materials, slots, textures } per primitive.
+// Vegetation classes from terrain material names: 0 green grass, 1 dry/yellow, 2 swamp, 3 dead/burned, 4 flowers, 5 forest floor (mushrooms)
+const VC = 6;
+const CLS = [[/grass_(green|jungle|fall|moss)|grass_moss|forestfloor-grass|central_red_grass|junglefloor/, [[0, 1]]], [/grass_flowers/, [[4, 1], [0, 0.5]]], [/grass_dark|grass_yellow|wasteland|highlands|dirt-light|red_(light|medium)/, [[1, 0.8]]],
+  [/swamp/, [[2, 0.9]]], [/burned|dirt-(medium|dark)|mud_dry|red_dark|alfar/, [[3, 0.7]]], [/forestfloor|moss01|rock-moss/, [[5, 0.8], [0, 0.4]]]];
+const classOf = n => { for (const [re, l] of CLS) if (re.test(n)) return l; return []; };
 self.onmessage = async ({ data: { id, url } }) => {
   try {
     const buf = await (await fetch(url)).arrayBuffer();
@@ -29,8 +34,10 @@ self.onmessage = async ({ data: { id, url } }) => {
     // Also keeps every up-facing surface per grid point (cave floors under a roof, bridges, overhangs) in `layers`, but only for tiles that
     // actually have stacked surfaces (Shoal's cavern); everywhere else the single max height is exact.
     const G = 256, cell = 1024 / G, W = G + 1, hg = new Float32Array(W * W).fill(-1e9), P = pos.arr, NA = nrm.arr, LAYERS = 6, lay = new Map();
+    const vegw = new Uint8Array(W * W * VC), W0 = w0.arr, W1 = w1.arr;
     for (const g of groups) {
       const ix = g.index;
+      const vm = []; (g.textures || []).forEach((tn, i) => { if (tn && g.slots[i] != null) for (const [c, st] of classOf(tn)) vm.push([g.slots[i], c, st]); });
       for (let t = 0; t < ix.length; t += 3) {
         const up = (NA[ix[t] * 3 + 1] + NA[ix[t + 1] * 3 + 1] + NA[ix[t + 2] * 3 + 1]) / 3 > 0.2;
         const a = ix[t] * 3, b = ix[t + 1] * 3, c = ix[t + 2] * 3;
@@ -41,7 +48,15 @@ self.onmessage = async ({ data: { id, url } }) => {
         for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) {
           const l1 = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / den, l2 = ((cz - az) * (x - cx) + (ax - cx) * (z - cz)) / den, l3 = 1 - l1 - l2;
           if (l1 < -1e-4 || l2 < -1e-4 || l3 < -1e-4) continue;
-          const y = l1 * P[a + 1] + l2 * P[b + 1] + l3 * P[c + 1], k = z * W + x; if (y > hg[k]) hg[k] = y;
+          const y = l1 * P[a + 1] + l2 * P[b + 1] + l3 * P[c + 1], k = z * W + x;
+          if (y > hg[k]) {
+            hg[k] = y;
+            const o = k * VC; for (let q = 0; q < VC; q++) vegw[o + q] = 0;
+            for (const [sl, cl, st] of vm) {
+              const A = sl < 4 ? W0 : W1, si = sl & 3, wv = (A[ix[t] * 4 + si] * l1 + A[ix[t + 1] * 4 + si] * l2 + A[ix[t + 2] * 4 + si] * l3) * st;
+              vegw[o + cl] = Math.min(255, vegw[o + cl] + wv);
+            }
+          }
           if (up) { let l = lay.get(k); if (!l) lay.set(k, l = []); l.push(y); }
         }
       }
@@ -62,8 +77,8 @@ self.onmessage = async ({ data: { id, url } }) => {
       const from = Math.max(0, u.length - LAYERS); for (let i = from; i < u.length; i++) layers[k * LAYERS + i - from] = u[i];
     }
     const node = json.nodes[0];
-    const out = { id, pos: pos.arr, nrm: n8, col: col.arr, w0: w0.arr, w1: w1.arr, groups, heights: hg, layers, min: pos.min, max: pos.max, translation: node.translation || [0, 0, 0] };
-    const tr = [out.pos.buffer, n8.buffer, out.col.buffer, hg.buffer, ...(layers ? [layers.buffer] : []), out.w0.buffer, out.w1.buffer, ...groups.map(g => g.index.buffer)];
+    const out = { id, pos: pos.arr, nrm: n8, col: col.arr, w0: w0.arr, w1: w1.arr, groups, heights: hg, vegw, layers, min: pos.min, max: pos.max, translation: node.translation || [0, 0, 0] };
+    const tr = [out.pos.buffer, n8.buffer, out.col.buffer, hg.buffer, vegw.buffer, ...(layers ? [layers.buffer] : []), out.w0.buffer, out.w1.buffer, ...groups.map(g => g.index.buffer)];
     self.postMessage(out, tr);
   } catch (e) { self.postMessage({ id, error: String(e) }); }
 };

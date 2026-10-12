@@ -117,7 +117,7 @@ export class World {
     const t = wk.busy; wk.busy = null;
     if (!t || data.error) { if (t) t.tState = 4; if (data.error) console.warn('terrain', data.id, data.error); this._pump(); return; }
     if (t.tState !== 1) { this._pump(); return; }       // cancelled while loading
-    t.heights = data.heights; t.layers = data.layers;
+    t.heights = data.heights; t.layers = data.layers; t.vegw = data.vegw;
     if (t.waterMats) { for (const m of t.waterMats) this.water.bind(m, t); t.waterMats = null; }
     t.terrain = buildTerrain(data, this.tex, this.env, t.fade);
     this.group.add(t.terrain); t.tState = 2;
@@ -140,7 +140,7 @@ export class World {
     } catch (e) { console.warn('mesh terrain', t.name, e); t.tState = 4; }
     this.meshBusy = false;
   }
-  _dropTerrain(t) { if (t.terrain) { this.group.remove(t.terrain); t.terrain.userData.dispose(); t.terrain = null; } t.heights = null; t.layers = null; if (t.waterTex) { t.waterTex.dispose(); t.waterTex = null; } t.waterMats = null; t.tState = 0; t.fade.value = 0; for (const u of t.turis || []) { /* shared textures released with objects */ } }
+  _dropTerrain(t) { if (t.terrain) { this.group.remove(t.terrain); t.terrain.userData.dispose(); t.terrain = null; } t.heights = null; t.layers = null; t.vegw = null; if (t.waterTex) { t.waterTex.dispose(); t.waterTex = null; } t.waterMats = null; t.tState = 0; t.fade.value = 0; for (const u of t.turis || []) { /* shared textures released with objects */ } }
 
   // ---- objects
   // Some textures (e.g. Shoal's spires) carry non-opacity data in alpha: a MASK material on them eats most of the mesh. Real cutouts (foliage, fences) stay mostly or partly opaque.
