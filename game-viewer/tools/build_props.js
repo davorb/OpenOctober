@@ -22,10 +22,14 @@ function bbox(mesh) {
   bbc.set(key, r); return r;
 }
 function lightY(n, k, mesh) {
-  const bb = mesh && bbox(mesh); if (!bb) return k === 1 ? 1.9 : k === 0 ? 1.0 : 3.8;
+  const fb = k === 1 ? 1.9 : k === 0 ? 1.0 : 3.8, bb = mesh && bbox(mesh); if (!bb) return fb;
   const [lo, hi] = bb, h = hi - lo;
-  if (k === 2 && !/pole/i.test(n)) return (lo + hi) / 2;   // hanging lantern / lamp body
-  return k === 0 ? hi + 0.1 * h : hi - (k === 2 ? 0.08 : 0.1) * h;
+  if (h < 0.3) return k === 0 ? 0.8 : fb;                      // degenerate bounds (flame-only / empty meshes)
+  if (hi < 0.5 && lo < -0.5) return (lo + hi) / 2;             // hangs below its origin (ceiling torches, hanging lanterns)
+  if (k === 2) return hi - 0.08 * h;                           // lamp poles / standing lamps / lantern trees carry the lantern at the top
+  if (k === 1) return hi - 0.1 * h;                            // torch flame at the top of the holder
+  if (/brazier|bonfire|campfire/i.test(n)) return hi + 0.05 * h; // fire bowl on top of the stand
+  return Math.max(lo, 0) + Math.min(0.5 * hi, 1.0);            // fireplaces / forges / firewood: flame near the hearth, not the chimney top
 }
 for (const [name, t] of Object.entries(world)) {
   if (!t.base) continue;
