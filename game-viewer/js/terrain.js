@@ -139,8 +139,10 @@ void main() {
 
 const blankTex = new THREE.DataTexture(new Uint8Array([128, 128, 128, 255]), 1, 1); blankTex.needsUpdate = true;
 
-export function makeTerrainMaterial(group, tex, env, fade) {
-  const pairs = group.textures.map((t, i) => [t, group.slots[i]]).filter(([t, s]) => t && s != null).slice(0, MAXN);
+export function makeTerrainMaterial(group, tex, env, fade, fallback) {
+  let pairs = group.textures.map((t, i) => [t, group.slots[i]]).filter(([t, s]) => t && s != null).slice(0, MAXN);
+  // groups whose texture refs are all unresolved would render as the flat blank texture (bright grey under the 1.6x lighting): borrow the tile's main texture
+  if (!pairs.length && fallback) pairs = [[fallback, group.slots[0] ?? 0]];
   const N = Math.max(1, pairs.length);
   const uniforms = {
     ...env.u, tDetail: { value: tex.detail }, uFade: fade, uTile: { value: 0.058 },
@@ -165,13 +167,15 @@ export function buildTerrain(data, tex, env, fade) {
   const aW0 = new THREE.BufferAttribute(data.w0, 4, true), aW1 = new THREE.BufferAttribute(data.w1, 4, true);
   const box = new THREE.Box3(new THREE.Vector3(...data.min), new THREE.Vector3(...data.max));
   const sphere = box.getBoundingSphere(new THREE.Sphere());
-  const geos = [];
+  const geos = [], use = new Map();
+  for (const grp of data.groups) for (const t of grp.textures || []) if (t) use.set(t, (use.get(t) || 0) + grp.index.length);
+  const fallback = [...use].sort((a, b) => b[1] - a[1])[0]?.[0];
   for (const grp of data.groups) {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', pos); geo.setAttribute('aN', aN); geo.setAttribute('aW0', aW0); geo.setAttribute('aW1', aW1);
     geo.setIndex(new THREE.BufferAttribute(grp.index, 1));
     geo.boundingBox = box; geo.boundingSphere = sphere;
-    const m = new THREE.Mesh(geo, makeTerrainMaterial(grp, tex, env, fade));
+    const m = new THREE.Mesh(geo, makeTerrainMaterial(grp, tex, env, fade, fallback));
     m.matrixAutoUpdate = false; m.frustumCulled = true; m.castShadow = true;
     g.add(m); geos.push(geo);
   }
