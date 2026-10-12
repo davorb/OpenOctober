@@ -20,7 +20,7 @@ async fn mobs_reach_nearby_players_only() {
     let path = std::env::temp_dir().join("df_mobs_test.json");
     // game z = 200 -> wire z = -200
     std::fs::write(&path, r#"[{"id":1,"x":100,"z":200,"mobs":[{"id":7,"name":"Troll","qty":3,"difficulty":"Hard"}]}]"#).unwrap();
-    let cfg = Config { radius: 900.0, max_players: 8, tick_hz: 15, spawns: Some(path.to_string_lossy().into()) };
+    let cfg = Config { radius: 900.0, max_players: 8, tick_hz: 15, spawns: Some(path.to_string_lossy().into()), weapons: None, pvp: true };
     let (cmds, rx) = mpsc::channel(64);
     tokio::spawn(world::run(cfg, rx));
 

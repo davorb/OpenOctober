@@ -7,7 +7,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{interval, MissedTickBehavior};
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::mobs::Mobs;
+use crate::combat::*;
+use crate::mobs::{MobAttack, Mobs};
 use crate::proto::*;
 
 #[derive(Clone, Debug)]
@@ -18,6 +19,10 @@ pub struct Config {
     pub tick_hz: u32,
     /// Path of the mob spawn JSON (`game-viewer/data/mobspawns.json`); `None` runs without mobs.
     pub spawns: Option<String>,
+    /// Path of `game-viewer/data/weapons.json` (stats, clip lengths); `None` = combat off (equip / swing messages are still relayed).
+    pub weapons: Option<String>,
+    /// Players can hurt each other.
+    pub pvp: bool,
 }
 
 /// Mob positions are sent every this many ticks (they walk at ~1 m/s, so clients interpolate).
@@ -37,7 +42,23 @@ pub enum Cmd {
     Pos(u16, PosUpdate),
     Chat(u16, String),
     Leave(u16),
+    Equip(u16, String, bool),
+    Attack(u16, String, String),
+    Block(u16, bool),
+    Bow(u16, String),
+    Shoot(u16, [f32; 3], [f32; 3], f32, bool),
+    Respawn(u16),
 }
+
+/// A blow whose animation has started and that lands at `due`.
+struct Pending {
+    due: Instant,
+    owner: u16,
+}
+
+/// Seconds a dead player lies there before he gets up (a Respawn message may bring it forward after DOWN_MIN).
+const DOWN_SECS: f32 = 6.0;
+const DOWN_MIN: f32 = 2.5;
 
 struct Player {
     info: PlayerInfo,
@@ -48,6 +69,14 @@ struct Player {
     last_sent: usize,
     last_mobs: usize,
     dead: bool,
+    // combat
+    weapon: String,
+    group: String,
+    drawn: bool,
+    blocking: bool,
+    hp: f32,
+    down_until: Option<Instant>,
+    next_attack: Instant,
 }
 
 #[derive(Default)]
@@ -68,6 +97,9 @@ struct World {
     tick: u32,
     mobs: Mobs,
     stats: Stats,
+    weapons: Weapons,
+    pending: Vec<Pending>,
+    shots: Vec<Projectile>,
 }
 
 pub async fn run(cfg: Config, mut rx: mpsc::Receiver<Cmd>) {
@@ -79,7 +111,15 @@ pub async fn run(cfg: Config, mut rx: mpsc::Receiver<Cmd>) {
         None => Mobs::empty(),
     };
     println!("{} mobs of {} types", mobs.mobs.len(), mobs.types.len());
-    let mut world = World { players: (0..cfg.max_players).map(|_| None).collect(), cfg: cfg.clone(), online: 0, cursor: 0, tick: 0, mobs, stats: Stats::default() };
+    let weapons = match &cfg.weapons {
+        Some(path) => Weapons::load(path).unwrap_or_else(|e| {
+            eprintln!("no weapon table (combat off): {e}");
+            Weapons::default()
+        }),
+        None => Weapons::default(),
+    };
+    println!("{} weapons", weapons.defs.len());
+    let mut world = World { players: (0..cfg.max_players).map(|_| None).collect(), cfg: cfg.clone(), online: 0, cursor: 0, tick: 0, mobs, stats: Stats::default(), weapons, pending: Vec::new(), shots: Vec::new() };
     let mut ticker = interval(Duration::from_secs_f64(1.0 / cfg.tick_hz as f64));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut report = interval(Duration::from_secs(5));
@@ -112,6 +152,12 @@ impl World {
             }
             Cmd::Chat(id, text) => self.chat(id, &text),
             Cmd::Leave(id) => self.remove(id),
+            Cmd::Equip(id, w, drawn) => self.equip(id, w, drawn),
+            Cmd::Attack(id, kind, clip) => self.attack(id, &kind, &clip),
+            Cmd::Block(id, on) => self.block(id, on),
+            Cmd::Bow(id, what) => self.relay(id, |id| serde_json::to_string(&ServerMsg::Bow { id, what: &what }).unwrap()),
+            Cmd::Shoot(id, from, dir, power, spell) => self.shoot(id, from, dir, power, spell),
+            Cmd::Respawn(id) => self.respawn(id, false),
         }
         self.reap();
     }
@@ -131,8 +177,8 @@ impl World {
         if name.is_empty() {
             name = format!("Player{id}");
         }
-        let info = PlayerInfo { id: id as u16, name, race: req.race, gender: req.gender, gear: clean(&req.gear, MAX_GEAR) };
-        self.players[id] = Some(Player { info, pos: PosUpdate::default(), has_pos: false, tx: req.tx, last_chat: Instant::now() - Duration::from_secs(10), last_sent: 0, last_mobs: 0, dead: false });
+        let info = PlayerInfo { id: id as u16, name, race: req.race, gender: req.gender, gear: clean(&req.gear, MAX_GEAR), weapon: String::new(), drawn: false };
+        self.players[id] = Some(Player { info, pos: PosUpdate::default(), has_pos: false, tx: req.tx, last_chat: Instant::now() - Duration::from_secs(10), last_sent: 0, last_mobs: 0, dead: false, weapon: String::new(), group: String::new(), drawn: false, blocking: false, hp: PLAYER_HP, down_until: None, next_attack: Instant::now() });
         self.online += 1;
         let _ = req.reply.send(Ok(id as u16));
 
@@ -154,6 +200,251 @@ impl World {
         let text = serde_json::to_string(&joined).unwrap();
         self.broadcast_text(text, Some(id as u16));
         println!("+ {} ({}_{}) id {} — {} online", self.players[id].as_ref().unwrap().info.name, self.players[id].as_ref().unwrap().info.race, self.players[id].as_ref().unwrap().info.gender, id, self.online);
+    }
+
+    // ---------------------------------------------------------------- combat
+    /// Send `text` to everybody within the interest radius of (x, z) (players whose position is not known yet get it too).
+    fn send_near(&mut self, x: f32, z: f32, text: String, except: Option<u16>) {
+        let r2 = self.cfg.radius * self.cfg.radius;
+        for p in self.players.iter_mut().flatten() {
+            if Some(p.info.id) == except || (p.has_pos && (p.pos.x - x).powi(2) + (p.pos.z - z).powi(2) > r2) {
+                continue;
+            }
+            if p.tx.try_send(Message::Text(text.clone())).is_err() {
+                p.dead = true;
+            }
+        }
+    }
+
+    /// Tell the players near `id` something about him (not `id` himself).
+    fn relay(&mut self, id: u16, msg: impl FnOnce(u16) -> String) {
+        let Some(Some(p)) = self.players.get(id as usize) else { return };
+        let (x, z) = (p.pos.x, p.pos.z);
+        self.send_near(x, z, msg(id), Some(id));
+    }
+
+    fn equip(&mut self, id: u16, w: String, drawn: bool) {
+        let w = clean(&w, MAX_WEAPON);
+        let group = if w.is_empty() { Some(String::new()) } else if self.weapons.defs.is_empty() { Some("sword".to_string()) } else { self.weapons.get(&w).and_then(|d| d.group.clone()) };
+        let Some(group) = group else { return };
+        let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
+        p.weapon = w.clone();
+        p.group = group;
+        p.drawn = drawn && !w.is_empty();
+        p.blocking = false;
+        p.info.weapon = w.clone();
+        p.info.drawn = p.drawn;
+        let drawn = p.drawn;
+        self.relay(id, |id| serde_json::to_string(&ServerMsg::Equip { id, w: &w, drawn }).unwrap());
+    }
+
+    fn block(&mut self, id: u16, on: bool) {
+        let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
+        if p.down_until.is_some() || !p.drawn || !is_melee(&p.group) {
+            p.blocking = false;
+            return;
+        }
+        p.blocking = on;
+        self.relay(id, |id| serde_json::to_string(&ServerMsg::Block { id, on }).unwrap());
+    }
+
+    /// A swing / cast / throw starts. Melee blows land at HIT_AT of the clip (see `combat()`); the swing may not be repeated before its clip is over.
+    fn attack(&mut self, id: u16, kind: &str, clip: &str) {
+        let now = Instant::now();
+        let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
+        if p.down_until.is_some() || !p.drawn || p.group.is_empty() || p.group == "shield" || now < p.next_attack {
+            return;
+        }
+        let group = p.group.clone();
+        let dur = self.weapons.clip(swing_clip(&group), 1.0);
+        p.next_attack = now + Duration::from_secs_f32(dur * 0.9);
+        let (kind, clip) = (clean(kind, 12), clean(clip, 40));
+        if is_melee(&group) {
+            self.pending.push(Pending { due: now + Duration::from_secs_f32(dur * HIT_AT), owner: id });
+        }
+        self.relay(id, |id| serde_json::to_string(&ServerMsg::Swing { id, kind: &kind, clip: &clip, group: &group }).unwrap());
+    }
+
+    /// An arrow or bolt leaves a bow / staff. The shot has to start near the shooter and may not come faster than the weapon allows.
+    fn shoot(&mut self, id: u16, from: [f32; 3], dir: [f32; 3], power: f32, spell: bool) {
+        let now = Instant::now();
+        let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
+        let ok_group = if spell { p.group == "staff" || p.group == "thrown" } else { p.group == "bow" };
+        let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+        let near = (from[0] - p.pos.x).powi(2) + (from[2] - p.pos.z).powi(2) < 100.0;
+        if p.down_until.is_some() || !p.drawn || !ok_group || len < 0.5 || !near || !from.iter().all(|v| v.is_finite()) || !dir.iter().all(|v| v.is_finite()) {
+            return;
+        }
+        if spell && now < p.next_attack.checked_sub(Duration::from_millis(500)).unwrap_or(now) {
+            return;
+        }
+        if !spell {
+            if now < p.next_attack {
+                return;
+            }
+            p.next_attack = now + Duration::from_millis(500);
+        }
+        let group = p.group.clone();
+        let Some(def) = self.weapons.get(&p.weapon).cloned().or_else(|| self.weapons.defs.is_empty().then(|| WeaponDef { group: Some(group.clone()), kind: String::new(), reach: None, angle: None, rank: None })) else { return };
+        let power = if spell { 1.0 } else { power.clamp(0.2, 1.0) };
+        let speed = if spell { 45.0 } else { 100.0 * (0.45 + 0.55 * power) };
+        let d = [dir[0] / len, dir[1] / len, dir[2] / len];
+        let dmg = damage(&def, &group, power, (self.tick % 7) as f32 / 6.0);
+        self.shots.push(Projectile { owner: id, pos: from, vel: [d[0] * speed, d[1] * speed, d[2] * speed], left: if spell { 120.0 } else { 300.0 }, group, dmg, spell });
+        self.relay(id, |id| serde_json::to_string(&ServerMsg::Shoot { id, from, dir: d, power, spell }).unwrap());
+    }
+
+    fn respawn(&mut self, id: u16, forced: bool) {
+        let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
+        let Some(until) = p.down_until else { return };
+        let min = until - Duration::from_secs_f32(DOWN_SECS - DOWN_MIN);
+        if !forced && Instant::now() < min {
+            return;
+        }
+        p.down_until = None;
+        p.hp = PLAYER_HP;
+        let msg = serde_json::to_string(&ServerMsg::Respawn { id, hp: PLAYER_HP, max: PLAYER_HP }).unwrap();
+        self.broadcast_text(msg, None);
+    }
+
+    /// Apply a blow to player `vid`: blocking, hit points, death. `from` is where it came from (for the block test), `by` the attacker (id, is a mob).
+    fn hurt_player(&mut self, vid: u16, dmg: f32, by: (u16, bool), grp: &str, from: (f32, f32)) {
+        let now = Instant::now();
+        let Some(Some(p)) = self.players.get_mut(vid as usize) else { return };
+        if p.down_until.is_some() {
+            return;
+        }
+        let blocked = p.blocking && blocks(p.pos.yaw, (p.pos.x, p.pos.z), from);
+        let dmg = if blocked { (dmg * BLOCK_FACTOR).round().max(1.0) } else { dmg };
+        p.hp = (p.hp - dmg).max(0.0);
+        let killed = p.hp <= 0.0;
+        if killed {
+            p.down_until = Some(now + Duration::from_secs_f32(DOWN_SECS));
+            p.blocking = false;
+        }
+        let (at, hp, snap) = ([p.pos.x, p.pos.y, p.pos.z], p.hp, p.pos.flags & FLAG_SNAP != 0);
+        let msg = serde_json::to_string(&ServerMsg::Hit { a: by.0, am: by.1, v: "p", i: vid, dmg, hp, max: PLAYER_HP, grp, blocked, at, snap, killed }).unwrap();
+        self.send_near(at[0], at[2], msg, None);
+        if killed {
+            self.send_near(at[0], at[2], serde_json::to_string(&ServerMsg::Died { v: "p", i: vid }).unwrap(), None);
+        }
+    }
+
+    fn hit_mob(&mut self, owner: u16, mid: u16, dmg: f32, grp: &str) {
+        let Some((hp, killed)) = self.mobs.damage(mid, dmg, owner) else { return };
+        let m = &self.mobs.mobs[mid as usize];
+        let (at, max) = ([m.pos.x, 0.0, m.pos.z], m.max_hp);
+        let msg = serde_json::to_string(&ServerMsg::Hit { a: owner, am: false, v: "m", i: mid, dmg, hp, max, grp, blocked: false, at, snap: true, killed }).unwrap();
+        self.send_near(at[0], at[2], msg, None);
+        if killed {
+            self.send_near(at[0], at[2], serde_json::to_string(&ServerMsg::Died { v: "m", i: mid }).unwrap(), None);
+        }
+    }
+
+    /// The blow of `owner`'s swing lands now: the nearest living body inside the weapon's arc takes it.
+    fn melee_lands(&mut self, owner: u16) {
+        let Some(Some(p)) = self.players.get(owner as usize) else { return };
+        if p.down_until.is_some() || !p.drawn || p.pos.flags & FLAG_FLY != 0 {
+            return;
+        }
+        let group = p.group.clone();
+        let Some(def) = self.weapons.get(&p.weapon).cloned() else { return };
+        let (reach, arc) = (def.reach.unwrap_or(2.1) * WORLD_SCALE, def.angle.unwrap_or(60.0));
+        let (a, yaw, ay) = ((p.pos.x, p.pos.z), p.pos.yaw, p.pos.y);
+        let tr = BODY_RADIUS * WORLD_SCALE;
+        let mut best: Option<(f32, bool, u16)> = None; // (distance, is mob, id)
+        for i in self.mobs.candidates(a.0, a.1) {
+            let m = &self.mobs.mobs[i as usize];
+            let t = (m.pos.x, m.pos.z);
+            if m.alive && in_arc(a, yaw, t, reach, arc, tr) {
+                let d = ((t.0 - a.0).powi(2) + (t.1 - a.1).powi(2)).sqrt();
+                if best.map_or(true, |b| d < b.0) {
+                    best = Some((d, true, m.id));
+                }
+            }
+        }
+        if self.cfg.pvp {
+            for q in self.players.iter().flatten() {
+                let t = (q.pos.x, q.pos.z);
+                if q.info.id != owner && q.has_pos && q.down_until.is_none() && q.pos.flags & FLAG_FLY == 0 && (q.pos.flags & FLAG_SNAP != 0 || (q.pos.y - ay).abs() < 6.0) && in_arc(a, yaw, t, reach, arc, tr) {
+                    let d = ((t.0 - a.0).powi(2) + (t.1 - a.1).powi(2)).sqrt();
+                    if best.map_or(true, |b| d < b.0) {
+                        best = Some((d, false, q.info.id));
+                    }
+                }
+            }
+        }
+        let Some((_, is_mob, vid)) = best else { return };
+        let dmg = damage(&def, &group, 1.0, (self.tick % 11) as f32 / 10.0);
+        let grp = damage_type(&group);
+        if is_mob {
+            self.hit_mob(owner, vid, dmg, &group);
+        } else {
+            self.hurt_player(vid, dmg, (owner, false), &group, a);
+        }
+        let _ = grp;
+    }
+
+    /// Per-tick combat: mobs think and fight, due blows land, projectiles fly, the fallen get up.
+    fn combat(&mut self, dt: f32) {
+        let now = Instant::now();
+        // players using the free-fly camera are out of the fight (a jump is not: jumping players can still be hit)
+        let living: Vec<(u16, f32, f32)> = self.players.iter().flatten().filter(|p| p.has_pos && p.down_until.is_none() && p.pos.flags & FLAG_FLY == 0).map(|p| (p.info.id, p.pos.x, p.pos.z)).collect();
+        let blows: Vec<MobAttack> = self.mobs.step(dt, &living);
+        for b in blows {
+            let m = &self.mobs.mobs[b.mob as usize];
+            let from = (m.pos.x, m.pos.z);
+            self.hurt_player(b.player, b.dmg, (b.mob, true), "mob", from);
+        }
+        // swings that reach their hit moment
+        let due: Vec<u16> = self.pending.iter().filter(|p| p.due <= now).map(|p| p.owner).collect();
+        self.pending.retain(|p| p.due > now);
+        for owner in due {
+            self.melee_lands(owner);
+        }
+        // arrows and bolts
+        let mut shots = std::mem::take(&mut self.shots);
+        shots.retain_mut(|s| {
+            let (a, b) = s.step(dt);
+            if s.left <= 0.0 || b[1] < -500.0 {
+                return false;
+            }
+            let r = BODY_RADIUS * WORLD_SCALE + 0.3;
+            let mut best: Option<(f32, bool, u16, f32)> = None; // (distance from the start of the segment, is mob, id, ref y)
+            let mid = ((a[0] + b[0]) * 0.5, (a[2] + b[2]) * 0.5);
+            for i in self.mobs.candidates(mid.0, mid.1) {
+                let m = &self.mobs.mobs[i as usize];
+                if m.alive && (m.pos.x - mid.0).abs() < 60.0 && (m.pos.z - mid.1).abs() < 60.0 && segment_hits(a, b, (m.pos.x, m.pos.z), r + 0.2, a[1]) {
+                    let d = (m.pos.x - a[0]).powi(2) + (m.pos.z - a[2]).powi(2);
+                    if best.map_or(true, |x| d < x.0) {
+                        best = Some((d, true, m.id, 0.0));
+                    }
+                }
+            }
+            if self.cfg.pvp {
+                for q in self.players.iter().flatten() {
+                    if q.info.id != s.owner && q.has_pos && q.down_until.is_none() && q.pos.flags & FLAG_FLY == 0 && segment_hits(a, b, (q.pos.x, q.pos.z), r, if q.pos.flags & FLAG_SNAP != 0 { a[1] } else { q.pos.y + 1.5 }) {
+                        let d = (q.pos.x - a[0]).powi(2) + (q.pos.z - a[2]).powi(2);
+                        if best.map_or(true, |x| d < x.0) {
+                            best = Some((d, false, q.info.id, 0.0));
+                        }
+                    }
+                }
+            }
+            let Some((_, is_mob, vid, _)) = best else { return true };
+            if is_mob {
+                self.hit_mob(s.owner, vid, s.dmg, &s.group);
+            } else {
+                self.hurt_player(vid, s.dmg, (s.owner, false), &s.group, (a[0], a[2]));
+            }
+            false
+        });
+        self.shots.append(&mut shots);
+        // get up
+        let up: Vec<u16> = self.players.iter().flatten().filter(|p| p.down_until.map_or(false, |t| t <= now)).map(|p| p.info.id).collect();
+        for id in up {
+            self.respawn(id, true);
+        }
     }
 
     fn chat(&mut self, id: u16, text: &str) {
@@ -202,7 +493,7 @@ impl World {
     /// One network tick: build a per-recipient snapshot of everybody within the interest radius (spatial hash, 3x3 cells).
     fn step(&mut self) {
         self.tick = self.tick.wrapping_add(1);
-        self.mobs.step(1.0 / self.cfg.tick_hz as f32);
+        self.combat(1.0 / self.cfg.tick_hz as f32);
         let cell = self.cfg.radius.max(1.0);
         let r2 = self.cfg.radius * self.cfg.radius;
         let ents: Vec<(u16, PosUpdate)> = self.players.iter().flatten().filter(|p| p.has_pos).map(|p| (p.info.id, p.pos)).collect();

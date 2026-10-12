@@ -9,11 +9,11 @@ use tokio_tungstenite::tungstenite::Message;
 use game_server::proto::*;
 use game_server::world::{self, Cmd, Config, JoinReq};
 
-const USAGE: &str = "usage: game-server [--port 9000] [--radius 900] [--max-players 256] [--tick-hz 15] [--spawns ../game-viewer/data/mobspawns.json | --spawns none]";
+const USAGE: &str = "usage: game-server [--port 9000] [--radius 900] [--max-players 256] [--tick-hz 15] [--spawns ../game-viewer/data/mobspawns.json | --spawns none] [--weapons ../game-viewer/data/weapons.json | --weapons none] [--pvp on|off]";
 
 #[tokio::main]
 async fn main() {
-    let (mut port, mut cfg) = (9000u16, Config { radius: 900.0, max_players: 256, tick_hz: 15, spawns: Some("../game-viewer/data/mobspawns.json".into()) });
+    let (mut port, mut cfg) = (9000u16, Config { radius: 900.0, max_players: 256, tick_hz: 15, spawns: Some("../game-viewer/data/mobspawns.json".into()), weapons: Some("../game-viewer/data/weapons.json".into()), pvp: true });
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let v = args.next().unwrap_or_default();
@@ -23,6 +23,8 @@ async fn main() {
             "--max-players" => cfg.max_players = v.parse::<usize>().expect(USAGE).clamp(1, 60000),
             "--tick-hz" => cfg.tick_hz = v.parse::<u32>().expect(USAGE).clamp(1, 120),
             "--spawns" => cfg.spawns = (v != "none").then_some(v),
+            "--weapons" => cfg.weapons = (v != "none").then_some(v),
+            "--pvp" => cfg.pvp = v != "off",
             _ => panic!("{USAGE}"),
         }
     }
@@ -91,8 +93,18 @@ async fn connection(stream: TcpStream, cmds: mpsc::Sender<Cmd>) {
                     }
                 }
                 Some(Ok(Message::Text(t))) => {
-                    if let Ok(ClientMsg::Chat { text }) = serde_json::from_str(&t) {
-                        if cmds.send(Cmd::Chat(id, text)).await.is_err() { break; }
+                    let cmd = match serde_json::from_str::<ClientMsg>(&t) {
+                        Ok(ClientMsg::Chat { text }) => Some(Cmd::Chat(id, text)),
+                        Ok(ClientMsg::Equip { w, drawn }) => Some(Cmd::Equip(id, w, drawn)),
+                        Ok(ClientMsg::Attack { kind, clip }) => Some(Cmd::Attack(id, kind, clip)),
+                        Ok(ClientMsg::Block { on }) => Some(Cmd::Block(id, on)),
+                        Ok(ClientMsg::Bow { what }) => Some(Cmd::Bow(id, what)),
+                        Ok(ClientMsg::Shoot { dir, from, power, spell }) => Some(Cmd::Shoot(id, from, dir, power, spell)),
+                        Ok(ClientMsg::Respawn) => Some(Cmd::Respawn(id)),
+                        _ => None,
+                    };
+                    if let Some(c) = cmd {
+                        if cmds.send(c).await.is_err() { break; }
                     }
                 }
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,

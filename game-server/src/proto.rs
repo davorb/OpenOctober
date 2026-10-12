@@ -19,12 +19,19 @@ pub const FLAG_SWIM: u8 = 1;
 pub const FLAG_AIR: u8 = 2;
 /// The sender has no real ground height (bots): receivers should snap the avatar to the terrain.
 pub const FLAG_SNAP: u8 = 4;
+/// Players only: the free-fly camera is on (not a jump). Such a player is out of the fight: mobs ignore him and his blows land nowhere.
+pub const FLAG_FLY: u8 = 32;
+/// Mobs only: the mob is dead (clients lay it down, then it disappears until it respawns).
+pub const FLAG_DEAD: u8 = 8;
+/// Mobs only: the mob is in combat (chasing / fighting a player).
+pub const FLAG_FIGHT: u8 = 16;
 
 pub const RACES: [&str; 6] = ["hum", "alf", "dwf", "ork", "mir", "mhm"];
 pub const GENDERS: [&str; 2] = ["m", "f"];
 pub const MAX_NAME: usize = 16;
 pub const MAX_CHAT: usize = 200;
 pub const MAX_GEAR: usize = 24;
+pub const MAX_WEAPON: usize = 48;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PosUpdate {
@@ -82,6 +89,9 @@ pub struct PlayerInfo {
     pub gender: String,
     /// Armour set name from the game data ("" = none). Opaque to the server; clients ignore names they can't resolve.
     pub gear: String,
+    /// Wielded weapon id from `data/weapons.json` ("r_Talon Axe"; "" = none) and whether it is drawn.
+    pub weapon: String,
+    pub drawn: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -96,6 +106,17 @@ pub struct MobType {
 pub enum ClientMsg {
     Join { name: String, race: String, gender: String, #[serde(default)] gear: String },
     Chat { text: String },
+    /// Wield a weapon (or sheathe / draw the one wielded).
+    Equip { w: String, #[serde(default)] drawn: bool },
+    /// A melee swing / cast / throw starts: the blow lands at 45% of its clip. `clip` / `dur` are for other players' animation only.
+    Attack { #[serde(default)] kind: String, #[serde(default)] clip: String },
+    Block { on: bool },
+    /// Started drawing a bow (other players play the draw clip).
+    Bow { #[serde(default)] what: String },
+    /// An arrow or bolt leaves the weapon.
+    Shoot { dir: [f32; 3], from: [f32; 3], #[serde(default)] power: f32, #[serde(default)] spell: bool },
+    /// After dying: ask to get up (the server also does it by itself after a few seconds).
+    Respawn,
 }
 
 #[derive(Debug, Serialize)]
@@ -109,6 +130,18 @@ pub enum ServerMsg<'a> {
     Left { id: u16 },
     Chat { id: u16, name: &'a str, text: &'a str },
     Error { msg: &'a str },
+    Equip { id: u16, w: &'a str, drawn: bool },
+    Swing { id: u16, kind: &'a str, clip: &'a str, group: &'a str },
+    Block { id: u16, on: bool },
+    Bow { id: u16, what: &'a str },
+    Shoot { id: u16, from: [f32; 3], dir: [f32; 3], power: f32, spell: bool },
+    /// A blow landed. `a` attacker (a player id, or a mob id when `am`), `v` victim kind ("p" / "m") and id `i`; `at` is the victim's position (mobs have no height: `snap`).
+    Hit { a: u16, am: bool, v: &'a str, i: u16, dmg: f32, hp: f32, max: f32, grp: &'a str, blocked: bool, at: [f32; 3], snap: bool, killed: bool },
+    Died { v: &'a str, i: u16 },
+    /// A player got up again (full health) - the client puts itself back at a spawn point.
+    Respawn { id: u16, hp: f32, max: f32 },
+    /// Your own health (after joining).
+    Hp { hp: f32, max: f32 },
 }
 
 /// Trim, drop control characters, cap the length (in chars).
