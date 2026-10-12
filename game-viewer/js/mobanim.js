@@ -45,8 +45,8 @@ export function evalChannel(ch, f, dt) {
 export function bindClips(clone, clips, flip = false) {
   const byName = {}; clone.traverse(n => { if (n.isBone) byName[n.name] = n; });
   const tracks = {};
-  for (const k of CLIPS) if (clips[k]) tracks[k] = Object.entries(clips[k].bones).filter(([n]) => byName[n]).map(([n, ch]) => ({ bone: byName[n], ch, root: flip && !byName[n].parent?.isBone }));
-  return { clips, tracks };
+  for (const k of CLIPS) if (clips[k]) tracks[k] = Object.entries(clips[k].bones).filter(([n]) => byName[n]).map(([n, ch]) => ({ bone: byName[n], ch, root: !byName[n].parent?.isBone }));
+  return { clips, tracks, flip };
 }
 
 /** Many models (about 100, the ones whose skeleton faces the other way) have their skeleton turned 180 degrees about Y relative to the mesh: each vertex sits at
@@ -77,10 +77,12 @@ export function flipSkeleton(sc) {
 export function applyClip(part, name, f, w = 1) {
   const clip = part.clips[name], tr = part.tracks[name]; if (!clip || !tr) return;
   const dt = clip.dt;
+  const up = clip.up;
   for (const { bone, ch, root } of tr) {
     v.set(evalChannel(ch[0], f, dt), evalChannel(ch[1], f, dt), -evalChannel(ch[2], f, dt));
     q.set(-evalChannel(ch[3], f, dt), -evalChannel(ch[4], f, dt), evalChannel(ch[5], f, dt), evalChannel(ch[6], f, dt)).normalize();
-    if (root) { v.set(-v.x, v.y, -v.z); q.premultiply(Y180); }   // see needsFlip
+    if (root && part.flip) { v.set(-v.x, v.y, -v.z); q.premultiply(Y180); }   // see needsFlip
+    if (root && up) { v.sub(up.pivot).applyQuaternion(up.q).add(up.pivot); q.premultiply(up.q); }   // see uprightClips
     if (w >= 1) { bone.position.copy(v); bone.quaternion.copy(q); } else { bone.position.lerp(v, w); bone.quaternion.slerp(q, w); }
   }
 }
@@ -115,4 +117,28 @@ export function facing(clone, part) {
     if (n) stance += s / n;
   }
   return stance > 0.5 ? -1 : 1;
+}
+
+/** Some clips hold the whole body rolled sideways by 20-35 degrees in every frame (the gnoll / hivekin / lizardman walks).  Measure the mean roll of each clip once
+ *  (head against the middle of the feet, about the forward z axis) and let applyClip turn the skeleton root back about the feet.  Only for clear bipeds:
+ *  quadrupeds have no meaningful head-over-feet axis.  Call on an unposed clone of each model; clips are shared, so it runs once per file. */
+export function uprightClips(clone, part) {
+  const by = {}; clone.traverse(n => { if (n.isBone) by[n.name.replace(/^[a-z]+_f/, '')] ??= n; });
+  const ok = by.Head && by.LLegAnkle && by.RLegAnkle;
+  const inv = new THREE.Matrix4(), a = new THREE.Vector3(), b = new THREE.Vector3(), h = new THREE.Vector3();
+  for (const k of CLIPS) {
+    const clip = part.clips[k]; if (!clip || clip.up !== undefined) continue;
+    clip.up = null; if (!ok) continue;
+    clone.updateMatrixWorld(true); inv.copy(clone.matrixWorld).invert();
+    let roll = 0, n = 0, fx = 0; const pivot = new THREE.Vector3();
+    for (let f = 0; f < clip.nk; f += 2) {
+      applyClip(part, k, f); clone.updateMatrixWorld(true);
+      a.setFromMatrixPosition(by.LLegAnkle.matrixWorld).applyMatrix4(inv); b.setFromMatrixPosition(by.RLegAnkle.matrixWorld).applyMatrix4(inv); a.add(b).multiplyScalar(0.5);
+      h.setFromMatrixPosition(by.Head.matrixWorld).applyMatrix4(inv).sub(a);
+      roll += Math.atan2(h.x, h.y); fx += Math.abs(h.z) / Math.max(1, h.y); pivot.add(a); n++;
+    }
+    roll /= n; pivot.multiplyScalar(1 / n);
+    if (Math.abs(roll) < 0.05 || Math.abs(roll) > 0.8 || fx / n > 0.6) continue;
+    clip.up = { q: new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), roll), pivot };
+  }
 }

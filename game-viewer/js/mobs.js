@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { AVATAR_SCALE, cloneSkinned } from './avatars.js';
-import { loadClips, bindClips, applyClip, walkSpeed, facing, needsFlip, flipSkeleton } from './mobanim.js';
+import { loadClips, bindClips, applyClip, walkSpeed, facing, needsFlip, flipSkeleton, uprightClips } from './mobanim.js';
 
 export const OP_MOBS = 3;
 const FLAG_SNAP = 4;
@@ -104,6 +104,7 @@ export class MobWorld {
         const t = await this.template(f); if (!t) continue;
         const o = cloneSkinned(t); root.add(o); collectBones(o, t, bones);
         const clips = await loadClips(f), part = clips ? bindClips(o, clips, t.userData.flip) : null;
+        if (part) uprightClips(o, part);
         if (!this.face.has(f)) this.face.set(f, facing(o, part));
         face ??= this.face.get(f);
         if (part) { parts.push(part); if (!ref) { if (!this.stride.has(f)) this.stride.set(f, walkSpeed(o, part)); ref = this.stride.get(f); } }
