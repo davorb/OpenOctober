@@ -13,8 +13,11 @@ import { newColl, addCollision, finishColl } from './collision.js';
 const OBJ_DIR = '/converted/maps/';
 
 export class World {
-  constructor({ scene, env, tex, water, tiles, names, props = {}, opts = {} }) {
+  constructor({ scene, env, tex, water, tiles, names, props = {}, alphaMode = null, opts = {} }) {
     this.scene = scene; this.env = env; this.tex = tex; this.water = water;
+    // Subsets whose shader does not alpha-test. `all` is every subset of that mesh; `solid` is one subset; `keep` wins over both.
+    const am = alphaMode || {};
+    this.solidAll = new Set(am.all || []); this.solidSub = new Set(am.solid || []); this.solidKeep = new Set(am.keep || []);
     this.opts = { terrainRadius: 3600, objectRadius: 1500, workers: 3, ...opts };
     this.tiles = new Map();
     for (const [name, t] of Object.entries(tiles)) {
@@ -143,6 +146,15 @@ export class World {
   _dropTerrain(t) { if (t.terrain) { this.group.remove(t.terrain); t.terrain.userData.dispose(); t.terrain = null; } t.heights = null; t.layers = null; t.vegw = null; if (t.waterTex) { t.waterTex.dispose(); t.waterTex = null; } t.waterMats = null; t.tState = 0; t.fade.value = 0; for (const u of t.turis || []) { /* shared textures released with objects */ } }
 
   // ---- objects
+  // Exported MASK means "the PNG has an alpha channel", not "the game alpha-tests". Alphametal and the default prop
+  // shader store metal/specular in alpha and draw solid; only ALPHATEST shaders (foliage, banners, cages) should clip.
+  // data/alphamode.json is that shader decision. Textures it does not cover still use the heuristic below.
+  _shaderIsSolid(name) {
+    const n = (name || '').toLowerCase();
+    if (!n || this.solidKeep.has(n)) return false;
+    const mesh = n.replace(/_\d+$/, '');
+    return this.solidAll.has(mesh) || this.solidSub.has(n);
+  }
   // Some textures (e.g. Shoal's spires) carry non-opacity data in alpha: a MASK material on them eats most of the mesh. Real cutouts (foliage, fences) stay mostly or partly opaque.
   _maskIsBogus(tex) {
     const img = tex && tex.image; if (!img) return false;
@@ -161,7 +173,8 @@ export class World {
   }
   _objMaterial(src, fade) {
     // MeshStandardMaterial from glTF -> cheaper Lambert with the game's fog
-    const m = new THREE.MeshLambertMaterial({ map: src.map, color: src.color, side: THREE.DoubleSide, alphaTest: src.alphaTest && this._maskIsBogus(src.map) ? 0 : src.alphaTest, transparent: src.transparent, opacity: src.opacity, emissive: src.emissive, emissiveMap: src.emissiveMap, vertexColors: src.vertexColors });
+    const solid = this._shaderIsSolid(src.name);
+    const m = new THREE.MeshLambertMaterial({ map: src.map, color: src.color, side: THREE.DoubleSide, alphaTest: solid ? 0 : (src.alphaTest && this._maskIsBogus(src.map) ? 0 : src.alphaTest), transparent: solid ? false : src.transparent, opacity: src.opacity, emissive: src.emissive, emissiveMap: src.emissiveMap, vertexColors: src.vertexColors });
     m.name = src.name;
     m.customProgramCacheKey = () => 'dfobj';
     m.onBeforeCompile = sh => {

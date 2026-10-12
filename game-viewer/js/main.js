@@ -34,8 +34,8 @@ const post = new Post(renderer); post.enabled = q.get('post') ? q.get('post') !=
 function resize() { renderer.setSize(innerWidth, innerHeight, false); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); const d = renderer.getDrawingBufferSize(new THREE.Vector2()); post.resize(d.x, d.y); }
 addEventListener('resize', resize); resize();
 
-const [worldData, musicAreas, tileNames, envData, terrainManifest, props, spawns, vegData] = await Promise.all(
-  ['world', 'music', 'tiles', 'env', 'terrain_textures', 'props', 'spawns', 'veg'].map(n => J(`/data/${n}.json`)));
+const [worldData, musicAreas, tileNames, envData, terrainManifest, props, spawns, vegData, alphaMode] = await Promise.all(
+  ['world', 'music', 'tiles', 'env', 'terrain_textures', 'props', 'spawns', 'veg', 'alphamode'].map(n => J(`/data/${n}.json`)));
 
 // ---- lights for ordinary (object) materials; terrain/water do their own lighting from the same uniforms
 const env = new Environment(envData);
@@ -53,7 +53,7 @@ const loader = new THREE.TextureLoader();
 const sky = new Sky(env, loader); scene.add(sky.group);
 const tex = new TerrainTextures(renderer, terrainManifest);
 const water = new WaterFactory(env, sky.uniforms.uZenith); water.linearFloat = renderer.extensions.has('OES_texture_float_linear');
-const world = new World({ scene, env, tex, water, tiles: worldData, names: tileNames, props, opts: { terrainRadius: VIEW * 0.9, objectRadius: S.obj } });
+const world = new World({ scene, env, tex, water, tiles: worldData, names: tileNames, props, alphaMode, opts: { terrainRadius: VIEW * 0.9, objectRadius: S.obj } });
 
 const veg = new Vegetation({ scene, env, world, data: vegData }); veg.enabled = q.get('veg') !== '0';
 
