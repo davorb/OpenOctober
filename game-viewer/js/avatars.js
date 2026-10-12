@@ -36,6 +36,7 @@ export function cloneSkinned(src) {
   return clone;
 }
 
+const ARM_SPLAY = 0.1;   // rad the hanging arms stay away from the body
 const POSE_BONES = ['LLeg1', 'RLeg1', 'LLeg2', 'RLeg2', 'LArm1', 'RArm1', 'LArm20', 'RArm20'];
 
 export class AvatarFactory {
@@ -56,6 +57,13 @@ export class AvatarFactory {
         if (!POSE_BONES.includes(k)) return;
         const pq = new THREE.Quaternion(); n.parent.getWorldQuaternion(pq);
         scene.userData.rig[k] = { q0: n.quaternion.clone(), pq, pqInv: pq.clone().invert() };
+        // how far the upper arm must turn about Z to hang down: the T-pose arm angle differs per race (dwarf / orc arms are not horizontal)
+        const el = n.children.find(c => c.isBone && /Arm20$/.test(c.name));
+        if (el && /^[LR]Arm1$/.test(k)) {
+          const a = new THREE.Vector3().setFromMatrixPosition(n.matrixWorld), b = new THREE.Vector3().setFromMatrixPosition(el.matrixWorld);
+          const side = k[0] === 'L' ? 1 : -1, ang = Math.atan2(b.y - a.y, (b.x - a.x) * side);   // angle in the XY plane, mirrored so outward is +x
+          scene.userData.rig[k].drop = ang + Math.PI / 2 - ARM_SPLAY;                           // rotating by -drop (left) lands on straight down plus the splay
+        }
       });
       return scene;
     }));
@@ -145,7 +153,7 @@ export function pose(av, swing, amp, air) {
   const sw = swing * amp;
   const legF = 0.75 * sw, armF = 0.6 * sw;
   const kneeL = Math.max(0, -Math.sin(av.phase)) * 1.0 * amp, kneeR = Math.max(0, Math.sin(av.phase)) * 1.0 * amp;
-  const drop = air ? 0.9 : 1.3, bend = 0.25 + 0.5 * amp;
+  const bend = 0.25 + 0.5 * amp;
   for (const o of av.rigs) {
     const B = o.userData.bones, R = o.userData.rig;
     if (!B.LLeg1) continue;
@@ -154,10 +162,11 @@ export function pose(av, swing, amp, air) {
     put(B.LLeg2, R.LLeg2, qa.setFromAxisAngle(AX_X, kneeL * (air ? 0.4 : 1)));
     put(B.RLeg2, R.RLeg2, qa.setFromAxisAngle(AX_X, kneeR * (air ? 0.4 : 1)));
     // arms: drop out of the T-pose about Z, then swing about X (applied outermost)
-    put(B.LArm1, R.LArm1, qa.setFromAxisAngle(AX_X, armF).multiply(qb.setFromAxisAngle(AX_Z, -drop)));
-    put(B.RArm1, R.RArm1, qa.setFromAxisAngle(AX_X, -armF).multiply(qb.setFromAxisAngle(AX_Z, drop)));
-    // elbows bend forward: in the T-pose frame that is a turn about Y (opposite sign per side)
-    put(B.LArm20, R.LArm20, qa.setFromAxisAngle(AX_Y, bend));
-    put(B.RArm20, R.RArm20, qa.setFromAxisAngle(AX_Y, -bend));
+    const dL = (R.LArm1.drop ?? 1.3) - (air ? 0.4 : 0), dR = (R.RArm1.drop ?? 1.3) - (air ? 0.4 : 0);
+    put(B.LArm1, R.LArm1, qa.setFromAxisAngle(AX_X, armF).multiply(qb.setFromAxisAngle(AX_Z, -dL)));
+    put(B.RArm1, R.RArm1, qa.setFromAxisAngle(AX_X, -armF).multiply(qb.setFromAxisAngle(AX_Z, dR)));
+    // elbows bend forward (+Z): in the T-pose frame that is a turn about Y (opposite sign per side)
+    put(B.LArm20, R.LArm20, qa.setFromAxisAngle(AX_Y, -bend));
+    put(B.RArm20, R.RArm20, qa.setFromAxisAngle(AX_Y, bend));
   }
 }

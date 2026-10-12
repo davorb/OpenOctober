@@ -6,13 +6,13 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { AVATAR_SCALE, cloneSkinned } from './avatars.js';
-import { loadClips, bindClips, applyClip, walkSpeed } from './mobanim.js';
+import { loadClips, bindClips, applyClip, walkSpeed, facing } from './mobanim.js';
 
 export const OP_MOBS = 3;
 const FLAG_SNAP = 4;
 const INTERP = 0.4, GONE = 1.5;                    // snapshots are 0.2 s apart; a mob unseen this long left the interest radius
 const MODEL_NEAR = 300, TAG_NEAR = 45, SHADOW_NEAR = 70, MAX_BUILD = 3;
-const AX_X = new THREE.Vector3(1, 0, 0), AX_Y = new THREE.Vector3(0, 1, 0), AX_Z = new THREE.Vector3(0, 0, 1);
+const AX_X = new THREE.Vector3(1, 0, 0), AX_Y = new THREE.Vector3(0, 1, 0), AX_Z = new THREE.Vector3(0, 0, 1), NX = new THREE.Vector3(-1, 0, 0), NZ = new THREE.Vector3(0, 0, -1);
 const qa = new THREE.Quaternion(), qb = new THREE.Quaternion();
 const GAIT = ['Pelvis', 'LLeg1', 'RLeg1', 'LLeg2', 'RLeg2', 'LArm1', 'RArm1', 'Spine1', 'Spine2', 'Ribcage', 'Neck1', 'Head', 'Tail1', 'Tail2', 'Tail3', 'Tail4', 'Tail5'];
 const POSE_NEAR = 140, FADE = 0.25;   // clip crossfade (s)
@@ -21,18 +21,19 @@ const DIFF_COLOR = { 'Very Easy': '#9fd68a', Easy: '#9fd68a', Medium: '#f1dfae',
 
 const put = (b, rig, R) => b.quaternion.copy(rig.pqInv).multiply(R).multiply(rig.pq).multiply(rig.q0);
 /** Procedural locomotion. Every delta rotates about a fixed model axis (X sideways, Y up, Z forward), converted into the bone's local frame
- *  through its parent's rest rotation, so the bone axis conventions of each skeleton don't matter. s/c: sin/cos of the stride phase, amp: 0 idle .. 1 walking. */
+ *  through its parent's rest rotation, so the bone axis conventions of each skeleton don't matter. s/c: sin/cos of the stride phase, amp: 0 idle .. 1 walking.
+ *  The deltas are written for a model whose front is +Z; m.face = -1 (front at -Z) mirrors the X and Z axes. */
 export function gait(m, s, c, amp) {
-  const B = m.bones, br = Math.sin(m.breath * 1.8);
+  const B = m.bones, br = Math.sin(m.breath * 1.8), AX_X_ = m.face < 0 ? NX : AX_X, AX_Z_ = m.face < 0 ? NZ : AX_Z;
   const rot = (name, ax, ang) => { const l = B[name]; if (l) for (const { bone, rig } of l) put(bone, rig, qa.setFromAxisAngle(ax, ang)); };
   const rot2 = (name, a1, g1, a2, g2) => { const l = B[name]; if (l) for (const { bone, rig } of l) put(bone, rig, qa.setFromAxisAngle(a1, g1).multiply(qb.setFromAxisAngle(a2, g2))); };
   const leg = 0.38 * amp, arm = 0.34 * amp;
-  rot('LLeg1', AX_X, -leg * s); rot('RLeg1', AX_X, leg * s);
-  rot('LLeg2', AX_X, Math.max(0, -s) * 0.6 * amp); rot('RLeg2', AX_X, Math.max(0, s) * 0.6 * amp);   // knees fold as the leg swings forward
-  rot('LArm1', AX_X, arm * s); rot('RArm1', AX_X, -arm * s);                                            // arms / front legs swing against the same-side leg
-  rot2('Pelvis', AX_Y, 0.07 * amp * s, AX_Z, 0.03 * amp * c);
+  rot('LLeg1', AX_X_, -leg * s); rot('RLeg1', AX_X_, leg * s);
+  rot('LLeg2', AX_X_, Math.max(0, -s) * 0.6 * amp); rot('RLeg2', AX_X_, Math.max(0, s) * 0.6 * amp);   // knees fold as the leg swings forward
+  rot('LArm1', AX_X_, arm * s); rot('RArm1', AX_X_, -arm * s);                                            // arms / front legs swing against the same-side leg
+  rot2('Pelvis', AX_Y, 0.07 * amp * s, AX_Z_, 0.03 * amp * c);
   rot('Spine1', AX_Y, -0.05 * amp * s); rot('Spine2', AX_Y, -0.05 * amp * s);
-  rot('Ribcage', AX_X, 0.012 * br + 0.02 * amp * Math.abs(c));
+  rot('Ribcage', AX_X_, 0.012 * br + 0.02 * amp * Math.abs(c));
   rot('Neck1', AX_Y, 0.05 * amp * s); rot('Head', AX_Y, 0.04 * amp * s);
   const t = m.breath * 1.3;
   ['Tail1', 'Tail2', 'Tail3', 'Tail4', 'Tail5'].forEach((n, i) => rot(n, AX_Y, (0.12 + 0.06 * i) * (0.4 + amp) * Math.sin(t * (1 + amp) - i * 0.7 + (amp ? m.phase * 0.5 : 0))));
@@ -70,7 +71,7 @@ export class MobWorld {
   constructor({ scene, camera, world }) {
     Object.assign(this, { scene, camera, world });
     this.gltf = new GLTFLoader(); this.types = new Map(); this.mobs = new Map(); this.tpl = new Map(); this.tags = new Map();
-    this.models = null; this.building = 0; this.tmp = {}; this.stride = new Map();
+    this.models = null; this.building = 0; this.tmp = {}; this.stride = new Map(); this.face = new Map();
   }
 
   clear() { for (const m of this.mobs.values()) this.release(m); this.mobs.clear(); this.types.clear(); }
@@ -97,15 +98,18 @@ export class MobWorld {
     m.building = true; this.building++;
     try {
       const files = (await this.models)[m.kind]?.models || [], root = new THREE.Group();
-      const bones = {}, parts = []; let ref = null;
+      const bones = {}, parts = []; let ref = null, face = null;
       for (const f of files) {
         const t = await this.template(f); if (!t) continue;
         const o = cloneSkinned(t); root.add(o); collectBones(o, t, bones);
-        const clips = await loadClips(f);
-        if (clips) { const part = bindClips(o, clips); parts.push(part); if (!ref) { if (!this.stride.has(f)) this.stride.set(f, walkSpeed(o, part)); ref = this.stride.get(f); } }
+        const clips = await loadClips(f), part = clips ? bindClips(o, clips) : null;
+        if (!this.face.has(f)) this.face.set(f, facing(o, part, f));
+        face ??= this.face.get(f);
+        if (part) { parts.push(part); if (!ref) { if (!this.stride.has(f)) this.stride.set(f, walkSpeed(o, part)); ref = this.stride.get(f); } }
       }
-      root.scale.setScalar(AVATAR_SCALE); const holder = new THREE.Group(); holder.add(root);
-      if (this.mobs.get(m.id) === m) { m.obj = holder; m.model = root; m.bones = bones; m.parts = parts.length ? parts : null; m.refSpeed = ref ? ref * AVATAR_SCALE : null; m.rigged = Object.keys(bones).some(k => /^[LR](Leg|Arm)1$/.test(k)); } else m.dead = true;
+      root.scale.setScalar(AVATAR_SCALE); root.rotation.y = face > 0 ? Math.PI : 0;   // the meshes face either way along z; the holder's yaw points -Z forward
+      const holder = new THREE.Group(); holder.add(root);
+      if (this.mobs.get(m.id) === m) { m.obj = holder; m.model = root; m.face = face ?? -1; m.bones = bones; m.parts = parts.length ? parts : null; m.refSpeed = ref ? ref * AVATAR_SCALE : null; m.rigged = Object.keys(bones).some(k => /^[LR](Leg|Arm)1$/.test(k)); } else m.dead = true;
     } catch (e) { console.warn('mob model', m.kind, e); } finally { m.building = false; m.tried = true; this.building--; }
   }
   tagFor(kind) {

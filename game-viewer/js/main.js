@@ -225,8 +225,9 @@ function setModeLabel() { $('modebtn').textContent = mode === 'walk' ? 'Mode: Wa
 function toggleMode() {
   if (mode === 'fly') {
     mode = 'walk'; player.pos.set(camera.position.x, camera.position.y - player.eye, camera.position.z); player.vy = 0; vel.set(0, 0, 0);
+    camera.near = 0.3; camera.updateProjectionMatrix();     // fly mode's 1.5 m near plane clips the hill ahead when walking up steep slopes
     toast('Walking — G to fly'); setModeLabel();
-  } else { mode = 'fly'; vel.set(0, 0, 0); toast('Flying — G to walk'); setModeLabel(); }
+  } else { mode = 'fly'; vel.set(0, 0, 0); camera.near = 1.5; camera.updateProjectionMatrix(); toast('Flying — G to walk'); setModeLabel(); }
 }
 function hud(t, gh) {
   const p = camera.position, area = music.area?.name;

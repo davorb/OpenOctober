@@ -74,3 +74,29 @@ export function walkSpeed(clone, part) {
   const stride = Math.max(...feet.map((_, i) => hi[i] - lo[i]));
   return stride > 1 ? stride / (0.6 * clip.period) : null;
 }
+
+/** Which way the model's front points along its own z axis: 1 = +Z, -1 = -Z (the meshes are mixed, ~55% / 45%).  The walk clip knows: a foot on the ground travels
+ *  backwards relative to the body.  Without a clip (or too little foot travel) vote on rest-pose cues that sit ahead of their joint: toes, fingers, jaw, head.
+ *  Quadrupeds with static feet get it wrong sometimes, so FACE_FIX overrides (checked by eye).  Call on an unposed clone. */
+const FACE_FIX = { wolf: 1, akathar: 1, hivekin_queen: 1, gorra_slave: 1, evil_eye: 1 };
+export function facing(clone, part, file) {
+  if (FACE_FIX[file]) return FACE_FIX[file];
+  const feet = [], by = {}; clone.traverse(n => { if (!n.isBone) return; by[n.name.replace(/^[a-z]+_f/, '')] ??= n; if (/(Leg|Arm)Ankle$/.test(n.name)) feet.push(n); });
+  clone.updateMatrixWorld(true);
+  const z = n => v.setFromMatrixPosition(by[n].matrixWorld).z, ahead = (a, b) => by[a] && by[b] ? z(a) - z(b) : 0;
+  const digit = (k, p) => Object.keys(by).find(n => n.startsWith(k + 'Digit') || n.startsWith(p));
+  const toe = digit('LLegAnkle'), finger = Object.keys(by).find(n => n.startsWith('LArmPalmDigit'));
+  const vote = Math.sign(toe ? ahead(toe, 'LLegAnkle') : 0) * 2 + Math.sign(finger ? ahead(finger, 'LArmPalm') : 0) * 2 + Math.sign(ahead('Jaw', 'Head')) + Math.sign(ahead('Head', 'Pelvis'));
+  const clip = part?.clips.walk; let stance = 0;
+  if (clip && feet.length) {
+    for (const ank of feet) {
+      const ys = [], zs = [];
+      for (let f = 0; f < clip.nk; f++) { applyClip(part, 'walk', f); clone.updateMatrixWorld(true); v.setFromMatrixPosition(ank.matrixWorld); ys.push(v.y); zs.push(v.z); }
+      const thr = [...ys].sort((a, b) => a - b)[Math.floor(ys.length * 0.4)]; let s = 0, n = 0;
+      for (let f = 0; f < ys.length - 1; f++) if (ys[f] <= thr && ys[f + 1] <= thr) { s += zs[f + 1] - zs[f]; n++; }
+      if (n) stance += s / n;
+    }
+  }
+  if (Math.abs(stance) > 0.05) return stance > 0 ? -1 : 1;   // the stance foot moves towards the back
+  return vote > 0 ? 1 : -1;
+}

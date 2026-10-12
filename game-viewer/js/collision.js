@@ -9,7 +9,15 @@ import { SEA_LEVEL } from './water.js';
 // Base values: r_Player Races in gamelogicinfo/creaturemovementspeedlist.xml (walk 2.5, run 3.7, sprint 5.5 m/s) and worldconfig camera offset 1.54.
 export const PLAYER_SCALE = 1.5;
 export const SPEEDS = { walk: 2.5 * PLAYER_SCALE, run: 3.7 * PLAYER_SCALE, sprint: 5.5 * PLAYER_SCALE, swim: 2.0 * PLAYER_SCALE };
-const CELL = 4, N = 256;                       // dense 256x256 grid of 4 m cells per tile (CSR layout)
+// Walk-mode tuning.
+export const WALK = {
+  // Steepest terrain the player can walk up, as rise over run (tan of the slope angle): 1 = 45 deg, 1.8 = ~61 deg, 2.5 = ~68 deg.
+  // A move onto terrain that climbs faster than this from where the player stands is blocked and slides along the slope instead.
+  // Raise it to climb steeper hills; lower it if the player scales faces that should be walls. Static geometry (stairs) ignores it.
+  maxSlope: 2.5,
+  slopeSlack: 0.02,       // extra rise (m) tolerated per move, so rounding on near-limit slopes doesn't stick the player
+};
+const CELL = 4, N = 256;                      // dense 256x256 grid of 4 m cells per tile (CSR layout)
 
 export function newColl(tile) { return { n: 0, tris: [], x0: tile.rect.x0, z0: tile.rect.z0, f32: null, start: null, list: null }; }
 // Collect triangles of one merged geometry into the tile's collision set.
@@ -132,15 +140,24 @@ export class Player {
     const p = this.pos, w = this.world;
     // horizontal move with terrain-slope / step limit, then wall resolution
     const nx = p.x + wishX * dt, nz = p.z + wishZ * dt, step = Math.hypot(wishX, wishZ) * dt;
-    const nf = this.floor(nx, nz, p.y + this.step + 1.3 * step + 0.4);
-    const blocked = nf < -1e8;            // wall of terrain / too steep
-    if (!blocked) { p.x = nx; p.z = nz; } else {
-      const fx = this.floor(nx, p.z, p.y + this.step + 1.3 * step + 0.4), fz = this.floor(p.x, nz, p.y + this.step + 1.3 * step + 0.4);
-      if (fx > -1e8) p.x = nx; else if (fz > -1e8) p.z = nz;
+    const reach = p.y + this.step + 0.4;
+    // a position is walkable if there is a floor within reach AND the terrain doesn't climb faster than WALK.maxSlope from where we stand
+    // (the old 1.3*step+0.4 slack let the player scale near-vertical faces, then pop through them when the floor query lost it)
+    const t0 = w.groundHeight(p.x, p.z, p.y + 0.5);
+    const ok = (x, z) => {
+      if (this.floor(x, z, reach) < -1e8) return false;
+      const d = Math.hypot(x - p.x, z - p.z); if (d < 1e-6 || t0 == null || t0 < -1e8) return true;
+      const t1 = w.groundHeight(x, z, reach);
+      return t1 == null || t1 < -1e8 || t1 - t0 <= WALK.maxSlope * d + WALK.slopeSlack;
+    };
+    // probe the leading edge of the body too, so the camera/torso never ends up inside a rising slope
+    const lead = (x, z) => { const l = Math.hypot(wishX, wishZ) || 1, k = this.radius / l; return ok(x + wishX * k, z + wishZ * k); };
+    if (ok(nx, nz) && lead(nx, nz)) { p.x = nx; p.z = nz; } else {
+      if (ok(nx, p.z) && lead(nx, p.z)) p.x = nx; else if (ok(p.x, nz) && lead(p.x, nz)) p.z = nz;
     }
     this._slide(p);
     // vertical
-    let fl = this.floor(p.x, p.z, p.y + this.step);
+    let fl = this.floor(p.x, p.z, p.y + this.step + 0.4);
     const th = w.groundHeight(p.x, p.z);
     if (th == null) { this.vy = 0; return; }                 // tile not streamed in yet: hold still
     if (fl < -1e8) { const f = w.groundHeight(p.x, p.z, p.y + 30); fl = p.y = f > -1e8 ? f : th; this.vy = 0; }   // pushed below the surface: pop back up to the nearest floor
