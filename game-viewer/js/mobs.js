@@ -6,6 +6,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { AVATAR_SCALE, cloneSkinned } from './avatars.js';
+import { Player } from './collision.js';
 import { loadClips, bindClips, applyClip, walkSpeed, facing, needsFlip, flipSkeleton, uprightClips } from './mobanim.js';
 
 export const OP_MOBS = 3;
@@ -15,6 +16,7 @@ const MODEL_NEAR = 300, TAG_NEAR = 45, SHADOW_NEAR = 70, MAX_BUILD = 3;
 const AX_X = new THREE.Vector3(1, 0, 0), AX_Y = new THREE.Vector3(0, 1, 0), AX_Z = new THREE.Vector3(0, 0, 1), NX = new THREE.Vector3(-1, 0, 0), NZ = new THREE.Vector3(0, 0, -1);
 const qa = new THREE.Quaternion(), qb = new THREE.Quaternion();
 const GAIT = ['Pelvis', 'LLeg1', 'RLeg1', 'LLeg2', 'RLeg2', 'LArm1', 'RArm1', 'Spine1', 'Spine2', 'Ribcage', 'Neck1', 'Head', 'Tail1', 'Tail2', 'Tail3', 'Tail4', 'Tail5'];
+const STEP_UP = 1.4;   // highest step (m) a mob climbs between two floor probes, the player's step height plus slack
 const POSE_NEAR = 140, FADE = 0.25;   // clip crossfade (s)
 const lerpAngle = (a, b, t) => a + Math.atan2(Math.sin(b - a), Math.cos(b - a)) * t;
 const DIFF_COLOR = { 'Very Easy': '#9fd68a', Easy: '#9fd68a', Medium: '#f1dfae', Hard: '#f0b070', 'Very Hard': '#e88a6a', Boss: '#e0607a', Champion: '#d070e0' };
@@ -71,7 +73,7 @@ export function collectBones(clone, tpl, bones) {
 export class MobWorld {
   constructor({ scene, camera, world }) {
     Object.assign(this, { scene, camera, world });
-    this.gltf = new GLTFLoader(); this.types = new Map(); this.mobs = new Map(); this.tpl = new Map(); this.tags = new Map();
+    this.probe = new Player(world); this.gltf = new GLTFLoader(); this.types = new Map(); this.mobs = new Map(); this.tpl = new Map(); this.tags = new Map();
     this.models = null; this.building = 0; this.tmp = {}; this.stride = new Map(); this.face = new Map();
   }
 
@@ -143,8 +145,13 @@ export class MobWorld {
       if (!m.obj) { if (!m.building && !m.tried && this.models && this.building < MAX_BUILD) this.build(m); continue; }
       this.sample(m, rt, st);
       if (st.flags & FLAG_SNAP) {
-        if (now - m.gyT > 0.1 || m.gy == null) { const g = this.world.groundHeight(st.x, st.z); if (g != null && g > -1e8) m.gy = g; m.gyT = now; }
-        st.y = m.gy ?? st.y;
+        // stand on whatever walkable surface is within a step of where the mob already is (terrain, floors, stairs, bridges), like the player does; never on roofs
+        if (now - m.gyT > 0.1 || m.gy == null) {
+          const g = this.world.groundHeight(st.x, st.z);
+          if (g != null && g > -1e8) { const f = this.probe.floor(st.x, st.z, (m.gy ?? g) + STEP_UP); m.gy = f > -1e8 ? f : g; }
+          m.gyT = now;
+        }
+        if (m.gy != null) { m.gyS = m.gyS == null ? m.gy : m.gyS + (m.gy - m.gyS) * Math.min(1, dt * 14); st.y = m.gyS; }
       }
       if (!m.shown) { this.scene.add(m.obj); m.shown = true; }
       const dist = Math.sqrt(d2);
