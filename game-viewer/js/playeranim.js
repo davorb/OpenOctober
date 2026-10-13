@@ -8,7 +8,8 @@ export const FILE = { hum: 'hum', alf: 'alfar', dwf: 'dwarf', ork: 'ork', mir: '
 const PREFIX = { none: 'normal', one: 'attackmode', two: 'attackmode_2handed', halberd: 'attackmode_halberd' };
 // ground speed (m/s in the viewer: the game's 2.5 / 3.7 / 5.5 times PLAYER_SCALE) at which each locomotion clip plays at its authored pace
 const GAIT = [['idle', 0], ['walk_forward', 3.75], ['run_forward', 5.55], ['sprint_forward', 8.25]];
-const FADE = 0.2, UP_FADE = 0.08;
+const ARM_BONES = ['LArm1', 'RArm1', 'LArm20', 'RArm20'];
+const FADE = 0.2, UP_FADE = 0.08, CROSS_EASE = 0.5;
 /** classes whose drawn pose is the end of an upper-body clip rather than a stance of the primary clips */
 const HOLD = { bow: 'bow_aim', staff: 'unsheathe_staff' };
 
@@ -26,6 +27,7 @@ export class PlayerAnim {
   }
   constructor(av, clips) {
     this.av = av; this.clips = clips; this.parts = av.rigs.map(r => bindClips(r, clips));
+    this.cross = false; this.crossK = 0;   // cross: arms straight out (logging out), crossK eases into it
     this.stance = 'none'; this.cur = null; this.prev = null; this.t = 0; this.pt = 0; this.fade = 1; this.up = null;
   }
   setWeapon(group) { this.holdT = 0; this.stance = group && !this.sheathed ? STANCE[group]?.[0] || 'one' : 'none'; this.group = group; }
@@ -69,14 +71,24 @@ export class PlayerAnim {
     if (!this.cur) return;
     const gait = /^crouch_/.test(this.cur) ? null : GAIT.find(([n]) => this.cur.endsWith(n)) || (/run_(left|right)$/.test(this.cur) ? GAIT[2] : /walk_backward$/.test(this.cur) ? GAIT[1] : null), ref = gait && gait[1] ? gait[1] : 0, rate = ref && speed > 0.15 ? Math.min(1.5, Math.max(0.5, speed / ref)) : 1;
     this.t += dt * rate; this.pt += dt; if (this.fade < 1) this.fade = Math.min(1, this.fade + dt / FADE);
-    if (this.dead) this.up = null;
+    if (this.dead || this.cross) this.up = null;
+    this.crossK = this.cross ? Math.min(1, this.crossK + dt / CROSS_EASE) : Math.max(0, this.crossK - dt / CROSS_EASE);
     this.holdT = (this.holdT || 0) + dt;
     const u = this.up; if (u) { u.t += dt; if (u.t >= u.dur) this.up = null; }
     for (const p of this.parts) {
       if (this.prev && this.fade < 1) { applyClip(p, this.prev, this.frame(this.prev, this.pt), 1); applyClip(p, this.cur, this.frame(this.cur, this.t), this.fade); }
       else applyClip(p, this.cur, this.frame(this.cur, this.t), 1);
       const hc = HOLD[this.group]; if (!this.up && !this.dead && hc && !this.sheathed && this.clips[hc]) { const c = this.clips[hc]; applyClip(p, hc, Math.min(c.nk - 1, this.holdT * (this.group === 'bow' ? 2 : 1) / c.dt), Math.min(1, this.holdT * 4)); }   // a drawn bow stays at the aim pose, a drawn staff at the end of its unsheathe clip (held upright)
-      if (u && this.up) { const w = Math.min(1, u.t / UP_FADE, (u.dur - u.t) / UP_FADE), c = this.clips[u.name]; applyClip(p, u.name, Math.min(c.nk - 1, u.t * u.rate / c.dt), Math.max(0, w)); }
+      if (u && this.up && !this.cross) { const w = Math.min(1, u.t / UP_FADE, (u.dur - u.t) / UP_FADE), c = this.clips[u.name]; applyClip(p, u.name, Math.min(c.nk - 1, u.t * u.rate / c.dt), Math.max(0, w)); }
+    }
+    if (this.crossK > 0) this.spreadArms();
+  }
+
+  /** Arms straight out to the sides ("crucified", while logging out): the models' rest pose is a T-pose, so the arm bones are eased back to their rest rotation over whatever the clips did. */
+  spreadArms() {
+    for (const o of this.av.rigs) {
+      const B = o.userData.bones, R = o.userData.rig; if (!B || !R) continue;
+      for (const k of ARM_BONES) if (B[k] && R[k]) B[k].quaternion.slerp(R[k].q0, this.crossK);
     }
   }
 }

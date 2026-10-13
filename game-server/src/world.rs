@@ -53,6 +53,10 @@ pub struct Config {
     /// update is cut short at the distance the player could have covered (see `limit_move`). Connections from the local machine are exempt (`Cmd::Trust`).
     pub max_speed: f32,
     pub max_fly_speed: f32,
+    /// A player who loses his connection stays standing (killable, lootable once dead) this many seconds.
+    pub ghost_secs: f32,
+    /// `/logout` takes this many seconds, during which the player must stand still (everybody hears it).
+    pub logout_secs: f32,
 }
 
 /// A player may save up this many seconds of movement allowance (a stall, a tab in the background) and spend it in one update.
@@ -76,6 +80,8 @@ const SAVE_EVERY: u64 = 30;
 const MOB_EVERY: u32 = 3;
 
 pub struct JoinReq {
+    /// The account this character belongs to (`None`: no account, e.g. a test or a bot): such a player is removed the moment he disconnects.
+    pub account: Option<i64>,
     pub name: String,
     pub race: String,
     pub gender: String,
@@ -155,6 +161,10 @@ const NPC_AGGRO: f32 = 28.0;
 const NPC_GREET: f32 = 14.0;
 const GREETINGS: [&str; 6] = ["Well met, traveller.", "Mind the wolves out there.", "Fine day for a walk.", "Safe roads to you.", "Have you come far?", "Good hunting."];
 
+/// While logging out he may drift this far (metres) from where he began, and move this fast (m/s), before the logout is cancelled.
+const LOGOUT_STILL: f32 = 0.35;
+const LOGOUT_STILL_SPEED: f32 = 0.3;
+
 /// Seconds a dead player lies there before he gets up (a Respawn message may bring it forward after DOWN_MIN).
 const DOWN_SECS: f32 = 6.0;
 const DOWN_MIN: f32 = 2.5;
@@ -168,6 +178,14 @@ struct Player {
     last_sent: usize,
     last_mobs: usize,
     dead: bool,
+    account: Option<i64>,
+    /// The connection is gone but the body stays until this moment (see `Config::ghost_secs`): anybody can fight it; the owner may log in and take it over.
+    ghost_until: Option<Instant>,
+    /// `/logout` in progress: when it completes, and where he stood (moving away cancels it).
+    logout_until: Option<Instant>,
+    logout_at: (f32, f32),
+    /// Joined as the fallen body of a ghost that was killed meanwhile: the next `Place` does not count as a speed hack (the client puts him at the capital).
+    fresh_death: bool,
     /// What the player carries (gold and goods): picked up from tombstones, dropped on his own when he dies.
     stock: Stock,
     /// A loot channel in progress: tombstone, when it completes, where he stood.
@@ -213,6 +231,10 @@ struct World {
     shots: Vec<Projectile>,
     corpses: Vec<Corpse>,
     next_corpse: u32,
+    /// Accounts whose ghost was killed while they were away: they get up at the capital when they log in again.
+    fallen: std::collections::HashSet<i64>,
+    /// Where each removed player stood last (and whether he was dead): the connection saves it after the player is gone.
+    gone: HashMap<u16, ([f32; 4], bool)>,
     /// For the random starting weapon (seeded from the clock: every run draws differently).
     rng: u32,
 }
@@ -278,7 +300,7 @@ pub async fn run(cfg: Config, mut rx: mpsc::Receiver<Cmd>) {
         },
         _ => None,
     };
-    let mut world = World { players: (0..cfg.max_players.min(NPC_ID_BASE as usize)).map(|_| None).collect(), cfg: cfg.clone(), online: 0, cursor: 0, tick: 0, mobs, npcs, store, stats: Stats::default(), weapons, pending: Vec::new(), shots: Vec::new(), corpses: Vec::new(), next_corpse: 1, rng: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.subsec_nanos() ^ (d.as_secs() as u32)) | 1 };
+    let mut world = World { players: (0..cfg.max_players.min(NPC_ID_BASE as usize)).map(|_| None).collect(), cfg: cfg.clone(), online: 0, cursor: 0, tick: 0, mobs, npcs, store, stats: Stats::default(), weapons, pending: Vec::new(), shots: Vec::new(), corpses: Vec::new(), next_corpse: 1, fallen: Default::default(), gone: HashMap::new(), rng: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.subsec_nanos() ^ (d.as_secs() as u32)) | 1 };
     let mut ticker = interval(Duration::from_secs_f64(1.0 / cfg.tick_hz as f64));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut report = interval(Duration::from_secs(5));
@@ -329,6 +351,11 @@ impl World {
                         pl.pos = p;
                         pl.has_pos = true;
                     }
+                    // moving cancels a logout
+                    if pl.logout_until.is_some() && ((p.x - pl.logout_at.0).powi(2) + (p.z - pl.logout_at.1).powi(2) > LOGOUT_STILL * LOGOUT_STILL || p.speed as f32 > LOGOUT_STILL_SPEED * 10.0 || p.flags & (FLAG_AIR | FLAG_SWIM) != 0) {
+                        self.cancel_logout(id);
+                    }
+                    let Some(Some(pl)) = self.players.get_mut(id as usize) else { return };
                     // walking away interrupts a loot channel
                     if let Some((cid, _, x, z)) = pl.looting {
                         if (p.x - x).powi(2) + (p.z - z).powi(2) > LOOT_STEP_AWAY * LOOT_STEP_AWAY {
@@ -346,24 +373,24 @@ impl World {
                 if let Some(Some(pl)) = self.players.get_mut(id as usize) {
                     pl.pos = p;
                     pl.has_pos = true;
-                    pl.free_move = false;
+                    pl.free_move = std::mem::take(&mut pl.fresh_death);
                     pl.move_budget = 0.0;
                     pl.last_move = Instant::now();
                 }
             }
             Cmd::Where(id, reply) => {
-                let at = self.players.get(id as usize).and_then(|p| p.as_ref()).filter(|p| p.has_pos).map(|p| ([p.pos.x, p.pos.y, p.pos.z, p.pos.yaw], p.down_until.is_some()));
+                let at = self.players.get(id as usize).and_then(|p| p.as_ref()).filter(|p| p.has_pos).map(|p| ([p.pos.x, p.pos.y, p.pos.z, p.pos.yaw], p.down_until.is_some())).or_else(|| self.gone.get(&id).copied());
                 let _ = reply.send(at);
             }
             Cmd::Chat(id, text) => self.chat(id, &text),
-            Cmd::Leave(id) => self.remove(id),
-            Cmd::Equip(id, w, drawn) => self.equip(id, w, drawn),
-            Cmd::Attack(id, kind, clip) => self.attack(id, &kind, &clip),
-            Cmd::Block(id, on) => self.block(id, on),
-            Cmd::Bow(id, what) => self.relay(id, |id| serde_json::to_string(&ServerMsg::Bow { id, what: &what }).unwrap()),
-            Cmd::Shoot(id, from, dir, power, spell) => self.shoot(id, from, dir, power, spell),
+            Cmd::Leave(id) => self.disconnect(id),
+            Cmd::Equip(id, w, drawn) if !self.logging_out(id) => self.equip(id, w, drawn),
+            Cmd::Attack(id, kind, clip) if !self.logging_out(id) => self.attack(id, &kind, &clip),
+            Cmd::Block(id, on) if !self.logging_out(id) => self.block(id, on),
+            Cmd::Bow(id, what) if !self.logging_out(id) => self.relay(id, |id| serde_json::to_string(&ServerMsg::Bow { id, what: &what }).unwrap()),
+            Cmd::Shoot(id, from, dir, power, spell) if !self.logging_out(id) => self.shoot(id, from, dir, power, spell),
             Cmd::Respawn(id) => self.respawn(id, false),
-            Cmd::Loot(id, cid) => self.loot_grave(id, cid),
+            Cmd::Loot(id, cid) if !self.logging_out(id) => self.loot_grave(id, cid),
             Cmd::Give(id, stock) => {
                 if let Some(Some(p)) = self.players.get_mut(id as usize) {
                     p.stock.gold += stock.gold;
@@ -373,9 +400,11 @@ impl World {
                 }
                 self.send_stock(id);
             }
-            Cmd::Shop(id, npc) => self.open_shop(id, npc),
-            Cmd::Buy(id, npc, item, qty) => self.trade(id, npc, &item, qty, true),
-            Cmd::Sell(id, npc, item, qty) => self.trade(id, npc, &item, qty, false),
+            Cmd::Shop(id, npc) if !self.logging_out(id) => self.open_shop(id, npc),
+            Cmd::Buy(id, npc, item, qty) if !self.logging_out(id) => self.trade(id, npc, &item, qty, true),
+            Cmd::Sell(id, npc, item, qty) if !self.logging_out(id) => self.trade(id, npc, &item, qty, false),
+            // somebody who is logging out does nothing but wait (moving away cancels it)
+            Cmd::Equip(..) | Cmd::Attack(..) | Cmd::Block(..) | Cmd::Bow(..) | Cmd::Shoot(..) | Cmd::Loot(..) | Cmd::Shop(..) | Cmd::Buy(..) | Cmd::Sell(..) => {}
         }
         self.reap();
     }
@@ -384,6 +413,21 @@ impl World {
         if !RACES.contains(&req.race.as_str()) || !GENDERS.contains(&req.gender.as_str()) {
             let _ = req.reply.send(Err("unknown race or gender"));
             return;
+        }
+        if let Some(acc) = req.account {
+            // his body is still standing from an earlier connection: he takes it over
+            if let Some(id) = self.players.iter().position(|p| p.as_ref().is_some_and(|p| p.account == Some(acc) && p.ghost_until.is_some())) {
+                let p = self.players[id].as_mut().unwrap();
+                p.ghost_until = None;
+                p.tx = req.tx;
+                p.last_sent = 0;
+                p.last_mobs = 0;
+                let _ = req.reply.send(Ok(id as u16));
+                self.welcome(id);
+                self.send_stock(id as u16);
+                println!("+ {} (id {}) took over his body — {} online", self.players[id].as_ref().unwrap().info.name, id, self.online);
+                return;
+            }
         }
         let n = self.players.len();
         let Some(id) = (0..n).map(|i| (self.cursor + i) % n).find(|&i| self.players[i].is_none()) else {
@@ -396,38 +440,55 @@ impl World {
             name = format!("Player{id}");
         }
         let info = PlayerInfo { id: id as u16, name, race: req.race, gender: req.gender, gear: clean(&req.gear, MAX_GEAR), weapon: String::new(), drawn: false, npc: false, role: String::new() };
-        self.players[id] = Some(Player { info, pos: PosUpdate::default(), has_pos: false, tx: req.tx, last_chat: Instant::now() - Duration::from_secs(10), last_sent: 0, last_mobs: 0, dead: false, stock: Stock::default(), looting: None, weapon: String::new(), group: String::new(), drawn: false, blocking: false, hp: PLAYER_HP, down_until: None, next_attack: Instant::now(), move_budget: 0.0, last_move: Instant::now(), free_move: true, trusted: false });
+        let fallen = req.account.is_some_and(|a| self.fallen.remove(&a));
+        self.gone.remove(&(id as u16));
+        self.players[id] = Some(Player { info, pos: PosUpdate::default(), has_pos: false, tx: req.tx, last_chat: Instant::now() - Duration::from_secs(10), last_sent: 0, last_mobs: 0, dead: false, account: req.account, ghost_until: None, logout_until: None, logout_at: (0.0, 0.0), fresh_death: fallen, stock: Stock::default(), looting: None, weapon: String::new(), group: String::new(), drawn: false, blocking: false, hp: PLAYER_HP, down_until: None, next_attack: Instant::now(), move_budget: 0.0, last_move: Instant::now(), free_move: true, trusted: false });
         self.online += 1;
         let _ = req.reply.send(Ok(id as u16));
-
-        let me = self.players[id].as_ref().unwrap();
-        let all: Vec<&PlayerInfo> = self.players.iter().flatten().map(|p| &p.info).chain(self.npcs.infos()).collect();
-        let welcome = serde_json::to_string(&ServerMsg::Welcome { id: id as u16, radius: self.cfg.radius, tick_hz: self.cfg.tick_hz, players: all }).unwrap();
-        if me.tx.try_send(Message::Text(welcome)).is_err() {
-            self.players[id].as_mut().unwrap().dead = true;
+        if !self.welcome(id) {
             return;
         }
         self.give_starter_weapon(id as u16);
         self.send_stock(id as u16);
-        if !self.mobs.types.is_empty() {
-            let types = serde_json::to_string(&ServerMsg::Mobtypes { types: &self.mobs.types }).unwrap();
-            if self.players[id].as_ref().unwrap().tx.try_send(Message::Text(types)).is_err() {
-                self.players[id].as_mut().unwrap().dead = true;
-                return;
-            }
-        }
-        let bodies: Vec<String> = self.corpses.iter().map(|c| c.msg.clone()).collect();
-        for b in bodies {
-            if self.players[id].as_ref().unwrap().tx.try_send(Message::Text(b)).is_err() {
-                self.players[id].as_mut().unwrap().dead = true;
-                return;
-            }
-        }
         let me = self.players[id].as_ref().unwrap();
         let joined = ServerMsg::Joined { player: &me.info };
         let text = serde_json::to_string(&joined).unwrap();
         self.broadcast_text(text, Some(id as u16));
+        if fallen {
+            // his body was killed while he was away: he gets up at the capital like anybody who died
+            self.send_to(id as u16, serde_json::to_string(&ServerMsg::Respawn { id: id as u16, hp: PLAYER_HP, max: PLAYER_HP }).unwrap());
+        }
         println!("+ {} ({}_{}) id {} — {} online", self.players[id].as_ref().unwrap().info.name, self.players[id].as_ref().unwrap().info.race, self.players[id].as_ref().unwrap().info.gender, id, self.online);
+    }
+
+    /// What a connection gets on entering: the roster, the mob types, the bodies on the ground and the logouts in progress. false = it could not take it.
+    fn welcome(&mut self, id: usize) -> bool {
+        let me = self.players[id].as_ref().unwrap();
+        let all: Vec<&PlayerInfo> = self.players.iter().flatten().map(|p| &p.info).chain(self.npcs.infos()).collect();
+        let mut msgs = vec![serde_json::to_string(&ServerMsg::Welcome { id: id as u16, radius: self.cfg.radius, tick_hz: self.cfg.tick_hz, players: all }).unwrap()];
+        if me.ghost_until.is_none() && !me.info.weapon.is_empty() && me.has_pos {
+            // a body taken over: tell the client what is in its hand and how it is
+            msgs.push(serde_json::to_string(&ServerMsg::Equip { id: id as u16, w: &me.info.weapon, drawn: me.info.drawn }).unwrap());
+            msgs.push(serde_json::to_string(&ServerMsg::Hp { hp: me.hp, max: PLAYER_HP }).unwrap());
+        }
+        if !self.mobs.types.is_empty() {
+            msgs.push(serde_json::to_string(&ServerMsg::Mobtypes { types: &self.mobs.types }).unwrap());
+        }
+        msgs.extend(self.corpses.iter().map(|c| c.msg.clone()));
+        let now = Instant::now();
+        for p in self.players.iter().flatten().filter(|p| p.info.id as usize != id) {
+            if let Some(t) = p.logout_until {
+                msgs.push(serde_json::to_string(&ServerMsg::Logout { id: p.info.id, secs: t.saturating_duration_since(now).as_secs_f32() }).unwrap());
+            }
+        }
+        let p = self.players[id].as_mut().unwrap();
+        for m in msgs {
+            if p.tx.try_send(Message::Text(m)).is_err() {
+                p.dead = true;
+                return false;
+            }
+        }
+        true
     }
 
     // ---------------------------------------------------------------- combat
@@ -618,7 +679,78 @@ impl World {
         self.send_near(at[0], at[2], msg, None);
         if killed {
             self.send_near(at[0], at[2], serde_json::to_string(&ServerMsg::Died { v: "p", i: vid }).unwrap(), None);
+            self.cancel_logout(vid);
             self.leave_corpse(vid);
+            // a body that stood there without its owner is gone now: he gets up at the capital when he comes back
+            if let Some(Some(p)) = self.players.get(vid as usize) {
+                if let (Some(acc), true) = (p.account, p.ghost_until.is_some()) {
+                    self.fallen.insert(acc);
+                    self.remove(vid);
+                }
+            }
+        }
+    }
+
+    /// Is this player in the middle of a `/logout`? Then he can do nothing but wait (or move, which cancels it).
+    fn logging_out(&self, id: u16) -> bool {
+        self.players.get(id as usize).and_then(|p| p.as_ref()).is_some_and(|p| p.logout_until.is_some())
+    }
+
+    /// `/logout`: for `logout_secs` everybody hears it; he has to stand still, and can use nothing in the meantime.
+    fn start_logout(&mut self, id: u16) {
+        let secs = self.cfg.logout_secs;
+        let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
+        if p.logout_until.is_some() || p.ghost_until.is_some() || p.down_until.is_some() || !p.has_pos || p.pos.flags & FLAG_FLY != 0 {
+            return;
+        }
+        p.logout_until = Some(Instant::now() + Duration::from_secs_f32(secs));
+        p.logout_at = (p.pos.x, p.pos.z);
+        p.blocking = false;
+        let interrupted = p.looting.map(|l| l.0);
+        if let Some(cid) = interrupted {
+            self.end_loot(id, cid, false);
+        }
+        self.broadcast_text(serde_json::to_string(&ServerMsg::Logout { id, secs }).unwrap(), None);
+    }
+
+    fn cancel_logout(&mut self, id: u16) {
+        let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
+        if p.logout_until.take().is_some() {
+            self.broadcast_text(serde_json::to_string(&ServerMsg::LogoutCancel { id }).unwrap(), None);
+        }
+    }
+
+    /// The connection of `id` is gone. A player in the world leaves his body standing for `ghost_secs`; anybody can still fight it, and it is lootable once dead.
+    /// Someone who was dead, flying, or never got into the world is just removed.
+    fn disconnect(&mut self, id: u16) {
+        let Some(Some(p)) = self.players.get(id as usize) else { return };
+        if p.account.is_none() || !p.has_pos || p.down_until.is_some() || p.pos.flags & FLAG_FLY != 0 || p.ghost_until.is_some() || p.dead {
+            self.remove(id);
+            return;
+        }
+        self.cancel_logout(id);
+        let interrupted = self.players[id as usize].as_ref().and_then(|p| p.looting.map(|l| l.0));
+        let p = self.players[id as usize].as_mut().unwrap();
+        // nobody is listening any more: whatever is sent to him goes nowhere (and must not count as a dead connection)
+        let (tx, mut rx) = mpsc::channel::<Message>(64);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        p.tx = tx;
+        p.blocking = false;
+        p.ghost_until = Some(Instant::now() + Duration::from_secs_f32(self.cfg.ghost_secs));
+        if let Some(cid) = interrupted {
+            self.end_loot(id, cid, false);
+        }
+        println!("~ {} (id {}) lost his connection: the body stays {} s", self.players[id as usize].as_ref().unwrap().info.name, id, self.cfg.ghost_secs);
+    }
+
+    /// Logouts that have run their course, and bodies nobody has come back to.
+    fn age_players(&mut self, now: Instant) {
+        let done: Vec<u16> = self.players.iter().flatten().filter(|p| p.logout_until.is_some_and(|t| t <= now) || p.ghost_until.is_some_and(|t| t <= now)).map(|p| p.info.id).collect();
+        for id in done {
+            if self.logging_out(id) {
+                self.send_to(id, serde_json::to_string(&ServerMsg::LoggedOut).unwrap());
+            }
+            self.remove(id);
         }
     }
 
@@ -1323,6 +1455,10 @@ impl World {
 
     fn chat(&mut self, id: u16, text: &str) {
         let text = clean(text, MAX_CHAT);
+        if text.eq_ignore_ascii_case("/logout") {
+            self.start_logout(id);
+            return;
+        }
         let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
         if text.is_empty() || p.last_chat.elapsed() < Duration::from_millis(400) {
             return;
@@ -1336,6 +1472,9 @@ impl World {
         if let Some(slot) = self.players.get_mut(id as usize) {
             if let Some(p) = slot.take() {
                 self.online -= 1;
+                if p.has_pos {
+                    self.gone.insert(id, ([p.pos.x, p.pos.y, p.pos.z, p.pos.yaw], p.down_until.is_some()));
+                }
                 println!("- {} (id {}) — {} online", p.info.name, id, self.online);
                 let msg = serde_json::to_string(&ServerMsg::Left { id }).unwrap();
                 self.broadcast_text(msg, None);
@@ -1367,6 +1506,7 @@ impl World {
     /// One network tick: build a per-recipient snapshot of everybody within the interest radius (spatial hash, 3x3 cells).
     fn step(&mut self) {
         self.tick = self.tick.wrapping_add(1);
+        self.age_players(Instant::now());
         self.combat(1.0 / self.cfg.tick_hz as f32);
         let watchers: Vec<(f32, f32)> = self.players.iter().flatten().filter(|p| p.has_pos).map(|p| (p.pos.x, p.pos.z)).collect();
         self.stats.lod = self.npcs.step(1.0 / self.cfg.tick_hz as f32, &watchers, self.cfg.radius);

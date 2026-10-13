@@ -138,7 +138,7 @@ fn deadly_village(tag: &str, npcs: usize) -> mpsc::Sender<game_server::world::Cm
     std::fs::write(f("caps"), r#"[{"name":"Capital","race":"Human","x":100,"y":0,"z":200}]"#).unwrap();
     std::fs::write(f("spawns"), r#"[{"id":1,"x":112,"z":200,"mobs":[{"id":9,"name":"Boss","qty":3,"difficulty":"Boss"}]}]"#).unwrap();
     let s = |n: &str| Some(f(n).to_string_lossy().to_string());
-    let cfg = Config { max_speed: 0.0, max_fly_speed: 0.0, radius: 900.0, max_players: 4, tick_hz: 60, spawns: s("spawns"), weapons: None, pvp: false, npcs, pois: s("pois"), capitals: s("caps"), npc_seed: 3, db: None, nav: None, npc_time_scale: 1.0, own_weapons: false, body_secs: 1.5, tomb_secs: 3600, loot_secs: 0.6, items: None, vendors: None };
+    let cfg = Config { max_speed: 0.0, max_fly_speed: 0.0, ghost_secs: 300.0, logout_secs: 30.0, radius: 900.0, max_players: 4, tick_hz: 60, spawns: s("spawns"), weapons: None, pvp: false, npcs, pois: s("pois"), capitals: s("caps"), npc_seed: 3, db: None, nav: None, npc_time_scale: 1.0, own_weapons: false, body_secs: 1.5, tomb_secs: 3600, loot_secs: 0.6, items: None, vendors: None };
     let (cmds, rx) = mpsc::channel(256);
     tokio::spawn(world::run(cfg, rx));
     cmds
@@ -149,7 +149,7 @@ async fn visitor(cmds: &mpsc::Sender<game_server::world::Cmd>) -> (u16, mpsc::Re
     use game_server::world::{Cmd, JoinReq};
     let (tx, inbox) = mpsc::channel(32768);
     let (reply, reply_rx) = oneshot::channel();
-    cmds.send(Cmd::Join(JoinReq { name: "visitor".into(), race: "hum".into(), gender: "m".into(), gear: String::new(), tx, reply })).await.unwrap();
+    cmds.send(Cmd::Join(JoinReq { account: None, name: "visitor".into(), race: "hum".into(), gender: "m".into(), gear: String::new(), tx, reply })).await.unwrap();
     let me = reply_rx.await.unwrap().unwrap();
     // watching from the edge of the village, out of the fight (free-fly)
     cmds.send(Cmd::Pos(me, PosUpdate { x: 100.0, y: 0.0, z: -230.0, flags: FLAG_FLY, ..Default::default() })).await.unwrap();

@@ -40,6 +40,21 @@ export class Sfx {
     } else g.connect(this.master);
     src.start();
   }
+  /** Loop a sound until `stop()` is called on the handle it returns; opts as for `play`. Without a distance cut-off: the caller only starts it for things it can place. */
+  loop(path, { vol = 1, at = null, min = 2 } = {}) {
+    const h = { src: null, stopped: false, stop() { this.stopped = true; try { this.src?.stop(); } catch {} this.src = null; } };
+    (async () => {
+      const b = path && this.ctx ? await this.load(path) : null; if (!b || h.stopped || !this.ctx) return;
+      const src = this.ctx.createBufferSource(); src.buffer = b; src.loop = true;
+      const g = this.ctx.createGain(); g.gain.value = vol; src.connect(g);
+      if (at) {
+        const p = this.ctx.createPanner(); p.panningModel = 'equalpower'; p.distanceModel = 'inverse'; p.refDistance = min; p.rolloffFactor = 1.4;
+        p.positionX.value = at.x; p.positionY.value = at.y; p.positionZ.value = at.z; g.connect(p); p.connect(this.master);
+      } else g.connect(this.master);
+      src.start(); h.src = src;
+    })();
+    return h;
+  }
   /** keep the listener on the camera (call every frame) */
   listen(camera) {
     if (!this.ctx) return; const l = this.ctx.listener; camera.getWorldDirection(fwd);

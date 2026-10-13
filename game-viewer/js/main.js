@@ -208,7 +208,7 @@ function frameInner() {
   // body and camera: with a weapon drawn (not a staff) the camera orbits behind the player and his own avatar is drawn; sheathed, it is the first-person eye
   if (mode === 'walk') body.copy(player.pos); else body.set(camera.position.x, camera.position.y - player.eye, camera.position.z);
   bodyEye.set(body.x, body.y + player.eye, body.z);
-  const third = mode === 'walk' && weapons.third, hv = Math.hypot(vel.x, vel.z);
+  const third = mode === 'walk' && (weapons.third || mp.out), hv = Math.hypot(vel.x, vel.z);
   if (third) {
     const cp = Math.cos(pitch), f3 = fwd.set(-Math.sin(yaw) * cp, Math.sin(pitch), -Math.cos(yaw) * cp);
     camera.position.copy(bodyEye).addScaledVector(f3, -4.6 * (1 + Math.max(0, -pitch) * 0.2)); camera.position.x += Math.cos(yaw) * 0.8; camera.position.z -= Math.sin(yaw) * 0.8; camera.position.y += 0.5;

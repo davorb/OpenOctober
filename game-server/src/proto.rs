@@ -192,6 +192,11 @@ pub enum ServerMsg<'a> {
     Trade { ok: bool, op: &'a str, item: &'a str, units: u32, gold: f32, reason: &'a str },
     /// Your own health (after joining).
     Hp { hp: f32, max: f32 },
+    /// `id` typed /logout: for `secs` seconds he stands arms out, and everybody hears it (he must not move, or it is cancelled).
+    Logout { id: u16, secs: f32 },
+    LogoutCancel { id: u16 },
+    /// Sent to a player whose logout has run out; the connection closes after it and the character is out of the world.
+    LoggedOut,
 }
 
 /// Trim, drop control characters, cap the length (in chars).

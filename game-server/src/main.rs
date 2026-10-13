@@ -16,7 +16,7 @@ use game_server::accounts::{self, Accounts, Profile, SessionGuard, SignUp};
 use game_server::proto::*;
 use game_server::world::{self, Cmd, Config, JoinReq};
 
-const USAGE: &str = "usage: game-server [--port 1338] [--radius 900] [--max-players 256] [--tick-hz 15] [--spawns ../game-viewer/data/mobspawns.json | --spawns none] [--weapons ../game-viewer/data/weapons.json | --weapons none] [--pvp on|off] [--npcs 500] [--pois ../game-viewer/data/pois.json] [--capitals ../game-viewer/data/spawns.json] [--npc-seed 1] [--db npcs.db | --db none] [--nav data/nav | --nav none] [--npc-time-scale 1] [--own-weapons on|off] [--body-secs 45] [--tomb-secs 3600] [--loot-secs 3] [--items ../game-viewer/data/items.json] [--vendors ../game-viewer/data/vendors.json | --items none] [--max-per-ip 4] [--conns-per-min 30] [--origins https://play.example.com,... | --origins any] [--max-speed 20] [--max-fly-speed 400] [--accounts accounts.db] [--make-admin USERNAME] [--set-password USERNAME:NEWPASSWORD]";
+const USAGE: &str = "usage: game-server [--port 1338] [--radius 900] [--max-players 256] [--tick-hz 15] [--spawns ../game-viewer/data/mobspawns.json | --spawns none] [--weapons ../game-viewer/data/weapons.json | --weapons none] [--pvp on|off] [--npcs 500] [--pois ../game-viewer/data/pois.json] [--capitals ../game-viewer/data/spawns.json] [--npc-seed 1] [--db npcs.db | --db none] [--nav data/nav | --nav none] [--npc-time-scale 1] [--own-weapons on|off] [--body-secs 45] [--tomb-secs 3600] [--loot-secs 3] [--items ../game-viewer/data/items.json] [--vendors ../game-viewer/data/vendors.json | --items none] [--max-per-ip 4] [--conns-per-min 30] [--origins https://play.example.com,... | --origins any] [--max-speed 20] [--max-fly-speed 400] [--ghost-secs 300] [--logout-secs 30] [--accounts accounts.db] [--make-admin USERNAME] [--set-password USERNAME:NEWPASSWORD]";
 
 // Abuse limits (see `Net`). Connections from the local machine (127.0.0.1, ::1) skip the per-IP limits and the movement limit.
 /// A client may send this many frames per second on average, with a burst of `MSG_BURST`; more are dropped, and a client that keeps on is kicked.
@@ -131,7 +131,7 @@ fn refuse(code: u16, why: &str) -> ErrorResponse {
 
 #[tokio::main]
 async fn main() {
-    let (mut port, mut cfg) = (1338u16, Config { radius: 900.0, max_players: 256, tick_hz: 15, spawns: Some("../game-viewer/data/mobspawns.json".into()), weapons: Some("../game-viewer/data/weapons.json".into()), pvp: true, npcs: 0, pois: Some("../game-viewer/data/pois.json".into()), capitals: Some("../game-viewer/data/spawns.json".into()), npc_seed: 1, db: Some("npcs.db".into()), nav: Some("data/nav".into()), npc_time_scale: 1.0, own_weapons: true, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: Some("../game-viewer/data/items.json".into()), vendors: Some("../game-viewer/data/vendors.json".into()), max_speed: 20.0, max_fly_speed: 400.0 });
+    let (mut port, mut cfg) = (1338u16, Config { radius: 900.0, max_players: 256, tick_hz: 15, spawns: Some("../game-viewer/data/mobspawns.json".into()), weapons: Some("../game-viewer/data/weapons.json".into()), pvp: true, npcs: 0, pois: Some("../game-viewer/data/pois.json".into()), capitals: Some("../game-viewer/data/spawns.json".into()), npc_seed: 1, db: Some("npcs.db".into()), nav: Some("data/nav".into()), npc_time_scale: 1.0, own_weapons: true, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: Some("../game-viewer/data/items.json".into()), vendors: Some("../game-viewer/data/vendors.json".into()), max_speed: 20.0, max_fly_speed: 400.0, ghost_secs: 300.0, logout_secs: 30.0 });
     let mut net = Net { origins: Vec::new(), any_origin: false, max_per_ip: 4, conns_per_min: 30 };
     let (mut accounts_path, mut make_admin, mut set_password) = ("accounts.db".to_string(), None::<String>, None::<String>);
     let mut args = std::env::args().skip(1);
@@ -168,6 +168,8 @@ async fn main() {
             "--set-password" => set_password = Some(v),
             "--max-speed" => cfg.max_speed = v.parse().expect(USAGE),
             "--max-fly-speed" => cfg.max_fly_speed = v.parse().expect(USAGE),
+            "--ghost-secs" => cfg.ghost_secs = v.parse().expect(USAGE),
+            "--logout-secs" => cfg.logout_secs = v.parse().expect(USAGE),
             "--npc-time-scale" => cfg.npc_time_scale = v.parse().expect(USAGE),
             _ => panic!("{USAGE}"),
         }
@@ -313,7 +315,7 @@ async fn connection(stream: TcpStream, peer: SocketAddr, cmds: mpsc::Sender<Cmd>
 
     // ---- entering: the character joins the world, at its saved place (a new one at its race's capital)
     let (reply, reply_rx) = oneshot::channel();
-    if cmds.send(Cmd::Join(JoinReq { name: acc.profile.name.clone(), race: acc.profile.race.clone(), gender: acc.profile.gender.clone(), gear: acc.profile.gear.clone(), tx: tx.clone(), reply })).await.is_err() {
+    if cmds.send(Cmd::Join(JoinReq { account: Some(acc.id), name: acc.profile.name.clone(), race: acc.profile.race.clone(), gender: acc.profile.gender.clone(), gear: acc.profile.gear.clone(), tx: tx.clone(), reply })).await.is_err() {
         return;
     }
     let id = match reply_rx.await {
@@ -406,9 +408,10 @@ async fn connection(stream: TcpStream, peer: SocketAddr, cmds: mpsc::Sender<Cmd>
             },
         }
     }
+    // the world first: it keeps the body standing, or takes it away, and either way can still tell where it was
+    let _ = cmds.send(Cmd::Leave(id)).await;
     if !admin {
         save_pos(cmds.clone(), accounts.clone(), acc.id, acc.profile.race.clone()).await;
     }
-    let _ = cmds.send(Cmd::Leave(id)).await;
     drop(guard); // only now may a newer login of this account go on
 }

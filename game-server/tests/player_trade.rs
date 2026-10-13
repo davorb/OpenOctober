@@ -27,7 +27,7 @@ fn start(tag: &str, own_weapons: bool, mobs: &str) -> mpsc::Sender<Cmd> {
     std::fs::write(f("vendors"), r#"[{"name":"Ann","kind":"merchant","x":105,"z":200},{"name":"Smith","kind":"blacksmith","x":95,"z":200}]"#).unwrap();
     std::fs::write(f("spawns"), if mobs.is_empty() { "[]".to_string() } else { format!(r#"[{{"id":1,"x":125,"z":200,"mobs":[{{"id":8,"name":"Beast","qty":3,"difficulty":"{mobs}"}}]}}]"#) }).unwrap();
     let s = |n: &str| Some(f(n).to_string_lossy().to_string());
-    let cfg = Config { max_speed: 0.0, max_fly_speed: 0.0, radius: 900.0, max_players: 4, tick_hz: 60, spawns: s("spawns"), weapons: s("weapons"), pvp: false, npcs: 1, pois: s("pois"), capitals: s("caps"), npc_seed: 2, db: None, nav: None, npc_time_scale: 1.0, own_weapons, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: s("items"), vendors: s("vendors") };
+    let cfg = Config { max_speed: 0.0, max_fly_speed: 0.0, ghost_secs: 300.0, logout_secs: 30.0, radius: 900.0, max_players: 4, tick_hz: 60, spawns: s("spawns"), weapons: s("weapons"), pvp: false, npcs: 1, pois: s("pois"), capitals: s("caps"), npc_seed: 2, db: None, nav: None, npc_time_scale: 1.0, own_weapons, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: s("items"), vendors: s("vendors") };
     let (cmds, rx) = mpsc::channel(256);
     tokio::spawn(world::run(cfg, rx));
     cmds
@@ -60,7 +60,7 @@ impl Me {
 async fn join(cmds: &mpsc::Sender<Cmd>, at: (f32, f32), fly: bool) -> Me {
     let (tx, inbox) = mpsc::channel(32768);
     let (reply, reply_rx) = oneshot::channel();
-    cmds.send(Cmd::Join(JoinReq { name: "buyer".into(), race: "hum".into(), gender: "m".into(), gear: String::new(), tx, reply })).await.unwrap();
+    cmds.send(Cmd::Join(JoinReq { account: None, name: "buyer".into(), race: "hum".into(), gender: "m".into(), gear: String::new(), tx, reply })).await.unwrap();
     let id = reply_rx.await.unwrap().unwrap();
     cmds.send(Cmd::Pos(id, PosUpdate { x: at.0, y: 0.0, z: at.1, flags: if fly { FLAG_FLY } else { 0 }, ..Default::default() })).await.unwrap();
     Me { id, inbox, seen: Vec::new() }
@@ -297,7 +297,7 @@ async fn the_starting_weapon_is_a_random_one_of_the_worst() {
     std::fs::write(f("caps"), r#"[{"name":"Capital","race":"Human","x":100,"y":0,"z":200}]"#).unwrap();
     std::fs::write(f("weapons"), r#"{"weapons":{"r_A":{"group":"sword","kind":"melee","rank":10},"r_B":{"group":"axe","kind":"melee","rank":10},"r_C":{"group":"club","kind":"melee","rank":10},"r_Better":{"group":"sword","kind":"melee","rank":11},"r_Monster":{"group":"sword","kind":"melee","rank":0},"r_Claws":{"group":"sword","kind":"melee","rank":10,"natural":1}},"clipDur":{}}"#).unwrap();
     let s = |n: &str| Some(f(n).to_string_lossy().to_string());
-    let cfg = Config { max_speed: 0.0, max_fly_speed: 0.0, radius: 900.0, max_players: 40, tick_hz: 30, spawns: None, weapons: s("weapons"), pvp: false, npcs: 0, pois: s("pois"), capitals: s("caps"), npc_seed: 2, db: None, nav: None, npc_time_scale: 1.0, own_weapons: true, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: None, vendors: None };
+    let cfg = Config { max_speed: 0.0, max_fly_speed: 0.0, ghost_secs: 300.0, logout_secs: 30.0, radius: 900.0, max_players: 40, tick_hz: 30, spawns: None, weapons: s("weapons"), pvp: false, npcs: 0, pois: s("pois"), capitals: s("caps"), npc_seed: 2, db: None, nav: None, npc_time_scale: 1.0, own_weapons: true, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: None, vendors: None };
     let (cmds, rx) = mpsc::channel(256);
     tokio::spawn(world::run(cfg, rx));
     let mut got = std::collections::BTreeSet::new();

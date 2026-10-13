@@ -133,7 +133,7 @@ fn one_long_step_finishes_whole_legs() {
 async fn join(cmds: &mpsc::Sender<Cmd>, at: (f32, f32)) -> mpsc::Receiver<Message> {
     let (tx, rx) = mpsc::channel(512);
     let (reply, reply_rx) = oneshot::channel();
-    cmds.send(Cmd::Join(JoinReq { name: "t".into(), race: "hum".into(), gender: "m".into(), gear: String::new(), tx, reply })).await.unwrap();
+    cmds.send(Cmd::Join(JoinReq { account: None, name: "t".into(), race: "hum".into(), gender: "m".into(), gear: String::new(), tx, reply })).await.unwrap();
     let id = reply_rx.await.unwrap().unwrap();
     cmds.send(Cmd::Pos(id, PosUpdate { x: at.0, y: 0.0, z: at.1, ..Default::default() })).await.unwrap();
     rx
@@ -146,7 +146,7 @@ async fn npcs_show_up_in_snapshots_of_nearby_players_only() {
     // game z = 200 -> wire z = -200
     std::fs::write(&pois, r#"[{"name":"Town","type":"Village","x":100,"z":200}]"#).unwrap();
     std::fs::write(&caps, r#"[{"name":"Shoal","race":"Alfar","x":100,"y":0,"z":200}]"#).unwrap();
-    let cfg = Config { max_speed: 0.0, max_fly_speed: 0.0, radius: 900.0, max_players: 8, tick_hz: 15, spawns: None, weapons: None, pvp: true, npcs: 5, pois: Some(pois.to_string_lossy().into()), capitals: Some(caps.to_string_lossy().into()), npc_seed: 1, db: None, nav: None, npc_time_scale: 1.0, own_weapons: false, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: None, vendors: None };
+    let cfg = Config { max_speed: 0.0, max_fly_speed: 0.0, ghost_secs: 300.0, logout_secs: 30.0, radius: 900.0, max_players: 8, tick_hz: 15, spawns: None, weapons: None, pvp: true, npcs: 5, pois: Some(pois.to_string_lossy().into()), capitals: Some(caps.to_string_lossy().into()), npc_seed: 1, db: None, nav: None, npc_time_scale: 1.0, own_weapons: false, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: None, vendors: None };
     let (cmds, rx) = mpsc::channel(64);
     tokio::spawn(world::run(cfg, rx));
 

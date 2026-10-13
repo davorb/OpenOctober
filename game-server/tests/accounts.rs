@@ -21,12 +21,18 @@ impl Drop for Server {
 type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn serve(tag: &str) -> Server {
+    serve_with(tag, &[]).await
+}
+
+async fn serve_with(tag: &str, extra: &[&str]) -> Server {
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let db = std::env::temp_dir().join(format!("df_acc_{tag}_{port}.db")).to_string_lossy().to_string();
     let _ = std::fs::remove_file(&db);
     let caps = std::env::temp_dir().join(format!("df_acc_caps_{tag}_{port}.json"));
     std::fs::write(&caps, r#"[{"name":"Sanguine","race":"Human","x":100,"y":50,"z":200},{"name":"Shoal","race":"Alfar","x":-300,"y":60,"z":-400}]"#).unwrap();
-    let args = ["--port", &port.to_string(), "--spawns", "none", "--weapons", "none", "--npcs", "0", "--db", "none", "--accounts", &db, "--nav", "none", "--items", "none", "--vendors", "none", "--pois", "none", "--capitals", &caps.to_string_lossy()];
+    let (port_s, caps_s) = (port.to_string(), caps.to_string_lossy().to_string());
+    let mut args = vec!["--port", &port_s, "--spawns", "none", "--weapons", "none", "--npcs", "0", "--db", "none", "--accounts", &db, "--nav", "none", "--items", "none", "--vendors", "none", "--pois", "none", "--capitals", &caps_s];
+    args.extend_from_slice(extra);
     let child = Command::new(env!("CARGO_BIN_EXE_game-server")).args(args).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
     for _ in 0..100 {
         if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
@@ -245,4 +251,54 @@ fn a_capital_that_is_a_solid_stone_becomes_open_ground_beside_it_facing_it() {
     assert!(fx * (101.0 - c.x) + fz * (101.0 - c.z) > 0.99 * d);
     // off the baked map nothing changes
     assert_eq!((caps[1].x, caps[1].y, caps[1].z), (90_000.0, 5.0, 90_000.0));
+}
+
+/// Log in and enter; the welcome says which id the character has.
+async fn enter(s: &Server, user: &str) -> (Ws, u64) {
+    let mut ws = connect(s).await;
+    assert_eq!(ask(&mut ws, login(user, "correct horse"), &["auth", "autherr"]).await["t"], "auth");
+    let w = ask(&mut ws, json!({ "t": "enter" }), &["welcome"]).await;
+    (ws, w["id"].as_u64().unwrap())
+}
+
+#[tokio::test]
+async fn a_lost_connection_leaves_the_body_standing_and_logout_is_a_wait() {
+    let s = serve_with("ghost", &["--ghost-secs", "4", "--logout-secs", "2"]).await;
+    let mut a = connect(&s).await;
+    register_ok(&mut a, "watcher", "Watcher", "hum").await;
+    register_ok(&mut a, "victim", "Victim", "hum").await;
+    drop(a);
+    let (mut a, _) = enter(&s, "watcher").await;
+    let (mut b, bid) = enter(&s, "victim").await;
+    b.send(pos_frame(101.0, 51.0, 201.0)).await.unwrap();
+    a.send(pos_frame(100.0, 51.0, 200.0)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // the connection just dies: nobody sees him leave, and his body can be taken over again within the wait
+    drop(b);
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let (mut b, bid2) = enter(&s, "victim").await;
+    assert_eq!(bid, bid2, "he is back in his own body");
+    b.send(pos_frame(101.0, 51.0, 201.0)).await.unwrap();
+
+    // /logout: everybody is told, moving cancels it
+    b.send(Message::Text(json!({ "t": "chat", "text": "/logout" }).to_string())).await.unwrap();
+    let m = expect(&mut a, &["logout", "left"]).await;
+    assert_eq!((m["t"].as_str(), m["id"].as_u64()), (Some("logout"), Some(bid)));
+    b.send(pos_frame(105.0, 51.0, 201.0)).await.unwrap();
+    assert_eq!(expect(&mut a, &["logoutcancel", "left"]).await["t"], "logoutcancel");
+    // again, standing still: when the time is up he is out of the world, and told so
+    b.send(Message::Text(json!({ "t": "chat", "text": "/logout" }).to_string())).await.unwrap();
+    assert_eq!(expect(&mut a, &["logout", "left"]).await["t"], "logout");
+    assert_eq!(expect(&mut b, &["loggedout"]).await["t"], "loggedout");
+    assert_eq!(expect(&mut a, &["left"]).await["id"].as_u64(), Some(bid));
+
+    // a plain disconnect: the body stays for ghost-secs, then is gone
+    let (mut b, bid3) = enter(&s, "victim").await;
+    b.send(pos_frame(101.0, 51.0, 201.0)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop(b);
+    let t0 = std::time::Instant::now();
+    assert_eq!(expect(&mut a, &["left"]).await["id"].as_u64(), Some(bid3));
+    assert!(t0.elapsed() > Duration::from_secs(3), "gone only after the wait: {:?}", t0.elapsed());
 }

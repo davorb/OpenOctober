@@ -22,7 +22,7 @@ fn start(tag: &str, race: &str, pvp: bool) -> Setup {
     std::fs::write(f("caps"), format!(r#"[{{"name":"Capital","race":"{race}","x":100,"y":0,"z":200}}]"#)).unwrap();
     std::fs::write(f("weapons"), WEAPONS).unwrap();
     let s = |n: &str| Some(f(n).to_string_lossy().to_string());
-    let cfg = Config { max_speed: 0.0, max_fly_speed: 0.0, radius: 900.0, max_players: 8, tick_hz: 60, spawns: None, weapons: s("weapons"), pvp, npcs: 30, pois: s("pois"), capitals: s("caps"), npc_seed: 5, db: None, nav: None, npc_time_scale: 1.0, own_weapons: false, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: None, vendors: None };
+    let cfg = Config { max_speed: 0.0, max_fly_speed: 0.0, ghost_secs: 300.0, logout_secs: 30.0, radius: 900.0, max_players: 8, tick_hz: 60, spawns: None, weapons: s("weapons"), pvp, npcs: 30, pois: s("pois"), capitals: s("caps"), npc_seed: 5, db: None, nav: None, npc_time_scale: 1.0, own_weapons: false, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: None, vendors: None };
     let (cmds, rx) = mpsc::channel(256);
     tokio::spawn(world::run(cfg, rx));
     Setup { cmds }
@@ -31,7 +31,7 @@ fn start(tag: &str, race: &str, pvp: bool) -> Setup {
 async fn join(cmds: &mpsc::Sender<Cmd>, race: &str, at: (f32, f32)) -> (u16, mpsc::Receiver<Message>) {
     let (tx, rx) = mpsc::channel(16384);
     let (reply, reply_rx) = oneshot::channel();
-    cmds.send(Cmd::Join(JoinReq { name: "visitor".into(), race: race.into(), gender: "m".into(), gear: String::new(), tx, reply })).await.unwrap();
+    cmds.send(Cmd::Join(JoinReq { account: None, name: "visitor".into(), race: race.into(), gender: "m".into(), gear: String::new(), tx, reply })).await.unwrap();
     let id = reply_rx.await.unwrap().unwrap();
     cmds.send(Cmd::Pos(id, PosUpdate { x: at.0, y: 0.0, z: at.1, ..Default::default() })).await.unwrap();
     (id, rx)

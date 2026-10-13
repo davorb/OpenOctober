@@ -11,6 +11,7 @@ import { PlayerAnim } from './playeranim.js';
 const OP_POS = 1, OP_SNAPSHOT = 2, FLAG_SWIM = 1, FLAG_AIR = 2, FLAG_SNAP = 4, FLAG_FLY = 32, FLAG_CROUCH = 128;
 const SEND_HZ = 15, INTERP = 0.13;                  // render remote players this many seconds in the past (a bit over one tick)
 const AVATAR_NEAR = 420, NAME_NEAR = 260, DOT_FAR = 1500, SHADOW_NEAR = 90, POSE_NEAR = 180;
+const LOGOUT_SOUND = '/misc/df_bind_stone_loop.wav';   // loud, heard by everybody around while someone logs out (/logout)
 const RUN = 3.7 * 1.5;                              // m/s of a full-speed stride (matches SPEEDS.run)
 const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
 const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -50,6 +51,8 @@ export class Multiplayer {
     this.players = new Map(); this.shots = new Map(); this.corpses = new Map(); this.me = null; this.ws = null; this.sendAcc = 0; this.last = null; this.speed = 0; this.dotMat = null;
     this.profile = { name: '', race: 'hum', gender: 'm', gear: '' };   // the account's character: set from the server's `auth`
     this.creds = null; this.admin = false; this.onFatal = null;
+    this.out = null;   // our own /logout in progress: { until (s, performance clock), snd }
+    this.timerEl = el('div'); this.timerEl.id = 'logouttimer'; this.timerEl.style.cssText = 'position:fixed;top:22%;left:0;right:0;text-align:center;font:600 28px Palatino,Georgia,serif;letter-spacing:.08em;color:#f1dfae;text-shadow:0 2px 12px #000;pointer-events:none;display:none;z-index:30'; document.body.appendChild(this.timerEl);
     this.dotTex = null; this.started = false; this.typing = false; this.radius = 900;
     // combat messages we send (see weapons.js; the server decides what they hit, game-server/src/world.rs)
     this.weapons = this.fx = this.sfx = null; this.onRespawn = null;
@@ -84,7 +87,7 @@ export class Multiplayer {
   /** Connected players (the server's NPCs share the player roster but are not counted). */
   humans() { let n = 0; for (const p of this.players.values()) if (!p.info.npc) n++; return n; }
   status(s) { this.online = s === 'online'; const e = this.$('mpnet'); e.textContent = this.online ? `● ${this.humans() + 1} online` : `○ ${s}`; e.classList.toggle('up', this.online); }
-  dropAll() { for (const c of this.corpses.values()) this.scene.remove(c.root); this.corpses.clear(); for (const p of this.players.values()) this.removeAvatar(p); this.players.clear(); this.me = null; this.mobs.clear(); }
+  dropAll() { this.stopLogout(); for (const p of this.players.values()) this.stopLogout(p); for (const c of this.corpses.values()) this.scene.remove(c.root); this.corpses.clear(); for (const p of this.players.values()) this.removeAvatar(p); this.players.clear(); this.me = null; this.mobs.clear(); }
 
   onJson(m) {
     if (m.t === 'welcome') {
@@ -94,11 +97,14 @@ export class Multiplayer {
     } else if (m.t === 'joined') {
       if (m.player.id !== this.me) { this.players.set(m.player.id, { info: m.player, states: [], av: null, seen: 0 }); this.status('online'); this.log(`${esc(m.player.name)} joined`, 'sys'); }
     } else if (m.t === 'left') {
-      const p = this.players.get(m.id); if (p) { this.removeAvatar(p); this.players.delete(m.id); this.status('online'); this.log(`${esc(p.info.name)} left`, 'sys'); }
+      const p = this.players.get(m.id); if (p) { this.stopLogout(p); this.removeAvatar(p); this.players.delete(m.id); this.status('online'); this.log(`${esc(p.info.name)} left`, 'sys'); }
     } else if (m.t === 'chat') {
       const p = this.players.get(m.id); this.log(`<b${m.id === this.me ? ' class="me"' : ''}>${esc(m.name)}</b>: ${esc(m.text)}`);
       if (p) this.say(p, m.text);
     } else if (m.t === 'mobtypes') { this.mobs.setTypes(m.types);
+    } else if (m.t === 'logout') { this.startLogout(m.id, m.secs);
+    } else if (m.t === 'logoutcancel') { this.cancelLogout(m.id);
+    } else if (m.t === 'loggedout') { this.fatal = true; this.stopLogout(); this.timerEl.textContent = 'Logged out'; this.timerEl.style.display = 'block'; this.status('Logged out'); setTimeout(() => location.reload(), 1500);
     } else if (this.weapons && this.onCombat(m)) {
     } else if (m.t === 'auth') { this.setProfile(m); this.ws.send(JSON.stringify({ t: 'enter', admin: this.admin })); }   // after a reconnect
     else if (m.t === 'autherr' || m.t === 'error') { this.fatal = true; this.ws?.close(); this.status(m.msg); this.onFatal?.(m.msg); }
@@ -106,6 +112,7 @@ export class Multiplayer {
   /** Combat events from the server (game-server/src/proto.rs ServerMsg): other players' equip / swings / shots, blows landing, deaths. true = handled */
   onCombat(m) {
     const W = this.weapons, now = performance.now() / 1000, p = this.players.get(m.id), at = a => new THREE.Vector3(a[0], a[1], a[2]);
+    if (m.t === 'hp') { W.setHp(m.hp, m.max); return true; }
     if (m.t === 'corpse') { this.addCorpse(m); return true; }
     if (m.t === 'tombstone') { this.addTomb(m); return true; }
     if (m.t === 'looted') { const c = this.corpses.get(m.cid); if (c) { if (c.root) this.scene.remove(c.root); this.corpses.delete(m.cid); } return true; }
@@ -139,7 +146,7 @@ export class Multiplayer {
       return true;
     }
     if (m.t === 'died') {
-      if (m.v === 'p') { if (m.i === this.me) W.died(); else { const q = this.players.get(m.i); if (q) q.dead = true; } }
+      if (m.v === 'p') { if (m.i === this.me) { this.cancelLogout(m.i); W.died(); } else { const q = this.players.get(m.i); if (q) { this.stopLogout(q); q.dead = true; } } }
       return true;
     }
     if (m.t === 'respawn') {
@@ -148,6 +155,26 @@ export class Multiplayer {
     }
     return false;
   }
+  // ---------------------------------------------------------------- /logout
+  /** `id` typed /logout: a very loud sound everybody around hears, arms out, and (for us) a countdown with nothing usable meanwhile. */
+  startLogout(id, secs) {
+    const me = id === this.me, p = me ? null : this.players.get(id); if (!me && !p) return;
+    this.stopLogout(me ? null : p);
+    const until = performance.now() / 1000 + secs;
+    if (me) {
+      const s = this.getSelf(); this.out = { until, snd: this.sfx?.loop(LOGOUT_SOUND, { at: new THREE.Vector3(s.x, s.y + 1, s.z), vol: 1, min: 100 }) };
+      this.weapons?.lock(true); this.log('Logging out… stand still for ' + Math.round(secs) + ' s, or move to cancel.', 'sys');
+    } else p.logout = { until, snd: null, wantSound: true };
+  }
+  /** Stop the logout of `p` (a roster entry; none = our own). */
+  stopLogout(p) {
+    if (!p) { if (!this.out) return; this.out.snd?.stop(); this.out = null; this.weapons?.lock(false); this.timerEl.style.display = 'none'; return; }
+    if (!p.logout) return; p.logout.snd?.stop(); p.logout = null; if (p.av?.anim) p.av.anim.cross = false;
+  }
+  cancelLogout(id) {
+    if (id === this.me) { if (this.out) { this.stopLogout(null); this.log('Logout cancelled', 'sys'); } } else { const p = this.players.get(id); if (p) this.stopLogout(p); }
+  }
+
   /** A body on the ground (server: Corpse, kept 10 minutes): the dying clip of the player's own race, held at its last frame. Static, so it costs nothing per frame. */
   async addCorpse(m) {
     if (this.corpses.has(m.cid)) return;
@@ -268,6 +295,7 @@ export class Multiplayer {
   update(dt, now) {
     this.sendAcc += dt;
     if (this.sendAcc >= 1 / SEND_HZ) { this.sendPos(this.sendAcc); this.sendAcc = 0; }
+    this.tickLogouts(now);
     const cam = this.camera.position, rt = now - INTERP, st = {}, fovK = 2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)) / innerHeight;
     for (const p of this.players.values()) {
       if (now - p.seen > 1.5) { if (p.av) { this.scene.remove(p.av.root, p.av.tag, p.av.dot); if (p.av.bubble) this.scene.remove(p.av.bubble); p.av.attached = false; p.av.bubble = null; p.states.length = 0; } continue; }   // out of the server's interest radius
@@ -286,6 +314,7 @@ export class Multiplayer {
       // animation: stride phase advances with distance travelled
       const amp = Math.min(1, st.speed / RUN), air = !!(st.flags & FLAG_AIR) && !(st.flags & FLAG_SWIM);
       if (st.speed > 0.15 && !air) a.phase += dt * (3 + st.speed * 1.9);
+      if (a.anim) a.anim.cross = !!p.logout;
       if (dist < POSE_NEAR || !a.posed) { if (a.anim) a.anim.update(dt, st.speed, air, !!(st.flags & FLAG_SWIM), (st.flags & FLAG_CROUCH) ? { crouch: true } : null); else pose(a, Math.sin(a.phase), st.speed > 0.15 ? Math.max(0.25, amp) : 0, air); a.posed = true; }
       const shadow = dist < SHADOW_NEAR; if (shadow !== a.cast) { a.cast = shadow; a.root.traverse(n => { if (n.isMesh) n.castShadow = shadow; }); }
       // tags above the head, constant on-screen size
@@ -303,6 +332,17 @@ export class Multiplayer {
       if (near !== c.shown) { c.shown = near; if (near) this.scene.add(c.root); else this.scene.remove(c.root); }
     }
     this.mobs.update(dt, now); this.drawRadar(); if (this.$('plist').classList.contains('on')) { this.listAcc = (this.listAcc || 0) + dt; if (this.listAcc > 0.5) { this.listAcc = 0; this.renderList(); } }
+  }
+
+  /** The countdown on screen, our avatar's pose, and the sound of anybody else's logout once we know where he stands. */
+  tickLogouts(now) {
+    const o = this.out, sa = this.weapons?.self;
+    if (o) { const left = Math.max(0, Math.ceil(o.until - now)); this.timerEl.textContent = `Logging out in ${left} s — move to cancel`; this.timerEl.style.display = 'block'; }
+    if (sa?.anim) sa.anim.cross = !!o;
+    for (const p of this.players.values()) {
+      const l = p.logout; if (!l) continue;
+      if (l.wantSound && !l.snd && this.sfx?.ctx) { const s = p.states[p.states.length - 1]; if (s) { l.wantSound = false; l.snd = this.sfx.loop(LOGOUT_SOUND, { at: new THREE.Vector3(s.x, s.y + 1, s.z), vol: 1, min: 100 }); } }
+    }
   }
 
   // ---------------------------------------------------------------- radar + list

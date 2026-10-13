@@ -35,7 +35,7 @@ export class Weapons {
   constructor({ camera, post, world, factory, sfx, fx, net, toast, $, profile, light, stamina }) {
     Object.assign(this, { camera, post, world, factory, sfx, fx, net, toast, $, profile, lightSrc: light, stamina });
     this.data = null; this.id = null; this.drawn = false; this.combo = 0; this.vm = new ViewModel(factory); this.vm.onhit = () => this.landed();
-    this.post.overlay = this.vm; this.down = { 0: false, 2: false }; this.draw = null; this.hp = { hp: 100, max: 100 }; this.dead = false; this.hotbar = []; this.owned = null; this.canFight = true; this.self = null; this.eye = null;
+    this.post.overlay = this.vm; this.down = { 0: false, 2: false }; this.draw = null; this.hp = { hp: 100, max: 100 }; this.dead = false; this.hotbar = []; this.owned = null; this.canFight = true; this.locked = false; this.self = null; this.eye = null;
   }
   async init() {
     this.data = await fetch('/data/weapons.json').then(r => r.json());
@@ -57,6 +57,8 @@ export class Weapons {
     if (this.data) { this.rebuildHotbar(); this.refreshUI(); if (this.$('armory')?.classList.contains('on')) this.drawArmory(); }
   }
   get w() { return this.data?.weapons[this.id] || null; }
+  /** Logging out (`/logout`): nothing can be used until it is over or cancelled. */
+  lock(on) { this.locked = on; if (on) { this.cancelDraw(); this.vm.setHold(null); this.down[0] = this.down[2] = false; } }
   /** drawn weapons (except magic staves) are used in third person; sheathed or a staff = first person */
   get third() { const w = this.w; return !!(w && this.drawn && this.canFight && w.group !== 'staff' && w.group !== 'thrown' && !this.dead); }
   /** where shots start and the aim ray begins: the body's head in third person, else the camera */
@@ -77,7 +79,7 @@ export class Weapons {
 
   // ---- input
   mouse(button, isDown) {
-    if (this.dead) return; this.down[button] = isDown; const w = this.w;
+    if (this.dead || this.locked) { this.down[button] = false; return; } this.down[button] = isDown; const w = this.w;
     if (isDown && !this.canFight) { if (button === 0) this.toast('Walk (G) to fight'); return; }
     if (button === 0 && isDown) { if (!w) return; if (!this.drawn) { this.toggleDrawn(); return; } this.press(); }
     if (button === 0 && !isDown && this.draw) this.releaseBow();
@@ -156,7 +158,7 @@ export class Weapons {
   update(dt, { speed = 0, air = false } = {}) {
     if (this.draw) this.draw.t += dt;
     const L = this.lightSrc; if (L) this.vm.light(L.sun, L.hemi);
-    this.vm.visible = this.drawn && !this.third && !!this.w && !this.dead; this.vm.update(dt, speed, air);
+    this.vm.visible = this.drawn && !this.third && !!this.w && !this.dead && !this.locked; this.vm.update(dt, speed, air);
   }
   resize(aspect) { this.vm.resize(aspect); }
 
@@ -193,6 +195,7 @@ export class Weapons {
     const hb = this.$('hotbar'); if (hb) hb.innerHTML = this.hotbar.map((id, i) => `<i class="${id === this.id ? 'on' : ''}">${(i + 1) % 10} ${GROUP_NAMES[this.data.weapons[id].group].replace(/s$/, '')}</i>`).join('');
   }
   key(code) {
+    if (this.locked) return false;   // logging out: nothing in hand can be used
     if (code === 'KeyI') return this.toggleArmory(), true;
     if (code === 'KeyR') return this.toggleDrawn(), true;
     const m = /^(?:Digit|Numpad)(\d)$/.exec(code); if (m) { const i = (+m[1] + 9) % 10, id = this.hotbar[i]; if (id) this.equip(id); return true; }

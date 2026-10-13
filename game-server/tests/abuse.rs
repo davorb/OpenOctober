@@ -19,7 +19,7 @@ struct Client {
 async fn start(max_speed: f32, max_fly_speed: f32, tag: &str) -> mpsc::Sender<Cmd> {
     let w = std::env::temp_dir().join(format!("df_abuse_w_{tag}.json"));
     std::fs::write(&w, WEAPONS).unwrap();
-    let cfg = Config { max_speed, max_fly_speed, radius: 900.0, max_players: 8, tick_hz: 30, spawns: None, weapons: Some(w.to_string_lossy().into()), pvp: true, npcs: 0, pois: None, capitals: None, npc_seed: 1, db: None, nav: None, npc_time_scale: 1.0, own_weapons: false, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: None, vendors: None };
+    let cfg = Config { max_speed, max_fly_speed, ghost_secs: 300.0, logout_secs: 30.0, radius: 900.0, max_players: 8, tick_hz: 30, spawns: None, weapons: Some(w.to_string_lossy().into()), pvp: true, npcs: 0, pois: None, capitals: None, npc_seed: 1, db: None, nav: None, npc_time_scale: 1.0, own_weapons: false, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: None, vendors: None };
     let (cmds, rx) = mpsc::channel(256);
     tokio::spawn(world::run(cfg, rx));
     cmds
@@ -28,7 +28,7 @@ async fn start(max_speed: f32, max_fly_speed: f32, tag: &str) -> mpsc::Sender<Cm
 async fn join(cmds: &mpsc::Sender<Cmd>) -> Client {
     let (tx, rx) = mpsc::channel(4096);
     let (reply, reply_rx) = oneshot::channel();
-    cmds.send(Cmd::Join(JoinReq { name: "t".into(), race: "hum".into(), gender: "m".into(), gear: String::new(), tx, reply })).await.unwrap();
+    cmds.send(Cmd::Join(JoinReq { account: None, name: "t".into(), race: "hum".into(), gender: "m".into(), gear: String::new(), tx, reply })).await.unwrap();
     Client { id: reply_rx.await.unwrap().unwrap(), rx }
 }
 
