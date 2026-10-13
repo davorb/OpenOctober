@@ -115,6 +115,7 @@ async fn connection(stream: TcpStream, cmds: mpsc::Sender<Cmd>) {
                         Ok(ClientMsg::Bow { what }) => Some(Cmd::Bow(id, what)),
                         Ok(ClientMsg::Shoot { dir, from, power, spell }) => Some(Cmd::Shoot(id, from, dir, power, spell)),
                         Ok(ClientMsg::Respawn) => Some(Cmd::Respawn(id)),
+                        Ok(ClientMsg::Loot { cid }) => Some(Cmd::Loot(id, cid)),
                         _ => None,
                     };
                     if let Some(c) = cmd {

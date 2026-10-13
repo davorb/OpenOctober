@@ -21,10 +21,11 @@ function textSprite(draw, w, h, order) {
   const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthWrite: false, fog: false }));
   s.renderOrder = order; s.userData.aspect = w / h; return s;
 }
+/** Name tag: gold for a vendor or a trader, teal for any other NPC. */
 function nameSprite(name, npc = false, role = '') {
   const f = '600 30px Palatino, Georgia, serif', m = document.createElement('canvas').getContext('2d'); m.font = f;
   const w = Math.ceil(m.measureText(name).width) + 24;
-  return textSprite((x, w, h) => { x.font = f; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillStyle = '#0007'; x.beginPath(); x.roundRect(0, 6, w, h - 12, 12); x.fill(); x.fillStyle = role ? '#ffd36b' : npc ? '#a6d9cb' : '#f1dfae'; x.fillText(name, w / 2, h / 2 + 1);   // gold: a vendor or a trader }, w, 56, 20);
+  return textSprite((x, w, h) => { x.font = f; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillStyle = '#0007'; x.beginPath(); x.roundRect(0, 6, w, h - 12, 12); x.fill(); x.fillStyle = role ? '#ffd36b' : npc ? '#a6d9cb' : '#f1dfae'; x.fillText(name, w / 2, h / 2 + 1); }, w, 56, 20);
 }
 function bubbleSprite(text) {
   const f = '26px Palatino, Georgia, serif', m = document.createElement('canvas').getContext('2d'); m.font = f;
@@ -141,6 +142,8 @@ export class Multiplayer {
   onCombat(m) {
     const W = this.weapons, now = performance.now() / 1000, p = this.players.get(m.id), at = a => new THREE.Vector3(a[0], a[1], a[2]);
     if (m.t === 'corpse') { this.addCorpse(m); return true; }
+    if (m.t === 'looted') { const c = this.corpses.get(m.cid); if (c) { c.gold = 0; c.units = 0; } return true; }
+    if (m.t === 'stock') { const g = Math.round(m.gold), n = Object.values(m.items).reduce((a, b) => a + b, 0), had = this.stock; this.stock = { gold: g, units: n, items: m.items }; if (had && (g > had.gold || n > had.units)) this.log(`Looted — you carry ${g} gold and ${n} goods`, 'sys'); else if (had && g === 0 && n === 0 && (had.gold || had.units)) this.log('You lost everything you carried', 'sys'); return true; }
     if (m.t === 'corpsegone') { const c = this.corpses.get(m.cid); if (c) { this.scene.remove(c.root); this.corpses.delete(m.cid); } return true; }
     if (m.t === 'equip') { if (p) { p.info.weapon = m.w; p.info.drawn = m.drawn; this.wield(p); } return true; }
     if (m.t === 'swing') {
@@ -176,7 +179,7 @@ export class Multiplayer {
   /** A body on the ground (server: Corpse, kept 10 minutes): the dying clip of the player's own race, held at its last frame. Static, so it costs nothing per frame. */
   async addCorpse(m) {
     if (this.corpses.has(m.cid)) return;
-    const c = { root: null, x: m.x, y: m.y, z: m.z, yaw: m.yaw, snap: m.snap, shown: false, gyT: -9 }; this.corpses.set(m.cid, c);
+    const c = { root: null, x: m.x, y: m.y, z: m.z, yaw: m.yaw, snap: m.snap, shown: false, gyT: -9, gold: m.gold || 0, units: m.units || 0 }; this.corpses.set(m.cid, c);
     try {
       const av = await this.factory.build(m.race, m.gender, m.gear); if (!this.corpses.has(m.cid)) return;
       const an = await PlayerAnim.create(av).catch(() => null); if (an) { an.dead = true; an.update(0.01); an.update(10); }   // pose: lying where it fell
@@ -215,6 +218,7 @@ export class Multiplayer {
     const $ = this.$; this.logEl = $('chatlog'); this.input = $('chatin');
     addEventListener('keydown', e => {
       if (!document.body.classList.contains('playing')) return;
+      if (e.code === 'KeyF' && !e.repeat && !this.typing) { this.lootNearest(); return; }
       if (e.code === 'Tab') { e.preventDefault(); if (!e.repeat) { $('plist').classList.toggle('on'); this.renderList(); } return; }
       if (!this.typing && (e.code === 'Enter' || e.code === 'NumpadEnter') && !e.repeat) { e.preventDefault(); this.openChat(); }
     });
@@ -223,6 +227,12 @@ export class Multiplayer {
       if (e.code === 'Enter' || e.code === 'NumpadEnter') { this.chat(this.input.value); this.closeChat(); }
       else if (e.code === 'Escape') this.closeChat();
     });
+  }
+  /** F: take everything from the nearest body with something on it within reach (the server checks the distance too). */
+  lootNearest() {
+    const cam = this.camera.position; let best = null, bd = 6;
+    for (const [cid, c] of this.corpses) { if (!(c.gold > 0 || c.units > 0)) continue; const d = Math.hypot(c.x - cam.x, c.z - cam.z); if (d < bd) { bd = d; best = cid; } }
+    if (best !== null) this.sendJson({ t: 'loot', cid: best });
   }
   openChat() { this.typing = true; document.exitPointerLock?.(); this.$('chat').classList.add('typing'); this.input.value = ''; this.input.focus(); }
   closeChat() { this.typing = false; this.input.blur(); this.$('chat').classList.remove('typing'); this.$('view').requestPointerLock?.()?.catch?.(() => {}); }

@@ -123,6 +123,8 @@ pub enum ClientMsg {
     Shoot { dir: [f32; 3], from: [f32; 3], #[serde(default)] power: f32, #[serde(default)] spell: bool },
     /// After dying: ask to get up (the server also does it by itself after a few seconds).
     Respawn,
+    /// Take everything from a body's tombstone (`cid` of its `Corpse` message): you have to stand within a few metres of it.
+    Loot { cid: u32 },
 }
 
 #[derive(Debug, Serialize)]
@@ -147,8 +149,13 @@ pub enum ServerMsg<'a> {
     /// A player got up again (full health) - the client puts itself back at a spawn point.
     Respawn { id: u16, hp: f32, max: f32 },
     /// A player died here: his body stays on the ground (CORPSE_SECS) for everybody, joiners get the existing ones too. `snap`: the body has no height of its own (bots).
-    Corpse { cid: u32, name: &'a str, race: &'a str, gender: &'a str, gear: &'a str, x: f32, y: f32, z: f32, yaw: f32, snap: bool },
+    /// `gold` and `units` (goods) say what is still on the body; `Looted` follows when somebody has taken it.
+    Corpse { cid: u32, name: &'a str, race: &'a str, gender: &'a str, gear: &'a str, x: f32, y: f32, z: f32, yaw: f32, snap: bool, gold: f32, units: u32 },
     CorpseGone { cid: u32 },
+    /// The body of `cid` has been emptied.
+    Looted { cid: u32 },
+    /// What you carry (sent after joining and whenever it changes): gold and goods by item id.
+    Stock { gold: f32, items: &'a std::collections::BTreeMap<String, u32> },
     /// Your own health (after joining).
     Hp { hp: f32, max: f32 },
 }

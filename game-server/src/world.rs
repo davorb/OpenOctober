@@ -10,7 +10,8 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::combat::*;
 use crate::mobs::{MobAttack, Mobs};
 use crate::nav::Nav;
-use crate::npcs::{chaos_race, Goal, Lod, LodCounts, Npcs, DOWN_SECS as NPC_DOWN_SECS, NPC_ID_BASE};
+use crate::economy::Stock;
+use crate::npcs::{chaos_race, Role, Goal, Lod, LodCounts, Npcs, DOWN_SECS as NPC_DOWN_SECS, NPC_ID_BASE};
 use crate::proto::*;
 use crate::store::Store;
 
@@ -69,6 +70,8 @@ pub enum Cmd {
     Bow(u16, String),
     Shoot(u16, [f32; 3], [f32; 3], f32, bool),
     Respawn(u16),
+    /// A player takes everything from the tombstone `cid`.
+    Loot(u16, u32),
 }
 
 /// A blow whose animation has started and that lands at `due`.
@@ -84,8 +87,11 @@ struct Fighter {
     group: String,
 }
 
+/// A player can take from a tombstone this close (metres).
+const LOOT_REACH: f32 = 4.0;
+
 /// How long a body stays on the ground after its owner died.
-pub const CORPSE_SECS: u64 = 600;
+pub const CORPSE_SECS: u64 = 3600;
 
 struct Corpse {
     cid: u32,
@@ -114,6 +120,8 @@ struct Player {
     last_sent: usize,
     last_mobs: usize,
     dead: bool,
+    /// What the player carries (gold and goods): picked up from tombstones, dropped on his own when he dies.
+    stock: Stock,
     // combat
     weapon: String,
     group: String,
@@ -261,6 +269,7 @@ impl World {
             Cmd::Bow(id, what) => self.relay(id, |id| serde_json::to_string(&ServerMsg::Bow { id, what: &what }).unwrap()),
             Cmd::Shoot(id, from, dir, power, spell) => self.shoot(id, from, dir, power, spell),
             Cmd::Respawn(id) => self.respawn(id, false),
+            Cmd::Loot(id, cid) => self.loot_grave(id, cid),
         }
         self.reap();
     }
@@ -281,7 +290,7 @@ impl World {
             name = format!("Player{id}");
         }
         let info = PlayerInfo { id: id as u16, name, race: req.race, gender: req.gender, gear: clean(&req.gear, MAX_GEAR), weapon: String::new(), drawn: false, npc: false, role: String::new() };
-        self.players[id] = Some(Player { info, pos: PosUpdate::default(), has_pos: false, tx: req.tx, last_chat: Instant::now() - Duration::from_secs(10), last_sent: 0, last_mobs: 0, dead: false, weapon: String::new(), group: String::new(), drawn: false, blocking: false, hp: PLAYER_HP, down_until: None, next_attack: Instant::now() });
+        self.players[id] = Some(Player { info, pos: PosUpdate::default(), has_pos: false, tx: req.tx, last_chat: Instant::now() - Duration::from_secs(10), last_sent: 0, last_mobs: 0, dead: false, stock: Stock::default(), weapon: String::new(), group: String::new(), drawn: false, blocking: false, hp: PLAYER_HP, down_until: None, next_attack: Instant::now() });
         self.online += 1;
         let _ = req.reply.send(Ok(id as u16));
 
@@ -292,6 +301,7 @@ impl World {
             self.players[id].as_mut().unwrap().dead = true;
             return;
         }
+        self.send_stock(id as u16);
         if !self.mobs.types.is_empty() {
             let types = serde_json::to_string(&ServerMsg::Mobtypes { types: &self.mobs.types }).unwrap();
             if self.players[id].as_ref().unwrap().tx.try_send(Message::Text(types)).is_err() {
@@ -444,17 +454,65 @@ impl World {
 
     /// The body of a player who just died stays for CORPSE_SECS, visible to everybody.
     fn leave_corpse(&mut self, id: u16) {
-        let Some(Some(p)) = self.players.get(id as usize) else { return };
+        let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
         let (info, pos) = (p.info.clone(), p.pos);
-        self.add_corpse(&info, pos);
+        let stock = std::mem::take(&mut p.stock); // everything he carried lies on the body
+        self.send_stock(id);
+        self.add_corpse(&info, pos, stock, None);
     }
 
-    fn add_corpse(&mut self, info: &PlayerInfo, pos: PosUpdate) {
+    /// A body falls: everybody sees it (for CORPSE_SECS) and `stock` lies on it for whoever takes it (`owner`: an NPC that will come back for it).
+    fn add_corpse(&mut self, info: &PlayerInfo, pos: PosUpdate, stock: Stock, owner: Option<u16>) {
         let cid = self.next_corpse;
         self.next_corpse += 1;
-        let msg = serde_json::to_string(&ServerMsg::Corpse { cid, name: &info.name, race: &info.race, gender: &info.gender, gear: &info.gear, x: pos.x, y: pos.y, z: pos.z, yaw: pos.yaw, snap: pos.flags & FLAG_SNAP != 0 }).unwrap();
+        let (gold, units) = (stock.gold, stock.units());
+        let msg = serde_json::to_string(&ServerMsg::Corpse { cid, name: &info.name, race: &info.race, gender: &info.gender, gear: &info.gear, x: pos.x, y: pos.y, z: pos.z, yaw: pos.yaw, snap: pos.flags & FLAG_SNAP != 0, gold, units }).unwrap();
         self.corpses.push(Corpse { cid, expires: Instant::now() + Duration::from_secs(CORPSE_SECS), msg: msg.clone() });
+        self.npcs.add_grave(cid, pos.x, pos.z, stock, owner);
         self.broadcast_text(msg, None);
+    }
+
+    /// Tell player `id` what he carries.
+    fn send_stock(&mut self, id: u16) {
+        let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
+        let msg = serde_json::to_string(&ServerMsg::Stock { gold: p.stock.gold, items: &p.stock.items }).unwrap();
+        if p.tx.try_send(Message::Text(msg)).is_err() {
+            p.dead = true;
+        }
+    }
+
+    /// A player takes what lies on the tombstone `cid`: he has to be up and within a few metres of it.
+    fn loot_grave(&mut self, id: u16, cid: u32) {
+        let Some(Some(p)) = self.players.get(id as usize) else { return };
+        if p.down_until.is_some() || !p.has_pos {
+            return;
+        }
+        let Some(g) = self.npcs.grave(cid) else { return };
+        if (g.x - p.pos.x).powi(2) + (g.z - p.pos.z).powi(2) > LOOT_REACH * LOOT_REACH {
+            return;
+        }
+        let Some(taken) = self.npcs.take_grave(cid) else { return };
+        let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
+        p.stock.gold += taken.gold;
+        for (k, q) in taken.items {
+            p.stock.add(&k, q);
+        }
+        self.send_stock(id);
+    }
+
+    /// Everybody is told a tombstone has been emptied; a player joining later sees it empty too.
+    fn announce_looted(&mut self) {
+        let looted: Vec<u32> = std::mem::take(&mut *self.npcs.looted.borrow_mut());
+        for cid in looted {
+            if let Some(c) = self.corpses.iter_mut().find(|c| c.cid == cid) {
+                if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&c.msg) {
+                    v["gold"] = 0.0.into();
+                    v["units"] = 0.into();
+                    c.msg = v.to_string();
+                }
+            }
+            self.broadcast_text(serde_json::to_string(&ServerMsg::Looted { cid }).unwrap(), None);
+        }
     }
 
     fn hit_mob(&mut self, owner: u16, mid: u16, dmg: f32, grp: &str) {
@@ -495,8 +553,8 @@ impl World {
     fn hurt_npc(&mut self, vid: u16, dmg: f32, by: (u16, bool), grp: &str) {
         let Some(i) = vid.checked_sub(NPC_ID_BASE) else { return };
         let Some(n) = self.npcs.npcs.get_mut(i as usize) else { return };
-        if n.down > 0.0 || n.lod != Lod::Active {
-            return;
+        if n.down > 0.0 || n.lod != Lod::Active || n.role == Role::Vendor {
+            return; // (a vendor cannot be killed: nobody can raid a shop by killing the shopkeeper)
         }
         n.hp = (n.hp - dmg).max(0.0);
         let killed = n.hp <= 0.0;
@@ -522,7 +580,8 @@ impl World {
         self.send_near(at[0], at[2], msg, None);
         if killed {
             self.send_near(at[0], at[2], serde_json::to_string(&ServerMsg::Died { v: "p", i: vid }).unwrap(), None);
-            self.add_corpse(&info, pos);
+            let dropped = self.npcs.drop_all(vid); // everything it carried, its weapon too
+            self.add_corpse(&info, pos, dropped, Some(vid));
         } else {
             self.npcs.train_hurt(vid); // taking blows makes an NPC tougher
         }
@@ -835,6 +894,7 @@ impl World {
         if !gone.is_empty() {
             self.corpses.retain(|c| c.expires > now);
             for cid in gone {
+                self.npcs.remove_grave(cid);
                 self.broadcast_text(serde_json::to_string(&ServerMsg::CorpseGone { cid }).unwrap(), None);
             }
         }
@@ -911,6 +971,7 @@ impl World {
                 self.send_near(x, z, serde_json::to_string(&ServerMsg::Equip { id, w: &w, drawn }).unwrap(), None);
             }
         }
+        self.announce_looted();
         let revived = std::mem::take(&mut self.npcs.revived);
         for id in revived {
             let Some(n) = self.npcs.by_id(id) else { continue };
@@ -1016,8 +1077,8 @@ impl World {
         }
         let avg = if s.ticks > 0 { s.tick_us_sum / s.ticks as u128 } else { 0 };
         println!(
-            "[stats] {} online | npcs {} active/{} near/{} far, {} rest/{} wander/{} travel/{} to hunt/{} fight/{} explore/{} trade | tick avg {} µs max {} µs | out {:.1} KB/s ({:.0} snapshots/s) | dropped {}",
-            self.online, s.lod.active, s.lod.near, s.lod.far, goals[0], goals[1], goals[2], goals[3], goals[4], goals[5], goals[6], avg, s.tick_us_max, s.bytes_out as f64 / 5.0 / 1024.0, s.snapshots_out as f64 / 5.0, s.dropped
+            "[stats] {} online | npcs {} active/{} near/{} far, {} rest/{} wander/{} travel/{} to hunt/{} fight/{} explore/{} trade/{} loot | tick avg {} µs max {} µs | out {:.1} KB/s ({:.0} snapshots/s) | dropped {}",
+            self.online, s.lod.active, s.lod.near, s.lod.far, goals[0], goals[1], goals[2], goals[3], goals[4], goals[5], goals[6], goals[7], avg, s.tick_us_max, s.bytes_out as f64 / 5.0 / 1024.0, s.snapshots_out as f64 / 5.0, s.dropped
         );
     }
 }

@@ -39,6 +39,16 @@ pub enum Lod {
     Active,
 }
 
+/// A dead body's tombstone and what lies on it (see `world::CORPSE_SECS`). Anybody can take the contents once: NPCs that see it, the owner coming
+/// back for its things, players.
+#[derive(Clone, Debug)]
+pub struct Grave {
+    pub cid: u32,
+    pub x: f32,
+    pub z: f32,
+    pub stock: Stock,
+}
+
 /// What an NPC does for a living. Adventurers hunt, explore and sell what they find; traders carry goods between towns for profit; vendors stand at
 /// their post in a town and are what the others trade with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +73,8 @@ pub enum Goal {
     Explore { to: (f32, f32), left: f32, arrived: bool },
     /// Walk to the vendor `vendor` (index into the economy's vendors), trade when there, then linger `left` more seconds.
     Trade { vendor: usize, left: f32, arrived: bool },
+    /// Walk to the tombstone `cid` and take what lies there, then linger `left` more seconds.
+    Loot { cid: u32, left: f32, arrived: bool },
 }
 
 const WANDER_R: f32 = 45.0;
@@ -86,6 +98,10 @@ const TRADE_MARGIN: f32 = 1.2;
 const MAX_CARGO: u32 = 80;
 /// An adventurer carries at most this many goods: past it the cheapest are left behind (what no vendor on its rounds would take).
 const MAX_LOOT: u32 = 40;
+/// An NPC notices a tombstone with something on it from this far, and goes for it.
+const SIGHT: f32 = 60.0;
+/// An NPC goes back for its own things this many times before it gives them up.
+const MAX_RETRIEVALS: u8 = 2;
 /// An NPC hunts at spawn points this close to the place it is at, and no tougher than `hunt_cap(level)`.
 const HUNT_RADIUS: f32 = 2500.0;
 const GROUND_CELL: f32 = 2000.0;
@@ -179,6 +195,9 @@ pub struct Npc {
     /// Seconds hunting since the last drop, since the last meal / restock.
     loot_acc: f32,
     eat_acc: f32,
+    /// The tombstone with its own things on it, and how often it has gone back for them.
+    grave: Option<u32>,
+    retrievals: u8,
 }
 
 /// The persisted part of an NPC (see `store.rs`).
@@ -253,6 +272,9 @@ pub struct Npcs {
     pub weapon_changed: RefCell<Vec<u16>>,
     /// Visits to a counter and the gold that changed hands since the stats were last read.
     trades: std::cell::Cell<(u32, f32)>,
+    /// Tombstones with something on them (NPCs and players), and the ones emptied since the world last looked.
+    graves: RefCell<Vec<Grave>>,
+    pub looted: RefCell<Vec<u32>>,
     /// Walkability of the world: active NPCs path-find on it and stand at its terrain height.
     pub nav: Option<Nav>,
 }
@@ -390,7 +412,7 @@ impl Npcs {
             .collect();
         let race_of: Vec<usize> = places.iter().map(|p| capitals.iter().min_by(|a, b| dist((p.x, p.z), a.1).total_cmp(&dist((p.x, p.z), b.1))).map_or(0, |c| c.0)).collect();
         let n_places = places.len();
-        Npcs { npcs: Vec::new(), places, links, race_of, tick: 0, grounds: Vec::new(), ground_grid: HashMap::new(), promoted: Vec::new(), revived: Vec::new(), time_scale: 1.0, stand_cache: RefCell::new(HashMap::new()), econ: RefCell::new(Economy::default()), place_vendors: vec![Vec::new(); n_places], weapon_table: HashMap::new(), weapon_changed: RefCell::new(Vec::new()), trades: std::cell::Cell::new((0, 0.0)), nav: None }
+        Npcs { npcs: Vec::new(), places, links, race_of, tick: 0, grounds: Vec::new(), ground_grid: HashMap::new(), promoted: Vec::new(), revived: Vec::new(), time_scale: 1.0, stand_cache: RefCell::new(HashMap::new()), econ: RefCell::new(Economy::default()), place_vendors: vec![Vec::new(); n_places], weapon_table: HashMap::new(), weapon_changed: RefCell::new(Vec::new()), trades: std::cell::Cell::new((0, 0.0)), graves: RefCell::new(Vec::new()), looted: RefCell::new(Vec::new()), nav: None }
     }
 
     fn blank(&self, idx: usize, name: String, role: Role, home: usize, pos: (f32, f32), rng: &mut u32) -> Npc {
@@ -440,6 +462,8 @@ impl Npcs {
             trade_dest: None,
             loot_acc: 0.0,
             eat_acc: 0.0,
+            grave: None,
+            retrievals: 0,
         };
         npc.max_hp = npc_hp(npc.skill("Health"));
         npc.hp = npc.max_hp;
@@ -506,6 +530,72 @@ impl Npcs {
         self.econ.borrow_mut()
     }
 
+    /// A body fell at (x, z) carrying `stock`: its tombstone. `owner` (an NPC id) will go back for its things.
+    pub fn add_grave(&mut self, cid: u32, x: f32, z: f32, stock: Stock, owner: Option<u16>) {
+        let has = stock.gold > 0.0 || !stock.items.is_empty();
+        self.graves.borrow_mut().push(Grave { cid, x, z, stock });
+        if let (Some(id), true) = (owner, has) {
+            if let Some(n) = id.checked_sub(NPC_ID_BASE).and_then(|i| self.npcs.get_mut(i as usize)) {
+                n.grave = Some(cid);
+            }
+        }
+    }
+
+    /// The tombstone rots away.
+    pub fn remove_grave(&mut self, cid: u32) {
+        self.graves.borrow_mut().retain(|g| g.cid != cid);
+    }
+
+    /// Where the tombstone `cid` is and what is on it (`None` once it is empty or gone).
+    pub fn grave(&self, cid: u32) -> Option<Grave> {
+        self.graves.borrow().iter().find(|g| g.cid == cid && (g.stock.gold > 0.0 || !g.stock.items.is_empty())).cloned()
+    }
+
+    /// Take everything from the tombstone `cid` (the world checks that a player is close enough).
+    pub fn take_grave(&self, cid: u32) -> Option<Stock> {
+        let mut graves = self.graves.borrow_mut();
+        let g = graves.iter_mut().find(|g| g.cid == cid && (g.stock.gold > 0.0 || !g.stock.items.is_empty()))?;
+        self.looted.borrow_mut().push(cid);
+        Some(std::mem::take(&mut g.stock))
+    }
+
+    /// An NPC (not a vendor) is killed: everything it carries, its weapon too, goes onto its tombstone. It gets up at home with a plain weapon of its class.
+    pub fn drop_all(&mut self, id: u16) -> Stock {
+        let Some(n) = id.checked_sub(NPC_ID_BASE).and_then(|i| self.npcs.get_mut(i as usize)) else { return Stock::default() };
+        let mut dropped = std::mem::take(&mut n.stock);
+        if !n.info.weapon.is_empty() {
+            dropped.add(&std::mem::take(&mut n.info.weapon), 1);
+        }
+        dropped
+    }
+
+    /// The plainest weapon of a class (lowest rank): what an NPC that lost everything picks up.
+    fn starter_weapon(&self, group: &str) -> Option<String> {
+        self.weapon_table.iter().filter(|(_, w)| w.0 == group).min_by(|a, b| a.1 .1.total_cmp(&b.1 .1).then(a.0.cmp(b.0))).map(|(k, _)| k.clone())
+    }
+
+    /// Equip the best weapon of its own class it carries, if it beats the one in hand.
+    fn consider_weapon(&self, n: &mut Npc) {
+        if n.group.is_empty() {
+            return;
+        }
+        let current = self.weapon_table.get(&n.info.weapon).map_or(-1.0, |w| w.1);
+        let best = n.stock.items.keys().filter_map(|k| self.weapon_table.get(k).filter(|w| w.0 == n.group && w.1 > current).map(|w| (w.1, k.clone()))).max_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, k)) = best {
+            n.stock.take(&k, 1);
+            let old = std::mem::replace(&mut n.info.weapon, k);
+            if !old.is_empty() {
+                n.stock.add(&old, 1);
+            }
+            self.weapon_changed.borrow_mut().push(n.id);
+        }
+    }
+
+    /// A tombstone with something on it that `n` can see.
+    fn grave_in_sight(&self, n: &Npc) -> Option<u32> {
+        self.graves.borrow().iter().filter(|g| (g.stock.gold > 0.0 || !g.stock.items.is_empty()) && !n.avoid.contains(&(2, g.cid as usize))).map(|g| (dist((n.pos.x, n.pos.z), (g.x, g.z)), g.cid)).filter(|d| d.0 <= SIGHT).min_by(|a, b| a.0.total_cmp(&b.0)).map(|d| d.1)
+    }
+
     /// The vendors within `radius` metres of (x, z), nearest first: (index into `economy().vendors`, the id of the vendor's NPC, distance). This is what
     /// a player's trading window will be opened from.
     pub fn vendors_near(&self, x: f32, z: f32, radius: f32) -> Vec<(usize, u16, f32)> {
@@ -551,6 +641,16 @@ impl Npcs {
             n.visited.clear();
             if let Some(d) = n.trade_dest.take() {
                 n.goal = Goal::Travel { dest: d };
+                return;
+            }
+        }
+        // its own things lie on a tombstone somewhere: go back for them (a couple of tries, then they are somebody else's)
+        if let Some(cid) = n.grave {
+            if self.grave(cid).is_none() || n.retrievals >= MAX_RETRIEVALS {
+                n.grave = None;
+            } else if n.hp >= n.max_hp * 0.8 && frac(&mut n.rng) < 0.9 {
+                n.retrievals += 1;
+                n.goal = Goal::Loot { cid, left: 2.0, arrived: false };
                 return;
             }
         }
@@ -901,6 +1001,12 @@ impl Npcs {
         n.chase = None;
         n.path.clear();
         n.path_goal = None;
+        if n.role == Role::Adventurer && n.info.weapon.is_empty() && !n.group.is_empty() {
+            if let Some(w) = self.starter_weapon(&n.group) {
+                n.info.weapon = w;
+                self.weapon_changed.borrow_mut().push(n.id);
+            }
+        }
         n.at = n.home;
         let p = &self.places[n.home];
         n.pos.x = p.x;
@@ -996,6 +1102,14 @@ impl Npcs {
     fn advance(&self, n: &mut Npc, mut dt: f32, active: bool) {
         if n.hp < n.max_hp && !matches!(n.goal, Goal::Hunt { fighting: true, .. }) {
             n.hp = (n.hp + n.max_hp * 0.02 * dt).min(n.max_hp);
+        }
+        // a tombstone in sight with something on it: anybody not busy fighting goes for it
+        if n.role != Role::Vendor && n.foe.is_none() && !matches!(n.goal, Goal::Loot { .. } | Goal::Hunt { fighting: true, .. }) {
+            if let Some(cid) = self.grave_in_sight(n) {
+                n.goal = Goal::Loot { cid, left: 2.0, arrived: false };
+                n.path.clear();
+                n.path_goal = None;
+            }
         }
         if active && n.foe.is_some() {
             // in a fight with a player: whatever it was doing waits while it walks up to him (the world sets `chase`)
@@ -1098,6 +1212,50 @@ impl Npcs {
                             self.think(n);
                         } else {
                             n.goal = Goal::Explore { to, left: left - used, arrived: true };
+                        }
+                    }
+                }
+                Goal::Loot { cid, left, arrived } => {
+                    if !arrived {
+                        let Some(g) = self.grave(cid) else {
+                            self.think(n); // somebody else got there first, or it rotted
+                            continue;
+                        };
+                        let target = self.standable((g.x, g.z), active);
+                        let Some((used, reached)) = self.walk(n, target, TRAVEL_SPEED, dt, active) else {
+                            n.avoid.push((2, cid as usize)); // cannot get to it
+                            if n.avoid.len() > 6 {
+                                n.avoid.remove(0);
+                            }
+                            self.think(n);
+                            continue;
+                        };
+                        dt -= used;
+                        if reached {
+                            if let Some(stock) = self.take_grave(cid) {
+                                n.stock.gold += stock.gold;
+                                for (k, q) in stock.items {
+                                    n.stock.add(&k, q);
+                                }
+                                if n.role == Role::Adventurer {
+                                    self.consider_weapon(n);
+                                }
+                                n.retrievals = 0;
+                            }
+                            if n.grave == Some(cid) {
+                                n.grave = None;
+                            }
+                            n.goal = Goal::Loot { cid, left, arrived: true };
+                        }
+                    } else {
+                        // going through the pockets
+                        let used = dt.min(left);
+                        n.pos.speed = 0;
+                        dt -= used;
+                        if left - used <= 1e-3 {
+                            self.think(n);
+                        } else {
+                            n.goal = Goal::Loot { cid, left: left - used, arrived: true };
                         }
                     }
                 }
@@ -1341,8 +1499,8 @@ impl Npcs {
     }
 
     /// How many NPCs are resting / wandering / travelling / walking to a hunt / fighting / exploring (for the stats line).
-    pub fn goal_counts(&self) -> [u32; 7] {
-        let mut c = [0u32; 7];
+    pub fn goal_counts(&self) -> [u32; 8] {
+        let mut c = [0u32; 8];
         for n in &self.npcs {
             c[match n.goal {
                 Goal::Rest { .. } => 0,
@@ -1352,6 +1510,7 @@ impl Npcs {
                 Goal::Hunt { fighting: true, .. } => 4,
                 Goal::Explore { .. } => 5,
                 Goal::Trade { .. } => 6,
+                Goal::Loot { .. } => 7,
             }] += 1;
         }
         c
@@ -1376,7 +1535,7 @@ impl Npcs {
                     Goal::Wander { left, .. } => (1, left, -1),
                     Goal::Travel { dest } => (2, 0.0, dest as i64),
                     Goal::Hunt { ground, left, .. } => (3, left, ground as i64),
-                    Goal::Explore { .. } | Goal::Trade { .. } => (0, 1.0, -1), // an exploration or errand in progress is not saved: it rests a moment and chooses again
+                    Goal::Explore { .. } | Goal::Trade { .. } | Goal::Loot { .. } => (0, 1.0, -1), // an exploration or errand in progress is not saved: it rests a moment and chooses again
                 };
                 NpcState { idx: (n.id - NPC_ID_BASE) as u32, name: n.info.name.clone(), race: n.info.race.clone(), gender: n.info.gender.clone(), gear: n.info.gear.clone(), skills: serde_json::to_string(&n.skills).unwrap_or_default(), weapon: n.info.weapon.clone(), role, gold, stock, home: n.home, at: n.at, goal_kind: kind, goal_a: a, goal_dest: dest, fatigue: n.fatigue, x: n.pos.x, z: n.pos.z, yaw: n.pos.yaw, rng: n.rng }
             })
