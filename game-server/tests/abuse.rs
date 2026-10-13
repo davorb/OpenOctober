@@ -166,7 +166,9 @@ impl Drop for Server {
 
 async fn serve(extra: &[&str]) -> Server {
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let mut args: Vec<String> = ["--port", &port.to_string(), "--spawns", "none", "--weapons", "none", "--npcs", "0", "--db", "none", "--nav", "none", "--items", "none", "--vendors", "none", "--pois", "none", "--capitals", "none"].map(String::from).into();
+    let acc_path = std::env::temp_dir().join(format!("df_abuse_acc_{port}.db")).to_string_lossy().to_string();
+    let _ = std::fs::remove_file(&acc_path);
+    let mut args: Vec<String> = ["--port", &port.to_string(), "--spawns", "none", "--weapons", "none", "--npcs", "0", "--db", "none", "--accounts", &acc_path, "--nav", "none", "--items", "none", "--vendors", "none", "--pois", "none", "--capitals", "none"].map(String::from).into();
     args.extend(extra.iter().map(|s| s.to_string()));
     let child = Command::new(env!("CARGO_BIN_EXE_game-server")).args(args).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
     for _ in 0..100 {
@@ -188,16 +190,24 @@ async fn connect(port: u16, headers: &[(&str, &str)]) -> Result<Ws, tokio_tungst
     tokio_tungstenite::connect_async(req).await.map(|(ws, _)| ws)
 }
 
-const JOIN: &str = r#"{"t":"join","name":"x","race":"hum","gender":"m"}"#;
-
+/// Sign up a new account, log in, enter; true when the world welcomed us.
 async fn joined(ws: &mut Ws) -> bool {
-    ws.send(Message::Text(JOIN.into())).await.unwrap();
-    while let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_secs(2), ws.next()).await {
-        if let Message::Text(t) = m {
-            return t.contains("welcome");
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let register = format!(r#"{{"t":"register","username":"abuse{n}","email":"a{n}@b.cd","password":"correct horse","name":"Abuse {n}","race":"hum","gender":"m"}}"#);
+    let login = format!(r#"{{"t":"login","username":"abuse{n}","password":"correct horse"}}"#);
+    for (send, wait) in [(register, "registered"), (login, "\"auth\""), (r#"{"t":"enter"}"#.to_string(), "welcome")] {
+        ws.send(Message::Text(send)).await.unwrap();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
+                Ok(Some(Ok(Message::Text(t)))) if t.contains(wait) => break,
+                Ok(Some(Ok(Message::Text(t)))) if t.contains("autherr") || t.contains("error") => return false,
+                Ok(Some(Ok(_))) => {}
+                _ => return false,
+            }
         }
     }
-    false
+    true
 }
 
 #[tokio::test]

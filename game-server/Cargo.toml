@@ -11,6 +11,13 @@ futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
+argon2 = "0.5"
 
 [profile.release]
+opt-level = 3
+
+# argon2 is far too slow unoptimised: keep password hashing fast in debug builds / tests
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
 opt-level = 3

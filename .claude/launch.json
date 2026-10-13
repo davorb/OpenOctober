@@ -37,6 +37,8 @@
         "game-server/data/nav",
         "--db",
         "none",
+        "--accounts",
+        "game-server/accounts.db",
         "--items",
         "game-viewer/data/items.json",
         "--vendors",

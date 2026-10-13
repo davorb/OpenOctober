@@ -2,93 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Darkfall — Game Viewer</title>
+<title>Darkfall</title>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<style>
-  :root { color-scheme: dark; --gold:#d9b86a; --ink:#e9e2d0; }
-  html,body { margin:0; height:100%; background:#05070a; overflow:hidden; font:13px/1.4 "Palatino Linotype",Palatino,Georgia,serif; color:var(--ink); }
-  canvas#view { position:fixed; inset:0; width:100%; height:100%; display:block; }
-  #hud { position:fixed; left:16px; bottom:14px; text-shadow:0 1px 3px #000, 0 0 8px #000; pointer-events:none; opacity:.0; transition:opacity .6s; }
-  body.playing #hud { opacity:1; }
-  #place { font-size:26px; letter-spacing:.06em; color:var(--gold); }
-  #sub { opacity:.85; font-size:13px; letter-spacing:.04em; }
-  #stats { position:fixed; right:14px; top:10px; text-align:right; font:11px/1.5 ui-monospace,Menlo,monospace; opacity:.7; text-shadow:0 1px 2px #000; pointer-events:none; white-space:pre; }
-  #track { position:fixed; right:16px; bottom:14px; text-align:right; font-style:italic; opacity:0; transition:opacity 1.2s; text-shadow:0 1px 3px #000; pointer-events:none; }
-  #track.on { opacity:.9; }
-  #banner { position:fixed; top:16%; left:0; right:0; text-align:center; font-size:40px; letter-spacing:.14em; color:var(--gold); text-shadow:0 2px 12px #000; opacity:0; transition:opacity 1.4s; pointer-events:none; }
-  #banner.on { opacity:1; }
-  #cross { position:fixed; left:50%; top:50%; width:4px; height:4px; margin:-2px; border-radius:50%; background:#fff6; pointer-events:none; opacity:0; }
-  body.playing #cross { opacity:1; }
-  #intro { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:18px; background:radial-gradient(ellipse at center,#14100aee,#030304f4); cursor:pointer; transition:opacity .7s; text-align:center; }
-  #intro.hide { opacity:0; pointer-events:none; }
-  #intro h1 { margin:0; font-weight:400; font-size:54px; letter-spacing:.3em; color:var(--gold); text-indent:.3em; }
-  #intro .btn { border:1px solid var(--gold); padding:10px 34px; letter-spacing:.2em; color:var(--gold); }
-  #intro .keys { opacity:.7; max-width:560px; line-height:1.8; }
-  #intro .keys b { color:var(--gold); font-weight:400; border:1px solid #d9b86a55; border-radius:3px; padding:0 6px; margin:0 2px; }
-  #spawns { display:flex; flex-wrap:wrap; justify-content:center; gap:8px; max-width:640px; }
-  #spawns .sp { border:1px solid #d9b86a55; padding:6px 14px; cursor:pointer; background:#0006; text-align:center; line-height:1.3; }
-  #spawns .sp small { display:block; opacity:.6; letter-spacing:.05em; }
-  #spawns .sp:hover { border-color:var(--gold); }
-  #spawns .sp.on { border-color:var(--gold); background:#d9b86a22; color:var(--gold); }
-  #load { opacity:.7; letter-spacing:.1em; }
-  #loadbar { width:260px; height:4px; margin:10px auto 18px; border:1px solid var(--gold); border-radius:2px; overflow:hidden; }
-  #loadbar i { display:block; height:100%; width:0; background:var(--gold); transition:width .25s; }
-  #intro .btn.disabled { opacity:.35; filter:grayscale(1); cursor:not-allowed; pointer-events:none; }
-  #cfg { position:fixed; right:14px; top:64px; width:250px; padding:12px 14px; background:#0b0d10d8; border:1px solid #d9b86a55; display:none; font:12px/1.5 ui-monospace,Menlo,monospace; }
-  #cfg.on { display:block; }
-  #cfg label { display:flex; justify-content:space-between; margin-top:8px; } #cfg input[type=range] { width:100%; accent-color:#d9b86a; } #cfg select { background:#14181d; color:inherit; border:1px solid #d9b86a55; }
-  #cfgbtn { position:fixed; right:14px; bottom:48px; padding:3px 10px; border:1px solid #d9b86a77; color:var(--gold); cursor:pointer; opacity:0; background:#0008; }
-  body.playing #cfgbtn { opacity:.8; }
-  #modebtn { position:fixed; right:14px; bottom:76px; padding:3px 10px; border:1px solid #d9b86a77; color:var(--gold); cursor:pointer; opacity:0; background:#0008; }
-  body.playing #modebtn { opacity:.8; }
-  #intro .modes { border:1px solid #d9b86a44; padding:10px 18px; background:#0006; }
-  #help { position:fixed; left:16px; top:12px; opacity:.0; transition:opacity .4s; text-shadow:0 1px 3px #000; pointer-events:none; line-height:1.7; }
-  #help.on { opacity:.85; }
-  #help b { color:var(--gold); font-weight:400; }
-  #mp { max-width:min(720px,92vw); box-sizing:border-box; display:flex; gap:18px; align-items:center; border:1px solid #d9b86a44; padding:12px 18px; background:#0006; cursor:default; text-align:left; }
-  #mp canvas { border:1px solid #d9b86a33; background:radial-gradient(ellipse at 50% 70%,#3a2e1c88,#0000 70%); }
-  #mp .f { display:flex; flex-direction:column; gap:6px; flex:1; min-width:0; }
-  #mp .t { color:var(--gold); letter-spacing:.18em; font-size:11px; margin-top:4px; }
-  #mp input { background:#0b0d10; color:var(--ink); border:1px solid #d9b86a77; padding:6px 10px; font:inherit; font-size:15px; outline:none; }
-  #mp input:focus { border-color:var(--gold); }
-  #mp .opts { display:flex; flex-wrap:wrap; gap:5px; }
-  #mp .o { border:1px solid #d9b86a55; padding:3px 11px; cursor:pointer; background:#0006; }
-  #mp .o:hover { border-color:var(--gold); } #mp .o.on { border-color:var(--gold); background:#d9b86a22; color:var(--gold); }
-  #mpnet { font-size:12px; opacity:.75; letter-spacing:.04em; } #mpnet.up { color:#9fd68a; opacity:1; }
-  #radar { position:fixed; left:14px; top:14px; width:140px; height:140px; opacity:0; transition:opacity .6s; pointer-events:none; }
-  body.playing #radar { opacity:.9; }
-  #net { position:fixed; left:14px; top:160px; font:11px ui-monospace,Menlo,monospace; opacity:0; text-shadow:0 1px 2px #000; }
-  body.playing #net { opacity:.8; } #net.up { color:#9fd68a; }
-  #chat { position:fixed; left:16px; bottom:74px; width:min(460px,46vw); opacity:0; transition:opacity .4s; pointer-events:none; text-shadow:0 1px 3px #000, 0 0 6px #000; }
-  body.playing #chat { opacity:1; }
-  #chatlog { max-height:200px; overflow:hidden; display:flex; flex-direction:column; justify-content:flex-end; }
-  #chat .l { padding:1px 0; transition:opacity 1.5s; word-break:break-word; } #chat .l b { color:var(--gold); font-weight:600; } #chat .l b.me { color:#9fd68a; } #chat .l.sys { opacity:.7; font-style:italic; }
-  #chat:not(.typing) .l.old { opacity:0; }
-  #chatin { display:none; width:100%; box-sizing:border-box; margin-top:4px; background:#0b0d10dd; color:var(--ink); border:1px solid var(--gold); padding:6px 10px; font:inherit; outline:none; pointer-events:auto; }
-  #chat.typing #chatin { display:block; }
-  #plist { position:fixed; left:50%; top:90px; transform:translateX(-50%); width:340px; max-height:60vh; overflow:auto; background:#0b0d10e6; border:1px solid #d9b86a77; padding:10px 14px; display:none; }
-  #plist.on { display:block; } #plist b { color:var(--gold); letter-spacing:.14em; font-weight:400; }
-  #plist .r { display:flex; gap:8px; align-items:baseline; padding:2px 0; border-top:1px solid #ffffff10; } #plist .r span { flex:1; } #plist small { opacity:.55; } #plist i { opacity:.8; min-width:80px; text-align:right; font-style:normal; font-family:ui-monospace,Menlo,monospace; font-size:11px; }
-  #plist .r.me span { color:#9fd68a; } #plist .n { opacity:.5; font-size:11px; margin-top:6px; }
-  /* touch devices: on-screen controls (js/touch.js) */
-  body.touch #modebtn, body.touch #cfgbtn, body.touch #help, body.touch #intro .keys, body.touch #cross { display:none; }
-  body.touch #stats { top:calc(10px + env(safe-area-inset-top)); right:calc(14px + env(safe-area-inset-right)); font-size:10px; }
-  body.touch #chat { bottom:calc(14px + env(safe-area-inset-bottom)); width:min(380px,36vw); left:calc(16px + env(safe-area-inset-left)); }
-  body.touch #hud { left:50%; transform:translateX(-50%); text-align:center; bottom:calc(8px + env(safe-area-inset-bottom)); }
-  body.touch #track { display:none; }
-  body.touch #cfg { top:calc(100px + env(safe-area-inset-top)); max-height:60vh; overflow:auto; }
-  #touch { position:fixed; inset:0; pointer-events:none; z-index:5; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; opacity:0; transition:opacity .6s; }
-  body.playing #touch { opacity:1; }
-  #touch .tb { position:absolute; pointer-events:auto; touch-action:none; min-width:48px; height:48px; padding:0 10px; box-sizing:border-box; display:flex; align-items:center; justify-content:center; border-radius:24px; border:1px solid #d9b86a99; background:#0b0d10aa; color:var(--gold); font-size:13px; letter-spacing:.05em; -webkit-tap-highlight-color:transparent; }
-  #touch .tb.big { width:72px; height:72px; border-radius:50%; font-size:24px; }
-  #touch .tb.sm { min-width:44px; width:44px; height:44px; padding:0; font-size:20px; }
-  #touch .tb.on { background:#d9b86a55; color:#fff; }
-  #touch .fly { display:none; } body:not(.walk) #touch .fly { display:flex; }
-  #tstick { display:none; position:absolute; width:124px; height:124px; border-radius:50%; border:2px solid #d9b86a88; background:#0b0d1066; pointer-events:none; }
-  #tstick i { position:absolute; left:37px; top:37px; width:50px; height:50px; border-radius:50%; background:#d9b86acc; }
-</style>
+<link rel="stylesheet" href="/css/game.css">
+<link rel="stylesheet" href="/css/login.css">
 </head>
-<body>
+<body data-mode="player">
 <canvas id="view"></canvas>
 <div id="cross"></div>
 <div id="banner"></div>
@@ -105,16 +24,13 @@
 <div id="cfg"></div>
 <div id="intro">
   <h1>DARKFALL</h1>
-  <div id="load">Reading the world…</div>
-  <div id="loadbar"><i></i></div>
-  <div id="mp"></div>
-  <div id="spawns"></div>
-  <div class="btn disabled" id="enter">ENTER THE WORLD</div>
-  <div class="keys modes"><div style="color:var(--gold);letter-spacing:.15em;margin-bottom:4px">TWO WAYS TO EXPLORE</div><b>G</b> toggles <b>Fly</b> (free camera, <b>Shift</b> = fast) and <b>Walk</b> (gravity, collision, <b>Space</b> jumps, <b>Shift</b> sprints, <b>Ctrl</b> walks slowly). Press it any time — or click the mode button on screen.</div>
-  <div class="keys"><b>W</b><b>A</b><b>S</b><b>D</b> fly &nbsp; <b>Shift</b> faster &nbsp; <b>Space</b>/<b>E</b> up &nbsp; <b>C</b>/<b>Q</b> down &nbsp; mouse to look<br>
-  <b>Enter</b> chat &nbsp; <b>Tab</b> players &nbsp; <b>Wheel</b> speed &nbsp; <b>T</b> time of day &nbsp; <b>[</b> <b>]</b> scrub time &nbsp; <b>M</b> music &nbsp; <b>L</b> landmarks &nbsp; <b>H</b> help &nbsp; <b>Esc</b> release mouse</div>
+  <div id="auth"></div>
+  <div id="loading"><div id="load">Downloading game data…</div><div id="loadbar"><i></i></div></div>
+  <div class="keys"><b>W</b><b>A</b><b>S</b><b>D</b> move &nbsp; <b>Shift</b> sprint &nbsp; <b>Space</b> jump &nbsp; <b>Ctrl</b> walk &nbsp; <b>C</b> crouch &nbsp; mouse to look<br>
+  <b>Enter</b> chat &nbsp; <b>Tab</b> players &nbsp; <b>M</b> music &nbsp; <b>H</b> help &nbsp; <b>Esc</b> release mouse</div>
 </div>
 <script type="importmap">{"imports":{"three":"/vendor/three/build/three.module.js","three/addons/":"/vendor/three/examples/jsm/"}}</script>
+<script type="module" src="/js/login.js"></script>
 <script type="module" src="/js/main.js"></script>
 </body>
 </html>

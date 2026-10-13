@@ -1,7 +1,7 @@
 # Darkfall game-server
 
 Multiplayer relay for the [game-viewer](../game-viewer): players pick a race/gender model, see each other move around the world and chat.
-A technology demonstrator — no authentication, no anti-cheat, the server trusts whatever positions clients report.
+A technology demonstrator — accounts and log-in, but little anti-cheat: the server trusts positions clients report within the limits below.
 
 ```
 cd game-server
@@ -10,7 +10,7 @@ cargo run --release -- --port 1338 --radius 900 --max-players 256 --tick-hz 15
 cargo run --release -- --spawns none     # no mobs (default: ../game-viewer/data/mobspawns.json)
 cargo run --release --bin bots -- ws://127.0.0.1:1338 128      # load test: 128 wandering bots with chat (args: url count centre-x centre-z spread)
 ```
-Then `node ../game-viewer/serve.js`, open http://localhost:1337/, pick a character and enter. The viewer connects to `ws://<page host>:1338`
+Then `node ../game-viewer/serve.js`, open http://localhost:1337/, sign up and enter (`/admin.html` for the free-fly explorer, administrators only). The viewer connects to `ws://<page host>:1338`
 (override with `?server=ws://host:port`); `?name=&race=&gender=` preselect the character. Without a server the viewer still works offline and keeps retrying.
 
 ## Design
@@ -58,6 +58,14 @@ Not yet: chat replies, bows and spells for NPCs, NPCs fighting each other, tree 
 ~0.5 ms average / ~1.9 ms max per 66 ms tick, ~37 KB/s down per client (4.7 MB/s total out), no dropped snapshots. Cost grows with players x neighbours, so
 the interest radius is what keeps it flat when players spread out.
 
+## Accounts
+`src/accounts.rs`, SQLite at `--accounts accounts.db` (separate from the NPC `--db`, so `--db none` keeps accounts). Username + email + password (argon2) and **one character per account** (name, race, gender, armour), made at sign-up.
+* **Handshake** (JSON frames, nothing else is understood before it): `register {username,email,password,name,race,gender,gear}` -> `registered` | `autherr {msg}`; `login {username,password}` -> `auth {username,admin,name,race,gender,gear,pos:[x,y,z,yaw],capital:[...],fresh}` | `autherr`; then `enter {admin?}` once the client has loaded the world around `pos` -> the usual `welcome`. The socket is opened when the log-in page loads, so sign-up, log-in and asset download overlap.
+* **Spawn:** where the character was last saved (every 30 s and on disconnect; a dead one is saved at its capital), a new one at the capital of its race: the bindstone's position moved to open ground nearby (`--nav`) facing the stone. The server puts the player there (`Cmd::Place`); the movement limit measures from it.
+* **One session per account:** a second login kicks the first and waits (5 s at most) for it to be saved.
+* **Admins:** `game-server --accounts accounts.db --make-admin USERNAME`. Only they may `enter {admin:true}` (free-fly session: unlimited movement, position not saved); everybody else has `FLAG_FLY` stripped from their positions, so only admins fly.
+* **Limits:** 5 wrong passwords lock a username for a minute; 20 sign-up / log-in attempts per minute per address (not the local machine); 10 refused attempts drop the connection; a wrong username and a wrong password get the same answer. Passwords travel in clear text over `ws://`: put TLS in front.
+
 ## Abuse limits
 Connections from the local machine (127.0.0.1 / ::1) skip the per-IP limits and the movement limit, so development is unaffected. Behind a reverse proxy on the same machine the real address is taken from the last entry of `X-Forwarded-For` (only a loopback peer is believed).
 * **Per IP:** `--max-per-ip 4` open connections and `--conns-per-min 30` attempts (0 = no limit); refused during the handshake with HTTP 429. The websocket handshake must finish within 10 s.
@@ -68,4 +76,4 @@ Connections from the local machine (127.0.0.1 / ::1) skip the per-IP limits and 
 * **Shots:** `from`, `dir` and `power` must be finite and sane.
 
 ## Not done (on purpose)
-No player persistence (only NPCs are saved), no accounts, no collision-aware movement validation (speed only), no delta/quantised snapshots (20 bytes per entity is plenty at this scale), no TLS (put a proxy in front for `wss://`).
+No email verification or password reset (an administrator resets one with `--set-password USER:NEWPASSWORD`), no character slots (one per account), no collision-aware movement validation (speed only), no delta/quantised snapshots (20 bytes per entity is plenty at this scale), no TLS (put a proxy in front for `wss://`).

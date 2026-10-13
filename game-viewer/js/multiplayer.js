@@ -1,9 +1,10 @@
 // Multiplayer client for game-server (see ../../game-server/src/proto.rs for the wire format).
-//   - model picker on the intro screen (race x gender, live rotating preview)
+//   - takes over the socket the log-in screen (login.js) opened, asks the server to enter the world, and logs in again if the connection drops
 //   - sends our position at 15 Hz, renders everybody the server reports (interpolated, walk-cycle driven by their speed)
 //   - name tags + chat bubbles over heads, a chat log (Enter), a radar and an online list (Tab)
 import * as THREE from 'three';
-import { AvatarFactory, RACES, AVATAR_HEIGHT, pose } from './avatars.js';
+import { RACES, AVATAR_HEIGHT, pose } from './avatars.js';
+import { serverUrl, factory } from './net.js';
 import { MobWorld, OP_MOBS } from './mobs.js';
 import { PlayerAnim } from './playeranim.js';
 
@@ -44,12 +45,11 @@ export class Multiplayer {
   /** `q` = URLSearchParams, `getSelf()` -> { x, y(feet), z, yaw, swim, air } in three.js space */
   constructor({ scene, camera, world, getSelf, toast, $ }) {
     Object.assign(this, { scene, camera, world, getSelf, toast, $ });
-    const q = new URLSearchParams(location.search);
-    this.url = q.get('server') || `ws://${location.hostname || 'localhost'}:1338`;
-    this.factory = new AvatarFactory(); this.mobs = new MobWorld({ scene, camera, world });
+    this.url = serverUrl();
+    this.factory = factory; this.mobs = new MobWorld({ scene, camera, world });
     this.players = new Map(); this.shots = new Map(); this.corpses = new Map(); this.me = null; this.ws = null; this.sendAcc = 0; this.last = null; this.speed = 0; this.dotMat = null;
-    let saved = {}; try { saved = JSON.parse(localStorage.getItem('dfProfile') || '{}'); } catch {}
-    this.profile = { name: q.get('name') || saved.name || '', race: q.get('race') || saved.race || 'hum', gender: q.get('gender') || saved.gender || 'm', gear: q.get('gear') ?? saved.gear ?? '' };
+    this.profile = { name: '', race: 'hum', gender: 'm', gear: '' };   // the account's character: set from the server's `auth`
+    this.creds = null; this.admin = false; this.onFatal = null;
     this.dotTex = null; this.started = false; this.typing = false; this.radius = 900;
     // combat messages we send (see weapons.js; the server decides what they hit, game-server/src/world.rs)
     this.weapons = this.fx = this.sfx = null; this.onRespawn = null;
@@ -57,65 +57,29 @@ export class Multiplayer {
       equip: (w, drawn) => this.sendJson({ t: 'equip', w, drawn }), attack: ({ kind, clip }) => this.sendJson({ t: 'attack', kind, clip }), block: on => this.sendJson({ t: 'block', on }),
       bow: what => this.sendJson({ t: 'bow', what }), shoot: ({ dir, from, power, spell }) => this.sendJson({ t: 'shoot', dir, from, power, spell: !!spell }),
     };
-    this.buildPicker(); this.buildChat(); this.buildRadar();
-  }
-
-  // ---------------------------------------------------------------- picker (intro screen)
-  buildPicker() {
-    const $ = this.$, box = $('mp'), P = this.profile;
-    box.innerHTML = `<canvas id="mpprev" width="190" height="262"></canvas><div class="f"><div class="t">YOUR CHARACTER</div>
-      <input id="mpname" maxlength="16" placeholder="Name" spellcheck="false" autocomplete="off"><div class="t">RACE</div><div id="mprace" class="opts"></div>
-      <div class="t">BODY</div><div id="mpgender" class="opts"></div><div class="t">ARMOUR</div><div id="mpgear" class="opts"></div><div id="mpstat"></div></div>`;
-    box.addEventListener('click', e => e.stopPropagation());
-    box.addEventListener('keydown', e => e.stopPropagation());
-    const name = $('mpname'); name.value = P.name; name.addEventListener('input', () => { P.name = name.value; this.saveProfile(); });
-    const opts = (id, list, key) => { const c = $(id); c.innerHTML = ''; list.forEach(([v, label]) => { const b = el('div', 'o' + (P[key] === v ? ' on' : ''), label); b.addEventListener('click', () => { P[key] = v; [...c.children].forEach(x => x.classList.toggle('on', x === b)); this.saveProfile(); if (key !== 'gear') this.gearRow(); this.refreshPreview(); }); c.appendChild(b); }); };
-    this.opts = opts;
-    opts('mprace', RACES.map(r => [r.id, r.name]), 'race'); opts('mpgender', [['m', 'Male'], ['f', 'Female']], 'gender'); this.gearRow();
-    // live preview in its own small renderer
-    const cv = $('mpprev'); this.pr = new THREE.WebGLRenderer({ canvas: cv, antialias: true, alpha: true }); this.pr.setPixelRatio(Math.min(devicePixelRatio, 2)); this.pr.setSize(190, 262, false);
-    cv.style.width = '190px'; cv.style.height = '262px'; this.pr.outputColorSpace = THREE.SRGBColorSpace;
-    this.ps = new THREE.Scene(); this.pc = new THREE.PerspectiveCamera(28, 190 / 262, 0.5, 50); this.pc.position.set(0, AVATAR_HEIGHT * 0.52, 7.4);
-    this.ps.add(new THREE.HemisphereLight(0xfff2dc, 0x6a5a48, 3.2)); const d = new THREE.DirectionalLight(0xffe2b0, 3.2); d.position.set(2, 4, 6); this.ps.add(d);
-    this.pav = null; this.previewLoop(); this.refreshPreview();
-  }
-  /** armour choices depend on race/gender (the game data defines which sets exist for each) */
-  async gearRow() {
-    const P = this.profile, list = await this.factory.gearFor(P.race, P.gender);
-    if (P.gear && !list.includes(P.gear)) P.gear = '';
-    this.opts('mpgear', [['', 'None'], ...list.map(n => [n, n])], 'gear');
-  }
-  saveProfile() { try { localStorage.setItem('dfProfile', JSON.stringify(this.profile)); } catch {} }
-  async refreshPreview() {
-    const k = (this.pk = (this.pk || 0) + 1), { race, gender } = this.profile;
-    try {
-      const av = await this.factory.build(race, gender, this.profile.gear);
-      if (k !== this.pk) return;
-      if (this.pav) this.ps.remove(this.pav.root);
-      this.pav = av; av.root.position.y = -0.05; this.ps.add(av.root);
-    } catch (e) { console.warn('preview', e); }
-  }
-  previewLoop() {
-    if (this.started) { this.pr.dispose(); return; }
-    requestAnimationFrame(() => this.previewLoop());
-    if (this.pav) { this.pav.root.rotation.y += 0.012; pose(this.pav, 0, 0, false); }
-    this.pr.render(this.ps, this.pc);
+    this.buildChat(); this.buildRadar();
   }
 
   // ---------------------------------------------------------------- network
-  connect() {
-    this.started = true; this.$('mpstat').textContent = '';
-    if (!this.profile.name.trim()) this.profile.name = '';
-    this.open();
+  /** Take over the socket `login.js` logged in on, and ask to be put in the world (answered by `welcome`). `creds` stay in memory to log in again after a drop. */
+  start({ ws, creds, auth, admin }) {
+    this.started = true; this.creds = creds; this.admin = !!admin; this.setProfile(auth);
+    this.attach(ws); ws.send(JSON.stringify({ t: 'enter', admin: this.admin }));
+    this.status('Entering the world…');
   }
-  open() {
-    clearTimeout(this.retry);
-    let ws; try { ws = new WebSocket(this.url); } catch { return this.status('Server address invalid'); }
-    ws.binaryType = 'arraybuffer'; this.ws = ws; this.status('Connecting…');
-    ws.onopen = () => ws.send(JSON.stringify({ t: 'join', name: this.profile.name, race: this.profile.race, gender: this.profile.gender, gear: this.profile.gear }));
+  setProfile(a) { Object.assign(this.profile, { name: a.name, race: a.race, gender: a.gender, gear: a.gear }); }
+  attach(ws) {
+    ws.binaryType = 'arraybuffer'; this.ws = ws;
     ws.onmessage = e => typeof e.data === 'string' ? this.onJson(JSON.parse(e.data)) : this.onBinary(e.data);
     ws.onclose = () => { if (this.ws !== ws) return; this.ws = null; this.dropAll(); if (this.fatal) return; this.status('Offline — retrying…'); this.retry = setTimeout(() => this.open(), 3000); };
     ws.onerror = () => {};
+  }
+  /** A dropped connection: new socket, log in again, enter (the server puts us back where it last saw us). */
+  open() {
+    clearTimeout(this.retry);
+    let ws; try { ws = new WebSocket(this.url); } catch { return this.status('Server address invalid'); }
+    this.attach(ws); this.status('Connecting…');
+    ws.onopen = () => ws.send(JSON.stringify({ t: 'login', ...this.creds }));
   }
   /** Connected players (the server's NPCs share the player roster but are not counted). */
   humans() { let n = 0; for (const p of this.players.values()) if (!p.info.npc) n++; return n; }
@@ -124,7 +88,7 @@ export class Multiplayer {
 
   onJson(m) {
     if (m.t === 'welcome') {
-      this.dropAll(); this.me = m.id; this.radius = m.radius;
+      this.dropAll(); this.me = m.id; this.radius = m.radius; this.onWelcome?.();
       for (const p of m.players) if (p.id !== m.id) this.players.set(p.id, { info: p, states: [], av: null, seen: 0 });
       this.last = null; this.status('online'); if (this.weapons) { this.weapons.setHp(120, 120); this.weapons.selfId = this.me; if (this.weapons.id) this.combat.equip(this.weapons.id, this.weapons.drawn); } this.log(`Connected as <b>${esc(m.players.find(p => p.id === m.id)?.name || '')}</b> — ${m.players.filter(p => !p.npc).length} online. Enter to chat, Tab for the player list.`, 'sys');
     } else if (m.t === 'joined') {
@@ -136,7 +100,8 @@ export class Multiplayer {
       if (p) this.say(p, m.text);
     } else if (m.t === 'mobtypes') { this.mobs.setTypes(m.types);
     } else if (this.weapons && this.onCombat(m)) {
-    } else if (m.t === 'error') { this.fatal = true; this.ws?.close(); this.status(m.msg); }
+    } else if (m.t === 'auth') { this.setProfile(m); this.ws.send(JSON.stringify({ t: 'enter', admin: this.admin })); }   // after a reconnect
+    else if (m.t === 'autherr' || m.t === 'error') { this.fatal = true; this.ws?.close(); this.status(m.msg); this.onFatal?.(m.msg); }
   }
   /** Combat events from the server (game-server/src/proto.rs ServerMsg): other players' equip / swings / shots, blows landing, deaths. true = handled */
   onCombat(m) {

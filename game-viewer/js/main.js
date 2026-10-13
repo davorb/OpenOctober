@@ -17,9 +17,11 @@ import { CombatFx } from './effects.js';
 import { Weapons } from './weapons.js';
 import { SelfAvatar } from './selfavatar.js';
 import { Stamina, STAMINA } from './stamina.js';
+import { loggedIn } from './login.js';
 
 const $ = id => document.getElementById(id);
 const q = new URLSearchParams(location.search);
+const ADMIN = document.body.dataset.mode === 'admin';   // admin.html: free-fly explorer for administrators; index.html: the game (walk only, spawn from the server)
 if (q.get('timer')) window.requestAnimationFrame = cb => setTimeout(() => cb(performance.now()), 33);   // debug: keep rendering while the tab is hidden
 // ---- performance settings (persisted). View distance: fog is relative to it, like the game's FogStart/FogEnd fractions.
 const SHADOWS = { Off: [0, 0], Low: [1024, 120], Medium: [2048, 200], High: [4096, 300] };   // [map size, covered radius m]
@@ -30,6 +32,15 @@ if (!S.grass) S.grass = PRESETS.Medium.grass;
 if (q.get('view')) S.view = +q.get('view'); if (q.get('obj')) S.obj = +q.get('obj');
 let VIEW = S.view;
 const J = u => fetch(u).then(r => r.json());
+// ---- loading progress: game data and models download while the player logs in; the terrain around the spawn once the server has told where that is
+const prog = { json: 0, init: 0, avatar: 0, terrain: 0 };
+let progText = 'Downloading game data…';
+function showProgress() {
+  const f = 0.25 * prog.json + 0.15 * prog.init + 0.1 * prog.avatar + 0.5 * prog.terrain;
+  $('load').textContent = progText;
+  $('loadbar').firstElementChild.style.width = `${Math.round(100 * Math.min(1, f))}%`;
+}
+showProgress();
 
 const renderer = new THREE.WebGLRenderer({ canvas: $('view'), antialias: true, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(devicePixelRatio, S.scale));
@@ -45,7 +56,7 @@ function resize() { renderer.setSize(innerWidth, innerHeight, false); camera.asp
 addEventListener('resize', resize); resize();
 
 const [worldData, musicAreas, tileNames, envData, terrainManifest, props, spawns, vegData, alphaMode, poiData, fullTiles] = await Promise.all(
-  ['world', 'music', 'tiles', 'env', 'terrain_textures', 'props', 'spawns', 'veg', 'alphamode', 'pois', 'fulltiles'].map(n => J(`/data/${n}.json`)));
+  ['world', 'music', 'tiles', 'env', 'terrain_textures', 'props', 'spawns', 'veg', 'alphamode', 'pois', 'fulltiles'].map((n, _, all) => J(`/data/${n}.json`).then(d => { prog.json += 1 / all.length; showProgress(); return d; })));
 
 // ---- lights for ordinary (object) materials; terrain/water do their own lighting from the same uniforms
 const env = new Environment(envData);
@@ -264,10 +275,11 @@ let mode = 'fly';
 $('modebtn').addEventListener('click', () => { toggleMode(); $('view').requestPointerLock?.()?.catch?.(() => {}); });
 function setModeLabel() { touch.setMode(mode); $('modebtn').textContent = mode === 'walk' ? 'Mode: Walk (G) — click to fly' : 'Mode: Fly (G) — click to walk'; }
 function toggleMode() {
+  if (!ADMIN && mode === 'walk') return;   // free flight is for administrators
   if (mode === 'fly') {
     mode = 'walk'; player.pos.set(camera.position.x, camera.position.y - player.eye, camera.position.z); player.vy = 0; vel.set(0, 0, 0);
     camera.near = 0.3; camera.updateProjectionMatrix();     // fly mode's 1.5 m near plane clips the hill ahead when walking up steep slopes
-    toast('Walking — G to fly'); setModeLabel();
+    if (ADMIN) toast('Walking — G to fly'); setModeLabel();
   } else { mode = 'fly'; vel.set(0, 0, 0); camera.near = 1.5; camera.updateProjectionMatrix(); toast('Flying — G to walk'); setModeLabel(); }
 }
 function hud(t, gh) {
@@ -289,22 +301,36 @@ window.dbg.mp = mp;
 const sfx = new Sfx(), fx = new CombatFx({ scene, world, sfx, factory: mp.factory, data: await J('/data/combatfx.json') });
 weapons = new Weapons({ camera, post, world, factory: mp.factory, sfx, fx, net: mp.combat, toast, $, light: { sun: sunL, hemi }, stamina });
 const selfAv = new SelfAvatar({ scene, factory: mp.factory, profile: () => mp.profile }); weapons.self = selfAv;
-await weapons.init(); mp.bindCombat(weapons, fx, sfx); mp.onRespawn = () => { stamina.reset(); pickSpawn(curSpawn); toast('You got up again'); }; weapons.resize(camera.aspect); Object.assign(window.dbg, { weapons, fx, sfx });
-let ready = false, started = false;
+await weapons.init(); mp.bindCombat(weapons, fx, sfx); weapons.resize(camera.aspect); Object.assign(window.dbg, { weapons, fx, sfx });
+prog.init = 1; progText = 'Game data ready'; showProgress();
+let ready = false, started = false, home = null, session = null;   // home: where the server puts our character (wire coordinates x, y(feet), z, yaw)
 let bootTimer = 0;
 function bootProgress() {
   clearTimeout(bootTimer);
   world.update(0.25, camera); env.update(0, VIEW);
   const near = [...world.tiles.values()].filter(t => t.hasTerrain && t.dist < 1500);
   const done = near.filter(t => t.tState === 2).length;
-  $('load').textContent = `Reading the world… ${done}/${near.length || 1}`;
-  $('loadbar').firstElementChild.style.width = `${Math.round(100 * done / (near.length || 1))}%`;
-  if (!ready && (done >= near.length || performance.now() > 30000)) { ready = true; $('load').textContent = 'World ready'; $('loadbar').firstElementChild.style.width = '100%'; $('enter').classList.remove('disabled'); }
-  else if (!ready) bootTimer = setTimeout(bootProgress, 250);
+  prog.terrain = done / (near.length || 1); progText = `Reading the world… ${done}/${near.length || 1}`; showProgress();
+  if (!ready && prog.avatar && (done >= near.length || performance.now() > 30000)) {
+    ready = true; prog.terrain = 1; progText = 'World ready'; showProgress();
+    if (ADMIN) $('enter').classList.remove('disabled'); else begin();
+  } else if (!ready) bootTimer = setTimeout(bootProgress, 250);
 }
-bootProgress();
+/** put our character at `p` (wire coordinates: x, feet y, z, yaw) */
+function placeAt(p) {
+  camera.position.set(p[0], p[1] + player.eye, p[2]); player.pos.set(p[0], p[1], p[2]); player.vy = 0; vel.set(0, 0, 0);
+}
 
-// ---- spawn picker: the six racial capitals (bindstones) plus the default start; picking one moves the camera and re-preloads
+// ---- log in first (login.js; the data above has been downloading meanwhile), then load the world around where the server puts us
+session = await loggedIn;
+mp.setProfile(session.auth);
+home = session.auth.pos;
+$('auth').hidden = true;
+mp.onFatal = msg => { progText = msg; showProgress(); $('loadbar').style.borderColor = '#e08a7a'; };
+mp.factory.build(mp.profile.race, mp.profile.gender, mp.profile.gear).catch(() => {}).then(() => { prog.avatar = 1; });
+mp.onRespawn = () => { stamina.reset(); if (ADMIN) pickSpawn(curSpawn); else placeAt(session.auth.capital); toast('You got up again'); };
+
+// ---- admin only: spawn picker (the six racial capitals plus the default start); picking one moves the camera and re-preloads
 const spawnBox = $('spawns');
 const spawnList = [{ name: 'World start', race: 'Default', x: start.x, y: start.y, z: -start.z }, ...spawns];
 let curSpawn = 0;
@@ -317,23 +343,38 @@ function pickSpawn(i) {
   ready = false; $('enter').classList.add('disabled');
   bootProgress();
 }
-spawnList.forEach((sp, i) => {
-  const el = document.createElement('div'); el.className = 'sp';
-  el.innerHTML = `${sp.name}<small>${sp.race === 'Default' ? 'free-fly start' : sp.race + ' capital'}</small>`;
-  el.addEventListener('click', e => { e.stopPropagation(); pickSpawn(i); });
-  spawnBox.appendChild(el);
-});
-const pre = q.get('spawn') && spawnList.findIndex(s => s.name.toLowerCase() === q.get('spawn').toLowerCase() || s.race.toLowerCase() === q.get('spawn').toLowerCase());
-if (pre > 0) pickSpawn(pre); else if (!q.get('x')) spawnBox.children[0].classList.add('on');
+if (ADMIN) {
+  spawnBox.hidden = false; $('enter').hidden = false;
+  spawnList.forEach((sp, i) => {
+    const el = document.createElement('div'); el.className = 'sp';
+    el.innerHTML = `${sp.name}<small>${sp.race === 'Default' ? 'free-fly start' : sp.race + ' capital'}</small>`;
+    el.addEventListener('click', e => { e.stopPropagation(); pickSpawn(i); });
+    spawnBox.appendChild(el);
+  });
+  const pre = q.get('spawn') && spawnList.findIndex(s => s.name.toLowerCase() === q.get('spawn').toLowerCase() || s.race.toLowerCase() === q.get('spawn').toLowerCase());
+  if (pre > 0) pickSpawn(pre); else if (!q.get('x')) { spawnBox.children[0].classList.add('on'); bootProgress(); } else bootProgress();
+} else {
+  yaw = home[3] || 0; pitch = -0.1;
+  placeAt(home); bootProgress();
+}
+/** ready: ask the server to put us in the world; its `welcome` is the go-ahead */
 function begin() {
   if (started || !ready) return; started = true;
+  progText = 'Entering the world…'; showProgress();
+  mp.onWelcome = () => { mp.onWelcome = null; play(); };
+  mp.start({ ...session, admin: ADMIN });
+}
+function play() {
+  if (!ADMIN) toggleMode();   // the game is played on foot
   document.body.classList.add('playing'); intro.classList.add('hide');
-  music.enable(); ambience.enable(); sfx.enable(); mp.connect();
+  music.enable(); ambience.enable(); sfx.enable();
   $('view').requestPointerLock?.()?.catch?.(() => {});
   clock.getDelta(); frame();
 }
-intro.addEventListener('click', begin);
-if (q.get('auto')) { const iv = setInterval(() => { if (ready) { clearInterval(iv); begin(); } }, 200); }
+if (ADMIN) {
+  intro.addEventListener('click', begin);
+  if (q.get('auto')) { const iv = setInterval(() => { if (ready) { clearInterval(iv); begin(); } }, 200); }
+}
 
 // ---- settings panel
 function applySettings() {

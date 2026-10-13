@@ -112,7 +112,12 @@ pub struct MobType {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum ClientMsg {
-    Join { name: String, race: String, gender: String, #[serde(default)] gear: String },
+    /// Sign up (answered by `registered` or `autherr`); the character is made here: name, race, gender and armour.
+    Register { username: String, email: String, password: String, name: String, race: String, gender: String, #[serde(default)] gear: String },
+    /// Log in (answered by `auth`, which says where the character will appear, or `autherr`).
+    Login { username: String, password: String },
+    /// Ready to play (the client has loaded the world around the spawn): the server puts the character in the world. `admin`: the free-fly session of an admin account.
+    Enter { #[serde(default)] admin: bool },
     Chat { text: String },
     /// Wield a weapon (or sheathe / draw the one wielded).
     Equip { w: String, #[serde(default)] drawn: bool },

@@ -104,6 +104,10 @@ pub enum Cmd {
     Sell(u16, u16, String, u32),
     /// The connection comes from the local machine (development): exempt from the movement limit.
     Trust(u16),
+    /// Put a player where his account says he is (a login, not a client's claim): the movement limit then measures from here.
+    Place(u16, PosUpdate),
+    /// Where is this player (x, y, z, yaw), and is he dead? `None` before his first position. For saving the character.
+    Where(u16, oneshot::Sender<Option<([f32; 4], bool)>>),
 }
 
 /// A blow whose animation has started and that lands at `due`.
@@ -337,6 +341,19 @@ impl World {
                 if let Some(Some(pl)) = self.players.get_mut(id as usize) {
                     pl.trusted = true;
                 }
+            }
+            Cmd::Place(id, p) => {
+                if let Some(Some(pl)) = self.players.get_mut(id as usize) {
+                    pl.pos = p;
+                    pl.has_pos = true;
+                    pl.free_move = false;
+                    pl.move_budget = 0.0;
+                    pl.last_move = Instant::now();
+                }
+            }
+            Cmd::Where(id, reply) => {
+                let at = self.players.get(id as usize).and_then(|p| p.as_ref()).filter(|p| p.has_pos).map(|p| ([p.pos.x, p.pos.y, p.pos.z, p.pos.yaw], p.down_until.is_some()));
+                let _ = reply.send(at);
             }
             Cmd::Chat(id, text) => self.chat(id, &text),
             Cmd::Leave(id) => self.remove(id),

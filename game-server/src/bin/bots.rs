@@ -63,8 +63,23 @@ async fn bot(i: usize, url: String, (cx, cz, spread): (f32, f32, f32), net: Arc<
     let mut rng = Rng(0x9E3779B97F4A7C15 ^ ((i as u64 + 1) * 0xD1B54A32D192ED03));
     let Ok((ws, _)) = connect_async(url.as_str()).await else { eprintln!("bot {i}: connect failed"); return };
     let (mut tx, mut rx) = ws.split();
-    let join = serde_json::json!({ "t": "join", "name": format!("Bot{i}"), "race": RACES[rng.next() as usize % 6], "gender": GENDERS[rng.next() as usize % 2], "gear": GEAR[rng.next() as usize % GEAR.len()] });
-    if tx.send(Message::Text(join.to_string())).await.is_err() { return }
+    // sign up (an existing account is fine), log in, wait to be told where we are, enter
+    let (user, pw) = (format!("bot{i}"), "botbotbot");
+    let register = serde_json::json!({ "t": "register", "username": user, "email": format!("{user}@bots.invalid"), "password": pw, "name": format!("Bot{i}"),
+        "race": RACES[rng.next() as usize % 6], "gender": GENDERS[rng.next() as usize % 2], "gear": GEAR[rng.next() as usize % GEAR.len()] });
+    if tx.send(Message::Text(register.to_string())).await.is_err() { return }
+    let login = serde_json::json!({ "t": "login", "username": user, "password": pw });
+    let mut sent_login = false;
+    loop {
+        let Some(Ok(Message::Text(t))) = rx.next().await else { return };
+        if t.contains("\"registered\"") || (t.contains("\"autherr\"") && !sent_login) {
+            sent_login = true;
+            if tx.send(Message::Text(login.to_string())).await.is_err() { return }
+        } else if t.contains("\"auth\"") {
+            break;
+        } else if t.contains("\"autherr\"") { eprintln!("bot {i}: {t}"); return }
+    }
+    if tx.send(Message::Text(r#"{"t":"enter"}"#.to_string())).await.is_err() { return }
     net.connected.fetch_add(1, Relaxed);
 
     let spot = |r: &mut Rng| (cx + (r.f() * 2.0 - 1.0) * spread, cz + (r.f() * 2.0 - 1.0) * spread);

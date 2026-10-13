@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod combat;
 pub mod economy;
 pub mod mobs;
