@@ -21,10 +21,10 @@ function textSprite(draw, w, h, order) {
   const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthWrite: false, fog: false }));
   s.renderOrder = order; s.userData.aspect = w / h; return s;
 }
-function nameSprite(name, npc = false) {
+function nameSprite(name, npc = false, role = '') {
   const f = '600 30px Palatino, Georgia, serif', m = document.createElement('canvas').getContext('2d'); m.font = f;
   const w = Math.ceil(m.measureText(name).width) + 24;
-  return textSprite((x, w, h) => { x.font = f; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillStyle = '#0007'; x.beginPath(); x.roundRect(0, 6, w, h - 12, 12); x.fill(); x.fillStyle = npc ? '#a6d9cb' : '#f1dfae'; x.fillText(name, w / 2, h / 2 + 1); }, w, 56, 20);
+  return textSprite((x, w, h) => { x.font = f; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillStyle = '#0007'; x.beginPath(); x.roundRect(0, 6, w, h - 12, 12); x.fill(); x.fillStyle = role ? '#ffd36b' : npc ? '#a6d9cb' : '#f1dfae'; x.fillText(name, w / 2, h / 2 + 1);   // gold: a vendor or a trader }, w, 56, 20);
 }
 function bubbleSprite(text) {
   const f = '26px Palatino, Georgia, serif', m = document.createElement('canvas').getContext('2d'); m.font = f;
@@ -237,7 +237,7 @@ export class Multiplayer {
     try {
       const av = await this.factory.build(p.info.race, p.info.gender, p.info.gear);
       if (!this.players.has(p.info.id)) return;
-      av.tag = nameSprite(p.info.name, p.info.npc); av.dot = dotSprite(); av.pos = new THREE.Vector3(); av.cast = null;
+      av.tag = nameSprite(p.info.name, p.info.npc, p.info.role); av.dot = dotSprite(); av.pos = new THREE.Vector3(); av.cast = null;
       p.av = av; av.attached = false;
       av.anim = await PlayerAnim.create(av).catch(() => null); if (p.info.weapon) await this.wield(p);
     } catch (e) { console.warn('avatar', p.info, e); p.failed = true; } finally { p.building = false; }
@@ -315,7 +315,7 @@ export class Multiplayer {
       const s = p.states[p.states.length - 1]; if (!s || now - p.seen > 1.5 || p.dead) continue;
       const dx = s.x - cam.position.x, dz = s.z - cam.position.z, rx = dx * cs - dz * sn, rz = dx * sn + dz * cs;   // into the camera's frame (up = forward)
       const k = 66 / R, px = 70 + rx * k, py = 70 + rz * k; if (Math.hypot(px - 70, py - 70) > 66) continue;
-      c.fillStyle = p.info.npc ? '#8fd4c0' : '#ffd98a'; c.beginPath(); c.arc(px, py, p.info.npc ? 2 : 2.5, 0, 7); c.fill();
+      c.fillStyle = p.info.role ? '#ffd36b' : p.info.npc ? '#8fd4c0' : '#ffd98a'; c.beginPath(); c.arc(px, py, p.info.npc ? 2 : 2.5, 0, 7); c.fill();
     }
     c.fillStyle = '#d0584a'; this.mobs.each((x, z) => {
       const dx = x - cam.position.x, dz = z - cam.position.z, k = 66 / R, px = 70 + (dx * cs - dz * sn) * k, py = 70 + (dx * sn + dz * cs) * k;

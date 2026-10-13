@@ -84,7 +84,7 @@ fn active_npcs_walk_around_obstacles_and_stand_on_the_ground() {
     // two towns either side of a wall (x = 512 m, z 400..600 m); the player stands at the first
     let nav = Nav::from_tiles(vec![NavTile::flat(0, 0, 233.0, &wall(256, 150, 330))]);
     let places = vec![Place { name: "A".into(), x: 380.0, z: 500.0, town: true }, Place { name: "B".into(), x: 650.0, z: 500.0, town: true }];
-    let mut w = Npcs::build(places, &[(0, (0.0, 0.0))], 3, 4);
+    let mut w = Npcs::build(places, &[(0, (0.0, 0.0))], 12, 4);
     w.nav = Some(nav);
     let nav = w.nav.take().unwrap();
     let mut crossed = false;

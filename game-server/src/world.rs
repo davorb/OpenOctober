@@ -34,6 +34,9 @@ pub struct Config {
     pub npc_seed: u32,
     /// Directory of baked nav tiles (`game-viewer/tools/build_nav.js` writes `game-server/data/nav`); `None` = NPCs ignore terrain and walk straight lines.
     pub nav: Option<String>,
+    /// `game-viewer/data/items.json` and `vendors.json`: the goods and the shopkeepers (from `tools/build_items.js` / `build_vendors.js`); without both there is no trade.
+    pub items: Option<String>,
+    pub vendors: Option<String>,
     /// NPC time runs this many times faster than real time (1.0 = normal; for watching NPC life without waiting).
     pub npc_time_scale: f32,
     /// SQLite file the NPCs are saved to and restored from; `None` = they start fresh every time.
@@ -167,10 +170,19 @@ pub async fn run(cfg: Config, mut rx: mpsc::Receiver<Cmd>) {
     };
     println!("{} weapons", weapons.defs.len());
     let npcs = match (cfg.npcs, &cfg.pois, &cfg.capitals) {
-        (n, Some(pois), Some(caps)) if n > 0 => Npcs::load(pois, caps, n, cfg.npc_seed).unwrap_or_else(|e| {
-            eprintln!("no npcs: {e}");
-            Npcs::empty()
-        }),
+        (n, Some(pois), Some(caps)) if n > 0 => {
+            let loaded = match (&cfg.items, &cfg.vendors) {
+                (Some(items), Some(vendors)) => Npcs::load_with_economy(pois, caps, items, vendors, n, cfg.npc_seed).or_else(|e| {
+                    eprintln!("no trade ({e})");
+                    Npcs::load(pois, caps, n, cfg.npc_seed)
+                }),
+                _ => Npcs::load(pois, caps, n, cfg.npc_seed),
+            };
+            loaded.unwrap_or_else(|e| {
+                eprintln!("no npcs: {e}");
+                Npcs::empty()
+            })
+        }
         _ => Npcs::empty(),
     };
     println!("{} npcs in {} places", npcs.npcs.len(), npcs.places.len());
@@ -188,7 +200,7 @@ pub async fn run(cfg: Config, mut rx: mpsc::Receiver<Cmd>) {
         }
     }
     let store = match (&cfg.db, npcs.npcs.is_empty()) {
-        (Some(path), false) => match Store::open(path).and_then(|s| s.load(npcs.places.len()).map(|rows| (s, rows))) {
+        (Some(path), false) => match Store::open(path).and_then(|s| s.load(npcs.places.len(), npcs.vendor_count()).map(|rows| (s, rows))) {
             Ok((s, rows)) => {
                 println!("{path}: restored {} of {} saved npcs", npcs.restore(&rows), rows.len());
                 Some(s)
@@ -268,7 +280,7 @@ impl World {
         if name.is_empty() {
             name = format!("Player{id}");
         }
-        let info = PlayerInfo { id: id as u16, name, race: req.race, gender: req.gender, gear: clean(&req.gear, MAX_GEAR), weapon: String::new(), drawn: false, npc: false };
+        let info = PlayerInfo { id: id as u16, name, race: req.race, gender: req.gender, gear: clean(&req.gear, MAX_GEAR), weapon: String::new(), drawn: false, npc: false, role: String::new() };
         self.players[id] = Some(Player { info, pos: PosUpdate::default(), has_pos: false, tx: req.tx, last_chat: Instant::now() - Duration::from_secs(10), last_sent: 0, last_mobs: 0, dead: false, weapon: String::new(), group: String::new(), drawn: false, blocking: false, hp: PLAYER_HP, down_until: None, next_attack: Instant::now() });
         self.online += 1;
         let _ = req.reply.send(Ok(id as u16));
@@ -450,6 +462,9 @@ impl World {
         if owner >= NPC_ID_BASE {
             let rank = self.mobs.mobs[mid as usize].rank;
             self.npcs.train_hit(owner, rank); // every blow that lands trains the weapon skill
+            if hp <= 0.0 {
+                self.npcs.loot_kill(owner, rank); // and a kill leaves loot
+            }
         }
         let m = &self.mobs.mobs[mid as usize];
         let (at, max) = ([m.pos.x, 0.0, m.pos.z], m.max_hp);
@@ -888,6 +903,14 @@ impl World {
                 self.send_near(x, z, serde_json::to_string(&ServerMsg::Equip { id, w: &w, drawn }).unwrap(), None);
             }
         }
+        let changed: Vec<u16> = std::mem::take(&mut *self.npcs.weapon_changed.borrow_mut());
+        for id in changed {
+            let Some(n) = self.npcs.by_id(id) else { continue };
+            if n.lod == Lod::Active {
+                let (w, drawn, x, z) = (n.info.weapon.clone(), n.info.drawn, n.pos.x, n.pos.z);
+                self.send_near(x, z, serde_json::to_string(&ServerMsg::Equip { id, w: &w, drawn }).unwrap(), None);
+            }
+        }
         let revived = std::mem::take(&mut self.npcs.revived);
         for id in revived {
             let Some(n) = self.npcs.by_id(id) else { continue };
@@ -979,7 +1002,7 @@ impl World {
     /// Write the NPC population to the database (when there is one).
     fn save(&mut self) {
         let Some(store) = self.store.as_mut() else { return };
-        if let Err(e) = store.save(self.npcs.places.len(), &self.npcs.states()) {
+        if let Err(e) = store.save(self.npcs.places.len(), self.npcs.vendor_count(), &self.npcs.states()) {
             eprintln!("npc save failed: {e}");
         }
     }
@@ -987,10 +1010,14 @@ impl World {
     fn report(&mut self) {
         let s = std::mem::take(&mut self.stats);
         let goals = self.npcs.goal_counts();
+        let ((visits, moved), (shelves, carried, cargo)) = self.npcs.trade_stats();
+        if visits > 0 || shelves > 0.0 {
+            println!("[trade] {visits} visits, {moved:.0} gold changed hands | vendors hold {shelves:.0} gold, travellers carry {carried:.0} gold and {cargo} goods");
+        }
         let avg = if s.ticks > 0 { s.tick_us_sum / s.ticks as u128 } else { 0 };
         println!(
-            "[stats] {} online | npcs {} active/{} near/{} far, {} rest/{} wander/{} travel/{} to hunt/{} fight/{} explore | tick avg {} µs max {} µs | out {:.1} KB/s ({:.0} snapshots/s) | dropped {}",
-            self.online, s.lod.active, s.lod.near, s.lod.far, goals[0], goals[1], goals[2], goals[3], goals[4], goals[5], avg, s.tick_us_max, s.bytes_out as f64 / 5.0 / 1024.0, s.snapshots_out as f64 / 5.0, s.dropped
+            "[stats] {} online | npcs {} active/{} near/{} far, {} rest/{} wander/{} travel/{} to hunt/{} fight/{} explore/{} trade | tick avg {} µs max {} µs | out {:.1} KB/s ({:.0} snapshots/s) | dropped {}",
+            self.online, s.lod.active, s.lod.near, s.lod.far, goals[0], goals[1], goals[2], goals[3], goals[4], goals[5], goals[6], avg, s.tick_us_max, s.bytes_out as f64 / 5.0 / 1024.0, s.snapshots_out as f64 / 5.0, s.dropped
         );
     }
 }

@@ -9,11 +9,11 @@ use tokio_tungstenite::tungstenite::Message;
 use game_server::proto::*;
 use game_server::world::{self, Cmd, Config, JoinReq};
 
-const USAGE: &str = "usage: game-server [--port 1338] [--radius 900] [--max-players 256] [--tick-hz 15] [--spawns ../game-viewer/data/mobspawns.json | --spawns none] [--weapons ../game-viewer/data/weapons.json | --weapons none] [--pvp on|off] [--npcs 500] [--pois ../game-viewer/data/pois.json] [--capitals ../game-viewer/data/spawns.json] [--npc-seed 1] [--db npcs.db | --db none] [--nav data/nav | --nav none] [--npc-time-scale 1]";
+const USAGE: &str = "usage: game-server [--port 1338] [--radius 900] [--max-players 256] [--tick-hz 15] [--spawns ../game-viewer/data/mobspawns.json | --spawns none] [--weapons ../game-viewer/data/weapons.json | --weapons none] [--pvp on|off] [--npcs 500] [--pois ../game-viewer/data/pois.json] [--capitals ../game-viewer/data/spawns.json] [--npc-seed 1] [--db npcs.db | --db none] [--nav data/nav | --nav none] [--npc-time-scale 1] [--items ../game-viewer/data/items.json] [--vendors ../game-viewer/data/vendors.json | --items none]";
 
 #[tokio::main]
 async fn main() {
-    let (mut port, mut cfg) = (1338u16, Config { radius: 900.0, max_players: 256, tick_hz: 15, spawns: Some("../game-viewer/data/mobspawns.json".into()), weapons: Some("../game-viewer/data/weapons.json".into()), pvp: true, npcs: 0, pois: Some("../game-viewer/data/pois.json".into()), capitals: Some("../game-viewer/data/spawns.json".into()), npc_seed: 1, db: Some("npcs.db".into()), nav: Some("data/nav".into()), npc_time_scale: 1.0 });
+    let (mut port, mut cfg) = (1338u16, Config { radius: 900.0, max_players: 256, tick_hz: 15, spawns: Some("../game-viewer/data/mobspawns.json".into()), weapons: Some("../game-viewer/data/weapons.json".into()), pvp: true, npcs: 0, pois: Some("../game-viewer/data/pois.json".into()), capitals: Some("../game-viewer/data/spawns.json".into()), npc_seed: 1, db: Some("npcs.db".into()), nav: Some("data/nav".into()), npc_time_scale: 1.0, items: Some("../game-viewer/data/items.json".into()), vendors: Some("../game-viewer/data/vendors.json".into()) });
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let v = args.next().unwrap_or_default();
@@ -31,6 +31,8 @@ async fn main() {
             "--npc-seed" => cfg.npc_seed = v.parse().expect(USAGE),
             "--db" => cfg.db = (v != "none").then_some(v),
             "--nav" => cfg.nav = (v != "none").then_some(v),
+            "--items" => cfg.items = (v != "none").then_some(v),
+            "--vendors" => cfg.vendors = (v != "none").then_some(v),
             "--npc-time-scale" => cfg.npc_time_scale = v.parse().expect(USAGE),
             _ => panic!("{USAGE}"),
         }

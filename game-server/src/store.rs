@@ -26,16 +26,20 @@ impl Store {
         )?;
         // saves from before NPCs carried weapons: add the column (it already exists in newer files, which is the error we ignore)
         let _ = conn.execute("ALTER TABLE npcs ADD COLUMN weapon TEXT NOT NULL DEFAULT ''", []);
+        // ... and before NPCs traded (role, gold, goods)
+        let _ = conn.execute("ALTER TABLE npcs ADD COLUMN role INTEGER NOT NULL DEFAULT 0", []);
+        let _ = conn.execute("ALTER TABLE npcs ADD COLUMN gold REAL NOT NULL DEFAULT 0", []);
+        let _ = conn.execute("ALTER TABLE npcs ADD COLUMN stock TEXT NOT NULL DEFAULT '{}'", []);
         Ok(Store { conn })
     }
 
-    /// The saved NPCs, or none when they were saved against a different number of places.
-    pub fn load(&self, places: usize) -> rusqlite::Result<Vec<NpcState>> {
-        let saved: Option<i64> = self.conn.query_row("SELECT v FROM meta WHERE k = 'places'", [], |r| r.get(0)).ok();
-        if saved != Some(places as i64) {
+    /// The saved NPCs, or none when they were saved against a different number of places or vendors (the vendors come first among the ids).
+    pub fn load(&self, places: usize, vendors: usize) -> rusqlite::Result<Vec<NpcState>> {
+        let meta = |k: &str| -> Option<i64> { self.conn.query_row("SELECT v FROM meta WHERE k = ?1", [k], |r| r.get(0)).ok() };
+        if meta("places") != Some(places as i64) || meta("vendors") != Some(vendors as i64) {
             return Ok(Vec::new());
         }
-        let mut q = self.conn.prepare("SELECT idx, name, race, gender, gear, skills, home, at_place, goal_kind, goal_a, goal_dest, fatigue, x, z, yaw, rng, weapon FROM npcs ORDER BY idx")?;
+        let mut q = self.conn.prepare("SELECT idx, name, race, gender, gear, skills, home, at_place, goal_kind, goal_a, goal_dest, fatigue, x, z, yaw, rng, weapon, role, gold, stock FROM npcs ORDER BY idx")?;
         let rows = q.query_map([], |r| {
             Ok(NpcState {
                 idx: r.get(0)?,
@@ -55,19 +59,23 @@ impl Store {
                 yaw: r.get(14)?,
                 rng: r.get(15)?,
                 weapon: r.get(16)?,
+                role: r.get(17)?,
+                gold: r.get(18)?,
+                stock: r.get(19)?,
             })
         })?;
         rows.collect()
     }
 
-    pub fn save(&mut self, places: usize, states: &[NpcState]) -> rusqlite::Result<()> {
+    pub fn save(&mut self, places: usize, vendors: usize, states: &[NpcState]) -> rusqlite::Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("INSERT OR REPLACE INTO meta (k, v) VALUES ('places', ?1)", params![places as i64])?;
+        tx.execute("INSERT OR REPLACE INTO meta (k, v) VALUES ('vendors', ?1)", params![vendors as i64])?;
         tx.execute("DELETE FROM npcs", [])?;
         {
-            let mut ins = tx.prepare("INSERT INTO npcs (idx, name, race, gender, gear, skills, home, at_place, goal_kind, goal_a, goal_dest, fatigue, x, z, yaw, rng, weapon) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)")?;
+            let mut ins = tx.prepare("INSERT INTO npcs (idx, name, race, gender, gear, skills, home, at_place, goal_kind, goal_a, goal_dest, fatigue, x, z, yaw, rng, weapon, role, gold, stock) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)")?;
             for s in states {
-                ins.execute(params![s.idx, s.name, s.race, s.gender, s.gear, s.skills, s.home as i64, s.at as i64, s.goal_kind, s.goal_a, s.goal_dest, s.fatigue, s.x, s.z, s.yaw, s.rng, s.weapon])?;
+                ins.execute(params![s.idx, s.name, s.race, s.gender, s.gear, s.skills, s.home as i64, s.at as i64, s.goal_kind, s.goal_a, s.goal_dest, s.fatigue, s.x, s.z, s.yaw, s.rng, s.weapon, s.role, s.gold, s.stock])?;
             }
         }
         tx.commit()

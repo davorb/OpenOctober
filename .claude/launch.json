@@ -36,7 +36,11 @@
         "--nav",
         "game-server/data/nav",
         "--db",
-        "none"
+        "none",
+        "--items",
+        "game-viewer/data/items.json",
+        "--vendors",
+        "game-viewer/data/vendors.json"
       ],
       "port": 1399
     },

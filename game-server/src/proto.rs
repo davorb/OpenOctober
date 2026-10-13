@@ -96,6 +96,8 @@ pub struct PlayerInfo {
     pub drawn: bool,
     /// A server-run NPC, not a connected player: clients label it.
     pub npc: bool,
+    /// What an NPC does for a living when it is not an adventurer: "vendor" (stands at a post and trades) or "trader" (carries goods between towns); "" otherwise.
+    pub role: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

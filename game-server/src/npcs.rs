@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::Deserialize;
 
+use crate::economy::{self, Economy, Group, Items, Stock, Vendor, VendorSpot};
 use crate::combat::{is_melee, mob_skill, npc_hp, skill_damage, weapon_skill, Weapons};
 use crate::nav::Nav;
 use crate::proto::{PlayerInfo, PosUpdate, FLAG_NPC, FLAG_SNAP, GENDERS, RACES};
@@ -38,6 +39,15 @@ pub enum Lod {
     Active,
 }
 
+/// What an NPC does for a living. Adventurers hunt, explore and sell what they find; traders carry goods between towns for profit; vendors stand at
+/// their post in a town and are what the others trade with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    Adventurer,
+    Trader,
+    Vendor,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Goal {
     /// Sit in town for this many more seconds.
@@ -51,6 +61,8 @@ pub enum Goal {
     Hunt { ground: usize, left: f32, fighting: bool },
     /// Go and look at `to` (a dungeon entrance, an unvisited stretch of wilderness): walk there, then linger for `left` more seconds.
     Explore { to: (f32, f32), left: f32, arrived: bool },
+    /// Walk to the vendor `vendor` (index into the economy's vendors), trade when there, then linger `left` more seconds.
+    Trade { vendor: usize, left: f32, arrived: bool },
 }
 
 const WANDER_R: f32 = 45.0;
@@ -62,6 +74,18 @@ const EXPLORE_RANGE: (f32, f32) = (400.0, 1600.0);
 const EXPLORE_CELL: f32 = 600.0;
 /// Beyond this far from the place it is at, an NPC mostly heads back before choosing anything else.
 const HOME_RADIUS: f32 = 150.0;
+/// Share of the regular population that are traders.
+const TRADER_SHARE: f32 = 0.08;
+/// An adventurer goes to a vendor when its loot is worth this much, and keeps a few things for itself.
+const SELL_WORTH: f32 = 15.0;
+const KEEP_FOOD: u32 = 3;
+/// A vendor restocks every this many seconds.
+const RESTOCK_EVERY: f32 = 120.0;
+/// A good has to sell for this much more where the trader is going than it costs here before it is worth carrying.
+const TRADE_MARGIN: f32 = 1.2;
+const MAX_CARGO: u32 = 80;
+/// An adventurer carries at most this many goods: past it the cheapest are left behind (what no vendor on its rounds would take).
+const MAX_LOOT: u32 = 40;
 /// An NPC hunts at spawn points this close to the place it is at, and no tougher than `hunt_cap(level)`.
 const HUNT_RADIUS: f32 = 2500.0;
 const GROUND_CELL: f32 = 2000.0;
@@ -143,6 +167,18 @@ pub struct Npc {
     avoid: Vec<(u8, usize)>,
     /// Areas (EXPLORE_CELL squares) it has been to, oldest first.
     explored: Vec<(i32, i32)>,
+    pub role: Role,
+    /// Gold and goods carried (a vendor's own are on its shelves, in the economy).
+    pub stock: Stock,
+    /// For a vendor: its index in the economy.
+    pub vendor: Option<usize>,
+    /// Errands in town: it wants to visit vendors (those it has been to this stay are in `visited`); a trader also remembers where it will go next.
+    trade_due: bool,
+    visited: Vec<usize>,
+    trade_dest: Option<usize>,
+    /// Seconds hunting since the last drop, since the last meal / restock.
+    loot_acc: f32,
+    eat_acc: f32,
 }
 
 /// The persisted part of an NPC (see `store.rs`).
@@ -156,6 +192,10 @@ pub struct NpcState {
     /// The skills as JSON ({"Swords": 12.3, ...}).
     pub skills: String,
     pub weapon: String,
+    /// 0 adventurer, 1 trader, 2 vendor; gold and goods as JSON ({"r_Apple": 3, ...}) - a vendor's are those on its shelves.
+    pub role: u8,
+    pub gold: f32,
+    pub stock: String,
     pub home: usize,
     pub at: usize,
     /// 0 rest, 1 wander, 2 travel, 3 hunt; `goal_a` is the time left, `goal_dest` the place travelled to / the hunting ground (-1 otherwise).
@@ -204,6 +244,15 @@ pub struct Npcs {
     pub time_scale: f32,
     /// `standable` answers by target cell (places and grounds do not move).
     stand_cache: RefCell<HashMap<(i32, i32), Option<(f32, f32)>>>,
+    /// The goods and the vendors; `place_vendors[p]` = the vendors of place `p` (indices into `econ.vendors`).
+    econ: RefCell<Economy>,
+    place_vendors: Vec<Vec<usize>>,
+    /// Weapon id -> (class, rank), for NPCs that shop for a better one.
+    weapon_table: HashMap<String, (String, f32)>,
+    /// NPCs that changed their weapon in the last step (the world tells whoever sees them).
+    pub weapon_changed: RefCell<Vec<u16>>,
+    /// Visits to a counter and the gold that changed hands since the stats were last read.
+    trades: std::cell::Cell<(u32, f32)>,
     /// Walkability of the world: active NPCs path-find on it and stand at its terrain height.
     pub nav: Option<Nav>,
 }
@@ -287,6 +336,12 @@ impl Npcs {
     /// Build the place graph from `pois.json` (towns, dungeons) and `spawns.json` (the racial capitals), then create `count` NPCs.
     /// `seed` makes the population reproducible (a saved world overrides it with the stored state, see `restore`).
     pub fn load(pois: &str, bindstones: &str, count: usize, seed: u32) -> Result<Self, String> {
+        let mut me = Self::load_bare(pois, bindstones)?;
+        me.populate(count, seed);
+        Ok(me)
+    }
+
+    fn load_bare(pois: &str, bindstones: &str) -> Result<Self, String> {
         let pois: Vec<PoiFile> = serde_json::from_str(&std::fs::read_to_string(pois).map_err(|e| format!("{pois}: {e}"))?).map_err(|e| e.to_string())?;
         let binds: Vec<BindFile> = serde_json::from_str(&std::fs::read_to_string(bindstones).map_err(|e| format!("{bindstones}: {e}"))?).map_err(|e| e.to_string())?;
         let mut places: Vec<Place> = binds.iter().map(|b| Place { name: b.name.clone(), x: b.x, z: -b.z, town: true }).collect();
@@ -297,11 +352,35 @@ impl Npcs {
             }
         }
         let capitals: Vec<(usize, (f32, f32))> = binds.iter().filter_map(|b| race_code(&b.race).map(|r| (r, (b.x, -b.z)))).collect();
-        Ok(Self::build(places, &capitals, count, seed))
+        Ok(Self::bare(places, &capitals))
     }
 
     /// Same as `load` from places already in memory (tests): `capitals` are (race index, wire x/z).
     pub fn build(places: Vec<Place>, capitals: &[(usize, (f32, f32))], count: usize, seed: u32) -> Self {
+        let mut me = Self::bare(places, capitals);
+        me.populate(count, seed);
+        me
+    }
+
+    /// `build` with the vendors of an economy first (their ids stay the same however many regular NPCs follow).
+    pub fn build_with_economy(places: Vec<Place>, capitals: &[(usize, (f32, f32))], items: Items, spots: &[VendorSpot], count: usize, seed: u32) -> Self {
+        let mut me = Self::bare(places, capitals);
+        me.add_vendors(items, spots, seed ^ 0x9E37_79B9);
+        me.populate(count, seed);
+        me
+    }
+
+    /// `load` with the economy: `items.json` and `vendors.json`.
+    pub fn load_with_economy(pois: &str, bindstones: &str, items: &str, vendors: &str, count: usize, seed: u32) -> Result<Self, String> {
+        let (items, spots) = (Items::load(items)?, economy::load_vendors(vendors)?);
+        let mut me = Self::load_bare(pois, bindstones)?;
+        me.add_vendors(items, &spots, seed ^ 0x9E37_79B9);
+        me.populate(count, seed);
+        Ok(me)
+    }
+
+    /// The place graph and nothing else.
+    fn bare(places: Vec<Place>, capitals: &[(usize, (f32, f32))]) -> Self {
         let links: Vec<Vec<usize>> = (0..places.len())
             .map(|i| {
                 let mut near: Vec<(f32, usize)> = (0..places.len()).filter(|&j| j != i).map(|j| (dist((places[i].x, places[i].z), (places[j].x, places[j].z)), j)).filter(|d| d.0 <= MAX_HOP).collect();
@@ -310,56 +389,134 @@ impl Npcs {
             })
             .collect();
         let race_of: Vec<usize> = places.iter().map(|p| capitals.iter().min_by(|a, b| dist((p.x, p.z), a.1).total_cmp(&dist((p.x, p.z), b.1))).map_or(0, |c| c.0)).collect();
-        let towns: Vec<usize> = (0..places.len()).filter(|&i| places[i].town).collect();
-        let mut me = Npcs { npcs: Vec::new(), places, links, race_of, tick: 0, grounds: Vec::new(), ground_grid: HashMap::new(), promoted: Vec::new(), revived: Vec::new(), time_scale: 1.0, stand_cache: RefCell::new(HashMap::new()), nav: None };
-        if towns.is_empty() {
-            return me;
-        }
+        let n_places = places.len();
+        Npcs { npcs: Vec::new(), places, links, race_of, tick: 0, grounds: Vec::new(), ground_grid: HashMap::new(), promoted: Vec::new(), revived: Vec::new(), time_scale: 1.0, stand_cache: RefCell::new(HashMap::new()), econ: RefCell::new(Economy::default()), place_vendors: vec![Vec::new(); n_places], weapon_table: HashMap::new(), weapon_changed: RefCell::new(Vec::new()), trades: std::cell::Cell::new((0, 0.0)), nav: None }
+    }
+
+    fn blank(&self, idx: usize, name: String, role: Role, home: usize, pos: (f32, f32), rng: &mut u32) -> Npc {
+        let (race, gender) = (self.race_of[home], xorshift(rng) as usize % 2);
+        let gear = GEAR[xorshift(rng) as usize % GEAR.len()].to_string();
+        let id = NPC_ID_BASE + idx as u16;
+        let role_name = match role {
+            Role::Adventurer => "",
+            Role::Trader => "trader",
+            Role::Vendor => "vendor",
+        };
+        let mut npc = Npc {
+            id,
+            info: PlayerInfo { id, name, race: RACES[race].to_string(), gender: GENDERS[gender].to_string(), gear, weapon: String::new(), drawn: false, npc: true, role: role_name.to_string() },
+            pos: PosUpdate { x: pos.0, y: 0.0, z: pos.1, yaw: frac(rng) * 6.28, speed: 0, flags: FLAG_SNAP | FLAG_NPC },
+            lod: Lod::Far,
+            skills: BTreeMap::from([("Health".to_string(), 10.0 + frac(rng) * 50.0)]),
+            hp: 0.0,
+            max_hp: 0.0,
+            group: String::new(),
+            down: 0.0,
+            next_attack: 0.0,
+            target: None,
+            chase: None,
+            stop: 2.0,
+            no_target: 0.0,
+            foe: None,
+            grudges: Vec::new(),
+            greet: 0.0,
+            start_melee: 5.0 + frac(rng) * frac(rng) * 65.0,
+            home,
+            at: home,
+            goal: Goal::Rest { left: frac(rng) * 30.0 },
+            fatigue: frac(rng) * 0.5,
+            acc: frac(rng) * FAR_EVERY,
+            rng: xorshift(rng) | 1,
+            path: Vec::new(),
+            path_goal: None,
+            good: pos,
+            avoid: Vec::new(),
+            explored: Vec::new(),
+            role,
+            stock: Stock::default(),
+            vendor: None,
+            trade_due: false,
+            visited: Vec::new(),
+            trade_dest: None,
+            loot_acc: 0.0,
+            eat_acc: 0.0,
+        };
+        npc.max_hp = npc_hp(npc.skill("Health"));
+        npc.hp = npc.max_hp;
+        npc
+    }
+
+    /// Put the vendors at their posts. Must come before `populate`. A vendor belongs to the nearest town within 700 m (others are dropped).
+    pub fn add_vendors(&mut self, items: Items, spots: &[VendorSpot], seed: u32) {
         let mut rng = seed | 1;
-        for i in 0..count.min(MAX_NPCS) {
-            let home = towns[xorshift(&mut rng) as usize % towns.len()];
-            let (race, gender) = (me.race_of[home], xorshift(&mut rng) as usize % 2);
-            let name = make_name(&mut rng);
-            let gear = GEAR[xorshift(&mut rng) as usize % GEAR.len()].to_string();
-            let p = &me.places[home];
-            let (x, z) = (p.x + (frac(&mut rng) - 0.5) * 2.0 * WANDER_R, p.z + (frac(&mut rng) - 0.5) * 2.0 * WANDER_R);
-            let mut npc = Npc {
-                id: NPC_ID_BASE + i as u16,
-                info: PlayerInfo { id: NPC_ID_BASE + i as u16, name, race: RACES[race].to_string(), gender: GENDERS[gender].to_string(), gear, weapon: String::new(), drawn: false, npc: true },
-                pos: PosUpdate { x, y: 0.0, z, yaw: frac(&mut rng) * 6.28, speed: 0, flags: FLAG_SNAP | FLAG_NPC },
-                lod: Lod::Far,
-                skills: BTreeMap::from([("Health".to_string(), 10.0 + frac(&mut rng) * 50.0)]),
-                hp: 0.0,
-                max_hp: 0.0,
-                group: String::new(),
-                down: 0.0,
-                next_attack: 0.0,
-                target: None,
-                chase: None,
-                stop: 2.0,
-                no_target: 0.0,
-                foe: None,
-                grudges: Vec::new(),
-                greet: 0.0,
-                start_melee: 5.0 + frac(&mut rng) * frac(&mut rng) * 65.0,
-                home,
-                at: home,
-                goal: Goal::Rest { left: frac(&mut rng) * 30.0 },
-                fatigue: frac(&mut rng) * 0.5,
-                acc: frac(&mut rng) * FAR_EVERY,
-                rng: xorshift(&mut rng) | 1,
-                path: Vec::new(),
-                path_goal: None,
-                good: (x, z),
-                avoid: Vec::new(),
-                explored: Vec::new(),
-            };
-            npc.max_hp = npc_hp(npc.skill("Health"));
-            npc.hp = npc.max_hp;
-            me.think(&mut npc);
-            me.npcs.push(npc);
+        let mut vendors = Vec::new();
+        for s in spots {
+            let near = (0..self.places.len()).filter(|&i| self.places[i].town).map(|i| (dist((self.places[i].x, self.places[i].z), (s.x, s.z)), i)).min_by(|a, b| a.0.total_cmp(&b.0));
+            let Some((d, place)) = near else { continue };
+            if d > 700.0 || self.npcs.len() >= MAX_NPCS {
+                continue;
+            }
+            let vi = vendors.len();
+            let title = format!("{} the {}", s.name, s.kind.title());
+            vendors.push(Vendor::new(title.clone(), s.kind, (s.x, s.z), place, &items, &mut rng));
+            let mut npc = self.blank(self.npcs.len(), title, Role::Vendor, place, (s.x, s.z), &mut rng);
+            npc.vendor = Some(vi);
+            npc.goal = Goal::Rest { left: 30.0 };
+            self.place_vendors[place].push(vi);
+            self.npcs.push(npc);
         }
-        me
+        *self.econ.borrow_mut() = Economy { items, vendors };
+    }
+
+    /// Create `count` regular NPCs (adventurers, and a few traders) living in the towns.
+    pub fn populate(&mut self, count: usize, seed: u32) {
+        let towns: Vec<usize> = (0..self.places.len()).filter(|&i| self.places[i].town).collect();
+        if towns.is_empty() {
+            return;
+        }
+        let has_vendors = !self.econ.borrow().vendors.is_empty();
+        let mut rng = seed | 1;
+        for _ in 0..count {
+            if self.npcs.len() >= MAX_NPCS {
+                break;
+            }
+            let home = towns[xorshift(&mut rng) as usize % towns.len()];
+            let name = make_name(&mut rng);
+            let p = &self.places[home];
+            let pos = (p.x + (frac(&mut rng) - 0.5) * 2.0 * WANDER_R, p.z + (frac(&mut rng) - 0.5) * 2.0 * WANDER_R);
+            let draw = frac(&mut rng);
+            let role = if has_vendors && draw < TRADER_SHARE { Role::Trader } else { Role::Adventurer };
+            let name = if role == Role::Trader { format!("{name} the Trader") } else { name };
+            let mut npc = self.blank(self.npcs.len(), name, role, home, pos, &mut rng);
+            npc.stock.gold = match role {
+                Role::Trader => 600.0 + frac(&mut rng) * 1900.0,
+                _ => 20.0 + frac(&mut rng) * 130.0,
+            };
+            self.think(&mut npc);
+            self.npcs.push(npc);
+        }
+    }
+
+    /// The goods and the vendors' shelves (what a trading UI will read) and, to change them, the same mutably.
+    pub fn economy(&self) -> std::cell::Ref<'_, Economy> {
+        self.econ.borrow()
+    }
+
+    pub fn economy_mut(&self) -> std::cell::RefMut<'_, Economy> {
+        self.econ.borrow_mut()
+    }
+
+    /// The vendors within `radius` metres of (x, z), nearest first: (index into `economy().vendors`, the id of the vendor's NPC, distance). This is what
+    /// a player's trading window will be opened from.
+    pub fn vendors_near(&self, x: f32, z: f32, radius: f32) -> Vec<(usize, u16, f32)> {
+        let mut v: Vec<(usize, u16, f32)> = self.npcs.iter().filter_map(|n| n.vendor.map(|i| (i, n.id, dist((x, z), (n.pos.x, n.pos.z))))).filter(|t| t.2 <= radius).collect();
+        v.sort_by(|a, b| a.2.total_cmp(&b.2));
+        v
+    }
+
+    /// How many vendors there are (they come first among the NPC ids).
+    pub fn vendor_count(&self) -> usize {
+        self.econ.borrow().vendors.len()
     }
 
     pub fn by_id(&self, id: u16) -> Option<&Npc> {
@@ -369,9 +526,13 @@ impl Npcs {
     /// Pick the next goal of `n` from its needs (utility scores; all stubs for now): tired -> rest; otherwise mostly travel to a neighbouring
     /// place, sometimes potter around where it is.
     fn think(&self, n: &mut Npc) {
+        if n.role == Role::Vendor {
+            n.goal = Goal::Rest { left: 30.0 }; // behind the counter
+            return;
+        }
         let links = &self.links[n.at];
         let rest = n.fatigue * 1.4;
-        let wander = 0.25 + frac(&mut n.rng) * 0.2;
+        let wander = if n.role == Role::Trader { 0.1 } else { 0.25 + frac(&mut n.rng) * 0.2 };
         let travel = if links.is_empty() { 0.0 } else { 0.3 + frac(&mut n.rng) * 0.6 };
         let in_town = self.places[n.at].town;
         // far from the place it is at (after exploring or hunting): usually walk back first
@@ -380,7 +541,20 @@ impl Npcs {
             n.goal = Goal::Travel { dest: n.at };
             return;
         }
-        let explore = if n.fatigue > 0.7 { None } else { self.exploration(n).map(|g| (g, 0.15 + 0.75 * n.curiosity() * (1.0 - n.fatigue) * (0.5 + frac(&mut n.rng)))) };
+        // errands in town: the vendors it has not been to yet; a trader then sets off for the town it picked
+        if n.trade_due {
+            if let Some(v) = self.next_vendor(n) {
+                n.goal = Goal::Trade { vendor: v, left: 3.0 + frac(&mut n.rng) * 4.0, arrived: false };
+                return;
+            }
+            n.trade_due = false;
+            n.visited.clear();
+            if let Some(d) = n.trade_dest.take() {
+                n.goal = Goal::Travel { dest: d };
+                return;
+            }
+        }
+        let explore = if n.fatigue > 0.7 || n.role == Role::Trader { None } else { self.exploration(n).map(|g| (g, 0.15 + 0.75 * n.curiosity() * (1.0 - n.fatigue) * (0.5 + frac(&mut n.rng)))) };
         let hunt = if n.group.is_empty() || n.fatigue > 0.6 || n.hp < n.max_hp * 0.5 { None } else { self.hunting_ground(n).map(|g| (g, 0.35 + frac(&mut n.rng) * 0.55)) };
         n.goal = if let Some((ground, _)) = hunt.filter(|h| h.1 >= wander.max(travel) && h.1 > rest) {
             Goal::Hunt { ground, left: 60.0 + frac(&mut n.rng) * 120.0, fighting: false }
@@ -390,7 +564,7 @@ impl Npcs {
             Goal::Rest { left: 15.0 + n.fatigue * 90.0 * (0.5 + frac(&mut n.rng)) }
         } else if travel >= wander {
             // a dungeon is a place to look at, not to live in: towns are the more likely stop
-            let open: Vec<usize> = links.iter().copied().filter(|&p| !n.avoid.contains(&(0, p))).collect();
+            let open: Vec<usize> = links.iter().copied().filter(|&p| !n.avoid.contains(&(0, p)) && (n.role != Role::Trader || !self.place_vendors[p].is_empty())).collect();
             let towns: Vec<usize> = open.iter().copied().filter(|&p| self.places[p].town).collect();
             let pool = if !towns.is_empty() && frac(&mut n.rng) < 0.75 { &towns } else { &open };
             if pool.is_empty() {
@@ -401,6 +575,185 @@ impl Npcs {
         } else {
             Goal::Wander { left: 10.0 + frac(&mut n.rng) * 30.0, to: None }
         };
+    }
+
+    /// The nearest vendor of the place `n` is at that it has not been to this stay (an adventurer calls on three at most).
+    fn next_vendor(&self, n: &mut Npc) -> Option<usize> {
+        if n.role != Role::Trader && n.visited.len() >= 3 {
+            return None;
+        }
+        let econ = self.econ.borrow();
+        let here = (n.pos.x, n.pos.z);
+        self.place_vendors[n.at].iter().copied().filter(|v| !n.visited.contains(v)).min_by(|&a, &b| dist(here, econ.vendors[a].post).total_cmp(&dist(here, econ.vendors[b].post)))
+    }
+
+    /// Arrived at the place `n.at`: does it have business with the vendors here?
+    fn on_arrival(&self, n: &mut Npc) {
+        n.visited.clear();
+        n.trade_due = false;
+        if self.place_vendors[n.at].is_empty() {
+            return;
+        }
+        let econ = self.econ.borrow();
+        let worth = n.stock.value(&econ.items);
+        let food: u32 = n.stock.items.iter().filter(|(k, _)| econ.items.get(k.as_str()).map_or(false, |i| i.group == Group::Food)).map(|(_, &q)| q).sum();
+        n.trade_due = match n.role {
+            Role::Trader => true,
+            Role::Adventurer => worth >= SELL_WORTH || (food < KEEP_FOOD && n.stock.gold > 30.0) || n.stock.gold > 400.0,
+            Role::Vendor => false,
+        };
+    }
+
+    /// Eat the cheapest food carried: a meal takes the edge off the tiredness.
+    fn eat(&self, n: &mut Npc) {
+        let econ = self.econ.borrow();
+        let meal = n.stock.items.keys().filter_map(|k| econ.items.get(k.as_str())).filter(|i| i.group == Group::Food).min_by(|a, b| a.cost.total_cmp(&b.cost)).map(|i| i.id.clone());
+        if let Some(m) = meal {
+            n.stock.take(&m, 1);
+            n.fatigue = (n.fatigue - 0.2).max(0.0);
+        }
+    }
+
+    /// What a kill of a mob of this rank leaves.
+    fn loot_into(&self, n: &mut Npc, rank: u8) {
+        let econ = self.econ.borrow();
+        let (gold, drops) = economy::loot(&econ.items, rank, &mut n.rng);
+        n.stock.gold += gold;
+        if n.stock.units() < 2 * MAX_LOOT {
+            for (id, q) in drops {
+                n.stock.add(&id, q);
+            }
+        }
+    }
+
+    /// An NPC killed a mob of this rank: it takes the loot.
+    pub fn loot_kill(&mut self, id: u16, rank: u8) {
+        let Some(i) = id.checked_sub(NPC_ID_BASE) else { return };
+        let mut npcs = std::mem::take(&mut self.npcs);
+        if let Some(n) = npcs.get_mut(i as usize) {
+            if n.role == Role::Adventurer {
+                self.loot_into(n, rank);
+            }
+        }
+        self.npcs = npcs;
+    }
+
+    /// `n` at the counter of vendor `v`: sells what the vendor will take (an adventurer keeps a few meals), then buys: an adventurer food and, from a
+    /// blacksmith, a better weapon of its class; a trader whatever sells for much more in the town it is bound for.
+    fn do_trade(&self, n: &mut Npc, v: usize) {
+        let gold_before = n.stock.gold;
+        self.do_trade_inner(n, v);
+        let (count, gold) = self.trades.get();
+        self.trades.set((count + 1, gold + (n.stock.gold - gold_before).abs()));
+    }
+
+    fn do_trade_inner(&self, n: &mut Npc, v: usize) {
+        let mut econ = self.econ.borrow_mut();
+        let Economy { items, vendors } = &mut *econ;
+        // a trader first picks where it is going: a neighbouring town with vendors
+        if n.role == Role::Trader && n.trade_dest.is_none() {
+            let opts: Vec<usize> = self.links[n.at].iter().copied().filter(|&p| self.places[p].town && !self.place_vendors[p].is_empty() && !n.avoid.contains(&(0, p))).collect();
+            if !opts.is_empty() {
+                n.trade_dest = Some(opts[xorshift(&mut n.rng) as usize % opts.len()]);
+            }
+        }
+        // what the town it is bound for would pay for each good (computed before anything is moved)
+        let mut cands: Vec<(String, f32)> = Vec::new();
+        if let (Role::Trader, Some(d)) = (n.role, n.trade_dest) {
+            for item in vendors[v].stock.items.keys() {
+                let best_bid = self.place_vendors[d].iter().filter_map(|&dv| vendors[dv].bid(items, item)).fold(0.0, f32::max);
+                if best_bid > 0.0 {
+                    cands.push((item.clone(), best_bid));
+                }
+            }
+        }
+        let ven = &mut vendors[v];
+        // sell
+        let mut kept = 0u32;
+        let list: Vec<(String, u32)> = n.stock.items.iter().map(|(k, &q)| (k.clone(), q)).collect();
+        for (item, qty) in list {
+            let Some(it) = items.get(&item) else { continue };
+            let mut q = qty;
+            if n.role == Role::Adventurer && it.group == Group::Food {
+                let keep = KEEP_FOOD.saturating_sub(kept).min(q);
+                kept += keep;
+                q -= keep;
+            }
+            if q > 0 {
+                let _ = ven.buy_from(items, &mut n.stock, &item, q);
+            }
+        }
+        match n.role {
+            Role::Adventurer => {
+                if ven.kind.deals_in(Group::Food) {
+                    for _ in 0..KEEP_FOOD {
+                        let have: u32 = n.stock.items.iter().filter(|(k, _)| items.get(k.as_str()).map_or(false, |i| i.group == Group::Food)).map(|(_, &q)| q).sum();
+                        if have >= KEEP_FOOD || n.stock.gold < 20.0 {
+                            break;
+                        }
+                        let cheapest = ven.stock.items.keys().filter(|k| items.get(k.as_str()).map_or(false, |i| i.group == Group::Food)).filter_map(|k| ven.ask(items, k).map(|a| (a, k.clone()))).min_by(|a, b| a.0.total_cmp(&b.0));
+                        match cheapest {
+                            Some((_, k)) => {
+                                let _ = ven.sell_to(items, &mut n.stock, &k, 1);
+                            }
+                            None => break,
+                        }
+                    }
+                }
+                if ven.kind.deals_in(Group::Weapon) {
+                    self.try_upgrade(n, ven, items);
+                }
+                while n.stock.units() > MAX_LOOT {
+                    let junk = n.stock.items.keys().min_by(|a, b| items.get(a.as_str()).map_or(0.0, |i| i.cost).total_cmp(&items.get(b.as_str()).map_or(0.0, |i| i.cost))).cloned();
+                    match junk {
+                        Some(k) => {
+                            let q = n.stock.count(&k);
+                            n.stock.take(&k, q);
+                        }
+                        None => break,
+                    }
+                }
+            }
+            Role::Trader => {
+                let mut cands = cands;
+                cands.sort_by(|a, b| {
+                    let m = |c: &(String, f32)| ven.ask(items, &c.0).map_or(0.0, |ask| c.1 / ask);
+                    m(b).total_cmp(&m(a))
+                });
+                for (item, best_bid) in cands {
+                    while n.stock.units() < MAX_CARGO {
+                        let Some(ask) = ven.ask(items, &item) else { break };
+                        if best_bid / ask < TRADE_MARGIN || n.stock.gold < ask {
+                            break;
+                        }
+                        if ven.sell_to(items, &mut n.stock, &item, 1).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            Role::Vendor => {}
+        }
+    }
+
+    /// A better weapon of its own class from the blacksmith, if it can use and afford one.
+    fn try_upgrade(&self, n: &mut Npc, ven: &mut Vendor, items: &Items) {
+        let current = self.weapon_table.get(&n.info.weapon).map_or(0.0, |w| w.1);
+        let allowed = 15.0 + 0.8 * n.melee_skill();
+        let best = ven
+            .stock
+            .items
+            .keys()
+            .filter_map(|k| self.weapon_table.get(k).filter(|w| w.0 == n.group && w.1 > current && w.1 <= allowed).map(|w| (w.1, k.clone())))
+            .filter(|(_, k)| ven.ask(items, k).map_or(false, |a| a <= n.stock.gold * 0.85))
+            .max_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, k)) = best {
+            if ven.sell_to(items, &mut n.stock, &k, 1).is_ok() {
+                n.stock.take(&k, 1);
+                n.info.weapon = k;
+                self.weapon_changed.borrow_mut().push(n.id);
+            }
+        }
     }
 
     /// Somewhere to go and look at, from the place `n` is at: a dungeon within reach, or a spot of wilderness in an area it has not seen yet.
@@ -468,7 +821,8 @@ impl Npcs {
         if ids.is_empty() {
             return;
         }
-        for n in self.npcs.iter_mut() {
+        self.weapon_table = weapons.defs.iter().filter_map(|(k, d)| Some((k.clone(), (d.group.clone()?, d.rank?)))).collect();
+        for n in self.npcs.iter_mut().filter(|n| n.role == Role::Adventurer) {
             let max_rank = 10.0 + n.start_melee * 0.7;
             let fit: Vec<_> = ids.iter().filter(|(_, d)| d.rank.unwrap_or(99.0) <= max_rank).collect();
             let pool: Vec<_> = if fit.is_empty() { ids.iter().collect() } else { fit };
@@ -698,6 +1052,12 @@ impl Npcs {
                             self.train(n, skill, g);
                             let g = skill_gain(n.skill("Health"), rank, 0.06) * 0.1 * used;
                             self.train(n, "Health", g);
+                            // and a drop now and then
+                            n.loot_acc += used;
+                            while n.loot_acc >= 25.0 {
+                                n.loot_acc -= 25.0;
+                                self.loot_into(n, rank);
+                            }
                             n.fatigue = (n.fatigue + used / 400.0).min(1.0);
                         }
                         dt -= used;
@@ -741,8 +1101,49 @@ impl Npcs {
                         }
                     }
                 }
+                Goal::Trade { vendor, left, arrived } => {
+                    let post = self.econ.borrow().vendors[vendor].post;
+                    if !arrived {
+                        let target = self.standable(post, active);
+                        let Some((used, reached)) = self.walk(n, target, EXPLORE_SPEED, dt, active) else {
+                            n.visited.push(vendor); // cannot get to the counter: another vendor
+                            self.think(n);
+                            continue;
+                        };
+                        dt -= used;
+                        if reached {
+                            self.do_trade(n, vendor);
+                            n.visited.push(vendor);
+                            n.goal = Goal::Trade { vendor, left, arrived: true };
+                        }
+                    } else {
+                        // haggling: facing the vendor
+                        let used = dt.min(left);
+                        n.pos.speed = 0;
+                        n.pos.yaw = (n.pos.x - post.0).atan2(n.pos.z - post.1);
+                        dt -= used;
+                        if left - used <= 1e-3 {
+                            self.think(n);
+                        } else {
+                            n.goal = Goal::Trade { vendor, left: left - used, arrived: true };
+                        }
+                    }
+                }
                 Goal::Rest { left } => {
                     let used = left.min(dt);
+                    // a vendor restocks its shelves now and then; anybody else eats a meal when tired, if it has one
+                    n.eat_acc += used;
+                    if let Some(v) = n.vendor {
+                        if n.eat_acc >= RESTOCK_EVERY {
+                            n.eat_acc = 0.0;
+                            self.econ.borrow_mut().vendors[v].restock();
+                        }
+                    } else if n.eat_acc >= 45.0 {
+                        n.eat_acc = 0.0;
+                        if n.fatigue > 0.2 {
+                            self.eat(n);
+                        }
+                    }
                     n.fatigue = (n.fatigue - used / 120.0).max(0.0);
                     n.pos.speed = 0;
                     dt -= used;
@@ -794,6 +1195,7 @@ impl Npcs {
                     dt -= used;
                     if arrived {
                         n.at = dest;
+                        self.on_arrival(n);
                         self.think(n);
                     }
                 }
@@ -804,6 +1206,9 @@ impl Npcs {
     /// An NPC that becomes visible stands on walkable ground: if the abstract walk left it in water or inside a wall, move it to the nearest free cell.
     /// Returns false (and leaves it alone) when there is no free cell within 80 m.
     fn land(&self, n: &mut Npc) -> bool {
+        if n.role == Role::Vendor {
+            return true; // stands at its post, which may well be inside a building
+        }
         n.path.clear();
         n.path_goal = None;
         let Some(nav) = &self.nav else { return true };
@@ -820,7 +1225,7 @@ impl Npcs {
 
     /// Put an active NPC at the terrain's height and tell the clients so (they stop snapping it to their own ground).
     fn stand(&self, n: &mut Npc) {
-        if let Some(nav) = &self.nav {
+        if let (Some(nav), true) = (&self.nav, n.role != Role::Vendor) {
             // never end a tick in a wall or in water (a leg may graze a corner): step back to where it last stood and plan again
             if nav.walkable(n.pos.x, n.pos.z) {
                 n.good = (n.pos.x, n.pos.z);
@@ -925,9 +1330,19 @@ impl Npcs {
         counts
     }
 
+    /// (visits to a counter, gold that changed hands) since the last call, and (gold on the shelves, gold carried, goods carried) now.
+    pub fn trade_stats(&self) -> ((u32, f32), (f32, f32, u32)) {
+        let t = self.trades.replace((0, 0.0));
+        let econ = self.econ.borrow();
+        let shelves = econ.vendors.iter().map(|v| v.stock.gold).sum();
+        let carried = self.npcs.iter().filter(|n| n.vendor.is_none()).map(|n| n.stock.gold).sum();
+        let cargo = self.npcs.iter().filter(|n| n.vendor.is_none()).map(|n| n.stock.units()).sum();
+        (t, (shelves, carried, cargo))
+    }
+
     /// How many NPCs are resting / wandering / travelling / walking to a hunt / fighting / exploring (for the stats line).
-    pub fn goal_counts(&self) -> [u32; 6] {
-        let mut c = [0u32; 6];
+    pub fn goal_counts(&self) -> [u32; 7] {
+        let mut c = [0u32; 7];
         for n in &self.npcs {
             c[match n.goal {
                 Goal::Rest { .. } => 0,
@@ -936,6 +1351,7 @@ impl Npcs {
                 Goal::Hunt { fighting: false, .. } => 3,
                 Goal::Hunt { fighting: true, .. } => 4,
                 Goal::Explore { .. } => 5,
+                Goal::Trade { .. } => 6,
             }] += 1;
         }
         c
@@ -948,17 +1364,21 @@ impl Npcs {
 
     /// Everything about every NPC that has to survive a restart.
     pub fn states(&self) -> Vec<NpcState> {
+        let econ = self.econ.borrow();
         self.npcs
             .iter()
             .map(|n| {
+                // a vendor's gold and goods are the ones on its shelves
+                let own = n.vendor.and_then(|v| econ.vendors.get(v)).map_or(&n.stock, |v| &v.stock);
+                let (role, gold, stock) = (n.role as u8, own.gold, serde_json::to_string(&own.items).unwrap_or_default());
                 let (kind, a, dest) = match n.goal {
                     Goal::Rest { left } => (0, left, -1),
                     Goal::Wander { left, .. } => (1, left, -1),
                     Goal::Travel { dest } => (2, 0.0, dest as i64),
                     Goal::Hunt { ground, left, .. } => (3, left, ground as i64),
-                    Goal::Explore { .. } => (0, 1.0, -1), // an exploration in progress is not saved: it rests a moment and chooses again
+                    Goal::Explore { .. } | Goal::Trade { .. } => (0, 1.0, -1), // an exploration or errand in progress is not saved: it rests a moment and chooses again
                 };
-                NpcState { idx: (n.id - NPC_ID_BASE) as u32, name: n.info.name.clone(), race: n.info.race.clone(), gender: n.info.gender.clone(), gear: n.info.gear.clone(), skills: serde_json::to_string(&n.skills).unwrap_or_default(), weapon: n.info.weapon.clone(), home: n.home, at: n.at, goal_kind: kind, goal_a: a, goal_dest: dest, fatigue: n.fatigue, x: n.pos.x, z: n.pos.z, yaw: n.pos.yaw, rng: n.rng }
+                NpcState { idx: (n.id - NPC_ID_BASE) as u32, name: n.info.name.clone(), race: n.info.race.clone(), gender: n.info.gender.clone(), gear: n.info.gear.clone(), skills: serde_json::to_string(&n.skills).unwrap_or_default(), weapon: n.info.weapon.clone(), role, gold, stock, home: n.home, at: n.at, goal_kind: kind, goal_a: a, goal_dest: dest, fatigue: n.fatigue, x: n.pos.x, z: n.pos.z, yaw: n.pos.yaw, rng: n.rng }
             })
             .collect()
     }
@@ -969,6 +1389,9 @@ impl Npcs {
         let mut restored = 0;
         for st in states {
             let Some(n) = self.npcs.get_mut(st.idx as usize) else { continue };
+            if st.role != n.role as u8 {
+                continue; // the layout of vendors and traders changed: this row belongs to somebody else
+            }
             let goal = match st.goal_kind {
                 0 => Goal::Rest { left: st.goal_a },
                 1 => Goal::Wander { left: st.goal_a, to: None },
@@ -990,6 +1413,15 @@ impl Npcs {
             n.hp = n.max_hp;
             if !st.weapon.is_empty() {
                 n.info.weapon = st.weapon.clone();
+            }
+            let goods: BTreeMap<String, u32> = serde_json::from_str(&st.stock).unwrap_or_default();
+            match n.vendor {
+                Some(v) => {
+                    if let Some(ven) = self.econ.borrow_mut().vendors.get_mut(v) {
+                        ven.stock = Stock { gold: st.gold, items: goods };
+                    }
+                }
+                None => n.stock = Stock { gold: st.gold, items: goods },
             }
             n.home = st.home;
             n.at = st.at;
