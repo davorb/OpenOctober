@@ -58,5 +58,14 @@ Not yet: chat replies, bows and spells for NPCs, NPCs fighting each other, tree 
 ~0.5 ms average / ~1.9 ms max per 66 ms tick, ~37 KB/s down per client (4.7 MB/s total out), no dropped snapshots. Cost grows with players x neighbours, so
 the interest radius is what keeps it flat when players spread out.
 
+## Abuse limits
+Connections from the local machine (127.0.0.1 / ::1) skip the per-IP limits and the movement limit, so development is unaffected. Behind a reverse proxy on the same machine the real address is taken from the last entry of `X-Forwarded-For` (only a loopback peer is believed).
+* **Per IP:** `--max-per-ip 4` open connections and `--conns-per-min 30` attempts (0 = no limit); refused during the handshake with HTTP 429. The websocket handshake must finish within 10 s.
+* **Origin:** a browser's `Origin` must be a page served from the host the client reached us at, localhost, or one listed in `--origins https://a.example,https://b.example` (`--origins any` turns it off). No `Origin` header (bots, tools) is accepted: this stops other sites using a visitor's browser, it is not authentication.
+* **Frame rate:** 40 frames/s on average (burst 80); more are dropped and a client that keeps on is kicked.
+* **Idle:** a player who sends nothing the server understands for 15 minutes is kicked.
+* **Movement:** `--max-speed 20` m/s on the ground and `--max-fly-speed 400` flying (x/z, 0 = off). An update that moves further than the player could have (allowance builds up over time, at most 2 s worth) is cut short at that distance; the first update and the first after a respawn may jump. The client is not told, so a cheater is simply held back for everyone else. The `FLAG_FLY` flag is client-reported, so a cheater can claim it and get the fly limit.
+* **Shots:** `from`, `dir` and `power` must be finite and sane.
+
 ## Not done (on purpose)
-No player persistence (only NPCs are saved), no accounts, no server-side movement validation, no delta/quantised snapshots (20 bytes per entity is plenty at this scale), no TLS (put a proxy in front for `wss://`).
+No player persistence (only NPCs are saved), no accounts, no collision-aware movement validation (speed only), no delta/quantised snapshots (20 bytes per entity is plenty at this scale), no TLS (put a proxy in front for `wss://`).

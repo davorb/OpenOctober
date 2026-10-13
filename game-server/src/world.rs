@@ -49,6 +49,24 @@ pub struct Config {
     pub npc_time_scale: f32,
     /// SQLite file the NPCs are saved to and restored from; `None` = they start fresh every time.
     pub db: Option<String>,
+    /// Fastest a player may move on the ground / flying (m/s, x/z plane; 0 = no limit). Clients are authoritative for their position, so a faster
+    /// update is cut short at the distance the player could have covered (see `limit_move`). Connections from the local machine are exempt (`Cmd::Trust`).
+    pub max_speed: f32,
+    pub max_fly_speed: f32,
+}
+
+/// A player may save up this many seconds of movement allowance (a stall, a tab in the background) and spend it in one update.
+const MOVE_BURST_SECS: f32 = 2.0;
+
+/// Where a player who reports `to` can be when he was at `from` and may move `budget` metres (x/z): the reported spot, or the point `budget` metres towards it.
+fn limit_move(from: &PosUpdate, to: PosUpdate, budget: f32) -> (PosUpdate, f32) {
+    let (dx, dz) = (to.x - from.x, to.z - from.z);
+    let d = (dx * dx + dz * dz).sqrt();
+    if d <= budget {
+        return (to, d);
+    }
+    let k = budget / d;
+    (PosUpdate { x: from.x + dx * k, y: from.y, z: from.z + dz * k, ..to }, budget)
 }
 
 /// Seconds between autosaves of the NPC population.
@@ -84,6 +102,8 @@ pub enum Cmd {
     Shop(u16, u16),
     Buy(u16, u16, String, u32),
     Sell(u16, u16, String, u32),
+    /// The connection comes from the local machine (development): exempt from the movement limit.
+    Trust(u16),
 }
 
 /// A blow whose animation has started and that lands at `due`.
@@ -156,6 +176,11 @@ struct Player {
     hp: f32,
     down_until: Option<Instant>,
     next_attack: Instant,
+    // movement limit: metres of allowance left, when it was last topped up, and whether the next update may jump (first one, after a respawn)
+    move_budget: f32,
+    last_move: Instant,
+    free_move: bool,
+    trusted: bool,
 }
 
 #[derive(Default)]
@@ -284,7 +309,19 @@ impl World {
             Cmd::Pos(id, p) => {
                 if let Some(Some(pl)) = self.players.get_mut(id as usize) {
                     // a dead player lies where he fell (bots keep "walking": ignored)
+                    let mut p = p;
                     if pl.down_until.is_none() || !pl.has_pos {
+                        let now = Instant::now();
+                        let speed = if p.flags & FLAG_FLY != 0 { self.cfg.max_fly_speed } else { self.cfg.max_speed };
+                        if speed > 0.0 && !pl.trusted && pl.has_pos && !pl.free_move {
+                            // metres he may have covered since the last update, with some saved up; the rest of a jump is cut off
+                            pl.move_budget = (pl.move_budget + speed * now.duration_since(pl.last_move).as_secs_f32()).min(speed * MOVE_BURST_SECS);
+                            let (q, spent) = limit_move(&pl.pos, p, pl.move_budget);
+                            pl.move_budget -= spent;
+                            p = q;
+                        }
+                        pl.last_move = now;
+                        pl.free_move = false;
                         pl.pos = p;
                         pl.has_pos = true;
                     }
@@ -294,6 +331,11 @@ impl World {
                             self.end_loot(id, cid, false);
                         }
                     }
+                }
+            }
+            Cmd::Trust(id) => {
+                if let Some(Some(pl)) = self.players.get_mut(id as usize) {
+                    pl.trusted = true;
                 }
             }
             Cmd::Chat(id, text) => self.chat(id, &text),
@@ -337,7 +379,7 @@ impl World {
             name = format!("Player{id}");
         }
         let info = PlayerInfo { id: id as u16, name, race: req.race, gender: req.gender, gear: clean(&req.gear, MAX_GEAR), weapon: String::new(), drawn: false, npc: false, role: String::new() };
-        self.players[id] = Some(Player { info, pos: PosUpdate::default(), has_pos: false, tx: req.tx, last_chat: Instant::now() - Duration::from_secs(10), last_sent: 0, last_mobs: 0, dead: false, stock: Stock::default(), looting: None, weapon: String::new(), group: String::new(), drawn: false, blocking: false, hp: PLAYER_HP, down_until: None, next_attack: Instant::now() });
+        self.players[id] = Some(Player { info, pos: PosUpdate::default(), has_pos: false, tx: req.tx, last_chat: Instant::now() - Duration::from_secs(10), last_sent: 0, last_mobs: 0, dead: false, stock: Stock::default(), looting: None, weapon: String::new(), group: String::new(), drawn: false, blocking: false, hp: PLAYER_HP, down_until: None, next_attack: Instant::now(), move_budget: 0.0, last_move: Instant::now(), free_move: true, trusted: false });
         self.online += 1;
         let _ = req.reply.send(Ok(id as u16));
 
@@ -493,9 +535,12 @@ impl World {
         let now = Instant::now();
         let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
         let ok_group = if spell { p.group == "staff" || p.group == "thrown" } else { p.group == "bow" };
+        if !power.is_finite() || !from.iter().chain(dir.iter()).all(|v| v.is_finite() && v.abs() < 1.0e6) {
+            return; // NaN / infinity would poison the projectile (a never-ending one, or damage of NaN)
+        }
         let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
-        let near = (from[0] - p.pos.x).powi(2) + (from[2] - p.pos.z).powi(2) < 100.0;
-        if p.down_until.is_some() || !p.drawn || !ok_group || len < 0.5 || !near || !from.iter().all(|v| v.is_finite()) || !dir.iter().all(|v| v.is_finite()) {
+        let near = (from[0] - p.pos.x).powi(2) + (from[2] - p.pos.z).powi(2) < 100.0 && (from[1] - p.pos.y).abs() < 100.0;
+        if p.down_until.is_some() || !p.drawn || !ok_group || !(len >= 0.5) || !near {
             return;
         }
         if spell && now < p.next_attack.checked_sub(Duration::from_millis(500)).unwrap_or(now) {
@@ -525,6 +570,7 @@ impl World {
             return;
         }
         p.down_until = None;
+        p.free_move = true; // the client puts him at a spawn point: not a speed hack
         p.hp = PLAYER_HP;
         let msg = serde_json::to_string(&ServerMsg::Respawn { id, hp: PLAYER_HP, max: PLAYER_HP }).unwrap();
         self.broadcast_text(msg, None);

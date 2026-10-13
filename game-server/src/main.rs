@@ -1,19 +1,131 @@
+use std::collections::{HashMap, VecDeque};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::Instant;
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tokio_tungstenite::tungstenite::http;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
 use game_server::proto::*;
 use game_server::world::{self, Cmd, Config, JoinReq};
 
-const USAGE: &str = "usage: game-server [--port 1338] [--radius 900] [--max-players 256] [--tick-hz 15] [--spawns ../game-viewer/data/mobspawns.json | --spawns none] [--weapons ../game-viewer/data/weapons.json | --weapons none] [--pvp on|off] [--npcs 500] [--pois ../game-viewer/data/pois.json] [--capitals ../game-viewer/data/spawns.json] [--npc-seed 1] [--db npcs.db | --db none] [--nav data/nav | --nav none] [--npc-time-scale 1] [--own-weapons on|off] [--body-secs 45] [--tomb-secs 3600] [--loot-secs 3] [--items ../game-viewer/data/items.json] [--vendors ../game-viewer/data/vendors.json | --items none]";
+const USAGE: &str = "usage: game-server [--port 1338] [--radius 900] [--max-players 256] [--tick-hz 15] [--spawns ../game-viewer/data/mobspawns.json | --spawns none] [--weapons ../game-viewer/data/weapons.json | --weapons none] [--pvp on|off] [--npcs 500] [--pois ../game-viewer/data/pois.json] [--capitals ../game-viewer/data/spawns.json] [--npc-seed 1] [--db npcs.db | --db none] [--nav data/nav | --nav none] [--npc-time-scale 1] [--own-weapons on|off] [--body-secs 45] [--tomb-secs 3600] [--loot-secs 3] [--items ../game-viewer/data/items.json] [--vendors ../game-viewer/data/vendors.json | --items none] [--max-per-ip 4] [--conns-per-min 30] [--origins https://play.example.com,... | --origins any] [--max-speed 20] [--max-fly-speed 400]";
+
+// Abuse limits (see `Net`). Connections from the local machine (127.0.0.1, ::1) skip the per-IP limits and the movement limit.
+/// A client may send this many frames per second on average, with a burst of `MSG_BURST`; more are dropped, and a client that keeps on is kicked.
+const MSG_RATE: f32 = 40.0;
+const MSG_BURST: f32 = 80.0;
+const MSG_MAX_OVER: u32 = 100;
+/// A player who sends nothing the server understands for this long is kicked (a real client sends its position 15 times a second).
+const IDLE_KICK: Duration = Duration::from_secs(15 * 60);
+/// The websocket handshake has to be done within this long.
+const HANDSHAKE_SECS: u64 = 10;
+
+struct Net {
+    /// Browser pages allowed to open a connection (`Origin` header), besides pages served from the host the client reached us at and from localhost; `any` switches the check off.
+    origins: Vec<String>,
+    any_origin: bool,
+    /// Open connections per IP (0 = no limit), and connection attempts per IP per minute (0 = no limit).
+    max_per_ip: usize,
+    conns_per_min: usize,
+}
+
+#[derive(Default)]
+struct IpState {
+    open: usize,
+    recent: VecDeque<Instant>,
+}
+type IpTable = Arc<Mutex<HashMap<IpAddr, IpState>>>;
+
+/// Holds one of an IP's connection slots until dropped.
+struct IpGuard {
+    ip: IpAddr,
+    table: IpTable,
+}
+impl Drop for IpGuard {
+    fn drop(&mut self) {
+        if let Some(s) = self.table.lock().unwrap().get_mut(&self.ip) {
+            s.open = s.open.saturating_sub(1);
+        }
+    }
+}
+
+fn admit(table: &IpTable, ip: IpAddr, net: &Net) -> Result<IpGuard, &'static str> {
+    let now = Instant::now();
+    let mut t = table.lock().unwrap();
+    if t.len() > 4096 {
+        t.retain(|_, s| s.open > 0 || s.recent.back().is_some_and(|&at| now.duration_since(at) < Duration::from_secs(60)));
+    }
+    let s = t.entry(ip).or_default();
+    while s.recent.front().is_some_and(|&at| now.duration_since(at) >= Duration::from_secs(60)) {
+        s.recent.pop_front();
+    }
+    if net.max_per_ip > 0 && s.open >= net.max_per_ip {
+        return Err("too many connections from your address");
+    }
+    if net.conns_per_min > 0 && s.recent.len() >= net.conns_per_min {
+        return Err("too many connection attempts, slow down");
+    }
+    s.open += 1;
+    s.recent.push_back(now);
+    Ok(IpGuard { ip, table: table.clone() })
+}
+
+/// The address the player really comes from: the peer, or, for a reverse proxy on this machine, the last address in its `X-Forwarded-For`.
+/// (Only a loopback peer is believed, so nobody on the internet can claim to be somebody else.)
+fn client_ip(peer: IpAddr, req: &Request) -> IpAddr {
+    let peer = peer.to_canonical();
+    if peer.is_loopback() {
+        if let Some(ip) = req.headers().get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.rsplit(',').next()).and_then(|v| v.trim().parse::<IpAddr>().ok()) {
+            return ip.to_canonical();
+        }
+    }
+    peer
+}
+
+/// `https://Host.example:8443/x` or `host:1338` -> `host.example` / `host` (lowercase, no scheme, port or path).
+fn host_of(s: &str) -> String {
+    let s = s.split_once("://").map_or(s, |(_, r)| r);
+    let s = s.split('/').next().unwrap_or("");
+    let h = if s.starts_with('[') { s.find(']').map_or(s, |i| &s[..=i]) } else { s.rsplit_once(':').map_or(s, |(a, _)| a) };
+    h.to_ascii_lowercase()
+}
+
+fn is_local_host(h: &str) -> bool {
+    h == "localhost" || h == "127.0.0.1" || h == "[::1]" || h.ends_with(".localhost")
+}
+
+/// A browser tells which page opens the socket; a page of another site must not be able to drive a visitor's browser into this server.
+/// No `Origin` header (bots, tools) is fine: it is a browser's guard, not authentication.
+fn origin_ok(req: &Request, net: &Net) -> bool {
+    let Some(origin) = req.headers().get("origin") else { return true };
+    let Ok(origin) = origin.to_str() else { return false };
+    if net.any_origin {
+        return true;
+    }
+    let origin = origin.trim_end_matches('/').to_ascii_lowercase();
+    if net.origins.iter().any(|o| *o == origin) {
+        return true;
+    }
+    let oh = host_of(&origin);
+    let same_host = req.headers().get("host").and_then(|h| h.to_str().ok()).is_some_and(|h| host_of(h) == oh);
+    origin != "null" && (is_local_host(&oh) || same_host)
+}
+
+fn refuse(code: u16, why: &str) -> ErrorResponse {
+    http::Response::builder().status(code).body(Some(why.to_string())).unwrap()
+}
 
 #[tokio::main]
 async fn main() {
-    let (mut port, mut cfg) = (1338u16, Config { radius: 900.0, max_players: 256, tick_hz: 15, spawns: Some("../game-viewer/data/mobspawns.json".into()), weapons: Some("../game-viewer/data/weapons.json".into()), pvp: true, npcs: 0, pois: Some("../game-viewer/data/pois.json".into()), capitals: Some("../game-viewer/data/spawns.json".into()), npc_seed: 1, db: Some("npcs.db".into()), nav: Some("data/nav".into()), npc_time_scale: 1.0, own_weapons: true, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: Some("../game-viewer/data/items.json".into()), vendors: Some("../game-viewer/data/vendors.json".into()) });
+    let (mut port, mut cfg) = (1338u16, Config { radius: 900.0, max_players: 256, tick_hz: 15, spawns: Some("../game-viewer/data/mobspawns.json".into()), weapons: Some("../game-viewer/data/weapons.json".into()), pvp: true, npcs: 0, pois: Some("../game-viewer/data/pois.json".into()), capitals: Some("../game-viewer/data/spawns.json".into()), npc_seed: 1, db: Some("npcs.db".into()), nav: Some("data/nav".into()), npc_time_scale: 1.0, own_weapons: true, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: Some("../game-viewer/data/items.json".into()), vendors: Some("../game-viewer/data/vendors.json".into()), max_speed: 20.0, max_fly_speed: 400.0 });
+    let mut net = Net { origins: Vec::new(), any_origin: false, max_per_ip: 4, conns_per_min: 30 };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let v = args.next().unwrap_or_default();
@@ -37,31 +149,54 @@ async fn main() {
             "--body-secs" => cfg.body_secs = v.parse().expect(USAGE),
             "--tomb-secs" => cfg.tomb_secs = v.parse().expect(USAGE),
             "--loot-secs" => cfg.loot_secs = v.parse().expect(USAGE),
+            "--max-per-ip" => net.max_per_ip = v.parse().expect(USAGE),
+            "--conns-per-min" => net.conns_per_min = v.parse().expect(USAGE),
+            "--origins" => {
+                net.any_origin = v == "any";
+                net.origins = v.split(',').map(|o| o.trim().trim_end_matches('/').to_ascii_lowercase()).filter(|o| !o.is_empty()).collect();
+            }
+            "--max-speed" => cfg.max_speed = v.parse().expect(USAGE),
+            "--max-fly-speed" => cfg.max_fly_speed = v.parse().expect(USAGE),
             "--npc-time-scale" => cfg.npc_time_scale = v.parse().expect(USAGE),
             _ => panic!("{USAGE}"),
         }
     }
     let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(8192);
     let mut world = tokio::spawn(world::run(cfg.clone(), cmd_rx));
+    let (net, ips) = (Arc::new(net), IpTable::default());
     let listener = TcpListener::bind(("0.0.0.0", port)).await.expect("bind");
     println!("Darkfall game-server on ws://0.0.0.0:{port}  (radius {} m, {} Hz, max {} players)", cfg.radius, cfg.tick_hz, cfg.max_players);
     loop {
         tokio::select! {
             _ = &mut world => break, // the world task ended (Ctrl-C): it has saved the NPCs
             accepted = listener.accept() => {
-                let Ok((stream, _)) = accepted else { continue };
+                let Ok((stream, peer)) = accepted else { continue };
                 let _ = stream.set_nodelay(true);
-                tokio::spawn(connection(stream, cmd_tx.clone()));
+                tokio::spawn(connection(stream, peer, cmd_tx.clone(), net.clone(), ips.clone()));
             }
         }
     }
 }
 
-async fn connection(stream: TcpStream, cmds: mpsc::Sender<Cmd>) {
+async fn connection(stream: TcpStream, peer: SocketAddr, cmds: mpsc::Sender<Cmd>, net: Arc<Net>, ips: IpTable) {
     let mut wsc = WebSocketConfig::default();
     wsc.max_message_size = Some(4096);
     wsc.max_frame_size = Some(4096);
-    let Ok(ws) = tokio_tungstenite::accept_async_with_config(stream, Some(wsc)).await else { return };
+    // the handshake decides whether we want this client at all: right page, not too many connections from its address
+    let admitted: Arc<Mutex<Option<(Option<IpGuard>, bool)>>> = Arc::default();
+    let slot = admitted.clone();
+    let check = |req: &Request, resp: Response| -> Result<Response, ErrorResponse> {
+        if !origin_ok(req, &net) {
+            return Err(refuse(403, "origin not allowed"));
+        }
+        let ip = client_ip(peer.ip(), req);
+        let local = ip.is_loopback();
+        let guard = if local { None } else { Some(admit(&ips, ip, &net).map_err(|why| refuse(429, why))?) };
+        *slot.lock().unwrap() = Some((guard, local));
+        Ok(resp)
+    };
+    let Ok(Ok(ws)) = tokio::time::timeout(Duration::from_secs(HANDSHAKE_SECS), tokio_tungstenite::accept_hdr_async_with_config(stream, check, Some(wsc))).await else { return };
+    let Some((_slot, local)) = admitted.lock().unwrap().take() else { return }; // _slot: the IP's connection slot, released when this connection ends
     let (mut sink, mut source) = ws.split();
 
     // the first frame must be a valid Join
@@ -100,13 +235,38 @@ async fn connection(stream: TcpStream, cmds: mpsc::Sender<Cmd>) {
         Err(_) => return,
     };
     drop(tx); // the world holds the only sender: dropping the player closes the socket
+    if local && cmds.send(Cmd::Trust(id)).await.is_err() {
+        return;
+    }
 
+    let (mut bucket, mut refilled, mut over) = (MSG_BURST, Instant::now(), 0u32);
+    let mut last_active = Instant::now();
     loop {
         tokio::select! {
             _ = &mut writer => break, // kicked, or the socket died
+            _ = tokio::time::sleep_until(last_active + IDLE_KICK) => {
+                println!("- id {id} sent nothing for {} min: kicked", IDLE_KICK.as_secs() / 60);
+                break;
+            }
             m = source.next() => match m {
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                // a flood of frames: drop what is over the rate, and kick a client that keeps on
+                Some(Ok(_)) if {
+                    let now = Instant::now();
+                    bucket = (bucket + now.duration_since(refilled).as_secs_f32() * MSG_RATE).min(MSG_BURST);
+                    refilled = now;
+                    let empty = bucket < 1.0;
+                    if empty { over += 1 } else { bucket -= 1.0; if bucket > MSG_BURST / 2.0 { over = 0 } }
+                    empty
+                } => {
+                    if over > MSG_MAX_OVER {
+                        println!("- id {id} flooding: kicked");
+                        break;
+                    }
+                }
                 Some(Ok(Message::Binary(b))) => {
                     if let Some(p) = PosUpdate::decode_frame(&b) {
+                        last_active = Instant::now();
                         if cmds.send(Cmd::Pos(id, p)).await.is_err() { break; }
                     }
                 }
@@ -126,10 +286,10 @@ async fn connection(stream: TcpStream, cmds: mpsc::Sender<Cmd>) {
                         _ => None,
                     };
                     if let Some(c) = cmd {
+                        last_active = Instant::now();
                         if cmds.send(c).await.is_err() { break; }
                     }
                 }
-                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                 _ => {}
             },
         }
