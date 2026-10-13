@@ -10,7 +10,7 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::combat::*;
 use crate::mobs::{MobAttack, Mobs};
 use crate::nav::Nav;
-use crate::npcs::{Goal, Lod, LodCounts, Npcs, DOWN_SECS as NPC_DOWN_SECS, NPC_ID_BASE};
+use crate::npcs::{chaos_race, Goal, Lod, LodCounts, Npcs, DOWN_SECS as NPC_DOWN_SECS, NPC_ID_BASE};
 use crate::proto::*;
 use crate::store::Store;
 
@@ -90,6 +90,13 @@ struct Corpse {
     /// The JSON of its `Corpse` message, kept for players who join later.
     msg: String,
 }
+
+/// How long an NPC holds a grudge against a player who hurt it.
+const GRUDGE_SECS: f32 = 90.0;
+/// A hostile NPC notices a player this close (m); a friendly one greets him from this close.
+const NPC_AGGRO: f32 = 28.0;
+const NPC_GREET: f32 = 14.0;
+const GREETINGS: [&str; 6] = ["Well met, traveller.", "Mind the wolves out there.", "Fine day for a walk.", "Safe roads to you.", "Have you come far?", "Good hunting."];
 
 /// Seconds a dead player lies there before he gets up (a Respawn message may bring it forward after DOWN_MIN).
 const DOWN_SECS: f32 = 6.0;
@@ -469,7 +476,7 @@ impl World {
         Some(Fighter { pos: p.pos, weapon: p.weapon.clone(), group: p.group.clone() })
     }
 
-    /// Apply a blow to NPC `vid` (a mob's, in this version): hit points, death, messages. A dead NPC lies there for `NPC_DOWN_SECS`, then it is back at home.
+    /// Apply a blow to NPC `vid` (a mob's or a player's): hit points, death, messages. A dead NPC lies there for `NPC_DOWN_SECS`, then it is back at home.
     fn hurt_npc(&mut self, vid: u16, dmg: f32, by: (u16, bool), grp: &str) {
         let Some(i) = vid.checked_sub(NPC_ID_BASE) else { return };
         let Some(n) = self.npcs.npcs.get_mut(i as usize) else { return };
@@ -478,8 +485,17 @@ impl World {
         }
         n.hp = (n.hp - dmg).max(0.0);
         let killed = n.hp <= 0.0;
+        if by.0 < NPC_ID_BASE && !by.1 {
+            // a player hurt it: it remembers, and turns on him
+            n.grudges.retain(|g| g.0 != by.0);
+            n.grudges.push((by.0, GRUDGE_SECS));
+            if n.foe.is_none() && !killed {
+                n.foe = Some(by.0);
+            }
+        }
         if killed {
             n.down = NPC_DOWN_SECS;
+            n.foe = None;
             n.target = None;
             n.chase = None;
             n.info.drawn = false;
@@ -503,7 +519,7 @@ impl World {
         // stance: drawn while fighting. Everybody who can see it is told.
         let mut stance: Vec<(u16, String, bool, PosUpdate)> = Vec::new();
         for n in self.npcs.npcs.iter_mut() {
-            let should = n.lod == Lod::Active && n.down <= 0.0 && matches!(n.goal, Goal::Hunt { fighting: true, .. });
+            let should = n.lod == Lod::Active && n.down <= 0.0 && (n.foe.is_some() || matches!(n.goal, Goal::Hunt { fighting: true, .. }));
             if n.info.drawn != should && !n.info.weapon.is_empty() {
                 n.info.drawn = should;
                 if n.lod == Lod::Active {
@@ -514,7 +530,8 @@ impl World {
         for (id, w, drawn, pos) in stance {
             self.send_near(pos.x, pos.z, serde_json::to_string(&ServerMsg::Equip { id, w: &w, drawn }).unwrap(), None);
         }
-        let fighting: Vec<usize> = self.npcs.npcs.iter().enumerate().filter(|(_, n)| n.lod == Lod::Active && n.down <= 0.0 && matches!(n.goal, Goal::Hunt { fighting: true, .. })).map(|(i, _)| i).collect();
+        self.npc_social(dt, now);
+        let fighting: Vec<usize> = self.npcs.npcs.iter().enumerate().filter(|(_, n)| n.lod == Lod::Active && n.down <= 0.0 && n.foe.is_none() && matches!(n.goal, Goal::Hunt { fighting: true, .. })).map(|(i, _)| i).collect();
         let mut done: Vec<usize> = Vec::new();
         for i in fighting {
             let n = &self.npcs.npcs[i];
@@ -556,16 +573,111 @@ impl World {
             n.stop = reach * 0.7 + tr;
             n.no_target = 0.0;
             n.pos.yaw = (p.x - mx).atan2(p.z - mz);
-            if d <= reach + tr * 0.8 && n.next_attack <= 0.0 {
-                let dur = self.weapons.clip(swing_clip(&group), 1.0);
-                n.next_attack = dur * 0.9 + 0.3;
-                self.pending.push(Pending { due: now + Duration::from_secs_f32(dur * HIT_AT), owner: id });
-                let msg = serde_json::to_string(&ServerMsg::Swing { id, kind: "melee", clip: swing_clip(&group), group: &group }).unwrap();
-                self.send_near(p.x, p.z, msg, None);
+            if d <= reach + tr * 0.8 && n.next_attack <= 0.0 && n.info.drawn {
+                self.npc_swing(i, now);
             }
+            let _ = (id, group);
         }
         for i in done {
             self.npcs.end_hunt(i);
+        }
+    }
+
+    /// NPC `i` starts a swing: the blow lands at `HIT_AT` of the clip, everybody near sees the animation.
+    fn npc_swing(&mut self, i: usize, now: Instant) {
+        let n = &mut self.npcs.npcs[i];
+        let (id, p, group) = (n.id, n.pos, n.group.clone());
+        let dur = self.weapons.clip(swing_clip(&group), 1.0);
+        n.next_attack = dur * 0.9 + 0.3;
+        self.pending.push(Pending { due: now + Duration::from_secs_f32(dur * HIT_AT), owner: id });
+        let msg = serde_json::to_string(&ServerMsg::Swing { id, kind: "melee", clip: swing_clip(&group), group: &group }).unwrap();
+        self.send_near(p.x, p.z, msg, None);
+    }
+
+    /// How NPCs deal with the players around them: hostile ones (the chaos races, with pvp on) attack players of the other side, anybody attacks a player
+    /// who hurt it lately, friendly ones greet players of their own side. A fight lasts while the foe is near, up and the NPC is not badly hurt.
+    fn npc_social(&mut self, dt: f32, now: Instant) {
+        for n in self.npcs.npcs.iter_mut() {
+            n.greet = (n.greet - dt).max(0.0);
+            if !n.grudges.is_empty() {
+                for g in n.grudges.iter_mut() {
+                    g.1 -= dt;
+                }
+                n.grudges.retain(|g| g.1 > 0.0);
+            }
+        }
+        // players who can be fought: standing in the world, up, not in free-fly
+        let people: Vec<(u16, f32, f32, bool, bool)> = self.players.iter().flatten().filter(|p| p.has_pos && p.down_until.is_none() && p.pos.flags & FLAG_FLY == 0).map(|p| (p.info.id, p.pos.x, p.pos.z, chaos_race(&p.info.race), p.pos.flags & FLAG_SNAP != 0)).collect();
+        if people.is_empty() {
+            for n in self.npcs.npcs.iter_mut() {
+                n.foe = None;
+                if n.lod == Lod::Active {
+                    n.chase = n.chase.filter(|_| matches!(n.goal, Goal::Hunt { fighting: true, .. }));
+                }
+            }
+            return;
+        }
+        let mut greetings: Vec<(usize, &'static str)> = Vec::new();
+        let (tick, pvp) = (self.tick, self.cfg.pvp);
+        for (i, n) in self.npcs.npcs.iter_mut().enumerate() {
+            if n.lod != Lod::Active || n.down > 0.0 || n.info.weapon.is_empty() {
+                continue;
+            }
+            let chaos = chaos_race(&n.info.race);
+            let near = |x: f32, z: f32| ((x - n.pos.x).powi(2) + (z - n.pos.z).powi(2)).sqrt();
+            if let Some(pid) = n.foe {
+                // keep fighting?
+                let foe = people.iter().find(|p| p.0 == pid);
+                match foe {
+                    Some(&(_, x, z, _, _)) if near(x, z) < 70.0 && n.hp >= n.max_hp * 0.3 => {
+                        n.chase = Some((x, z));
+                        n.pos.yaw = (n.pos.x - x).atan2(n.pos.z - z);
+                    }
+                    _ => {
+                        n.foe = None;
+                        n.chase = None;
+                    }
+                }
+                continue;
+            }
+            if (tick.wrapping_add(i as u32)) % 8 != 0 {
+                continue;
+            }
+            let busy = matches!(n.goal, Goal::Hunt { fighting: true, .. });
+            for &(pid, x, z, pchaos, _) in &people {
+                let d = near(x, z);
+                let grudge = n.grudges.iter().any(|g| g.0 == pid);
+                if pvp && d < NPC_AGGRO && n.hp >= n.max_hp * 0.5 && (grudge || (chaos && !pchaos)) {
+                    n.foe = Some(pid);
+                    n.chase = Some((x, z));
+                    break;
+                }
+                if d < NPC_GREET && n.greet <= 0.0 && !busy && chaos == pchaos {
+                    n.greet = 90.0 + (tick % 60) as f32;
+                    greetings.push((i, GREETINGS[(tick as usize / 7 + i) % GREETINGS.len()]));
+                    break;
+                }
+            }
+        }
+        for (i, text) in greetings {
+            let n = &self.npcs.npcs[i];
+            let (id, x, z) = (n.id, n.pos.x, n.pos.z);
+            let name = n.info.name.clone();
+            self.send_near(x, z, serde_json::to_string(&ServerMsg::Chat { id, name: &name, text }).unwrap(), None);
+        }
+        // the fights: close in on the foe and strike
+        let fighting: Vec<usize> = self.npcs.npcs.iter().enumerate().filter(|(_, n)| n.foe.is_some() && n.lod == Lod::Active && n.down <= 0.0).map(|(i, _)| i).collect();
+        for i in fighting {
+            let n = &mut self.npcs.npcs[i];
+            let Some(def) = self.weapons.get(&n.info.weapon).cloned() else { continue };
+            let (reach, tr) = (def.reach.unwrap_or(2.1) * WORLD_SCALE, BODY_RADIUS * WORLD_SCALE);
+            n.next_attack = (n.next_attack - dt).max(0.0);
+            n.stop = reach * 0.7 + tr;
+            let Some(c) = n.chase else { continue };
+            let d = ((c.0 - n.pos.x).powi(2) + (c.1 - n.pos.z).powi(2)).sqrt();
+            if d <= reach + tr * 0.8 && n.next_attack <= 0.0 && n.info.drawn {
+                self.npc_swing(i, now);
+            }
         }
     }
 
@@ -577,8 +689,10 @@ impl World {
         let (reach, arc) = (def.reach.unwrap_or(2.1) * WORLD_SCALE, def.angle.unwrap_or(60.0));
         let (a, yaw, ay) = ((f.pos.x, f.pos.z), f.pos.yaw, f.pos.y);
         let tr = BODY_RADIUS * WORLD_SCALE;
+        // an NPC in a fight with a player strikes at nobody else
+        let foe = if owner >= NPC_ID_BASE { self.npcs.by_id(owner).and_then(|n| n.foe) } else { None };
         let mut best: Option<(f32, bool, u16)> = None; // (distance, is mob, id)
-        for i in self.mobs.candidates(a.0, a.1) {
+        for i in self.mobs.candidates(a.0, a.1).filter(|_| foe.is_none()) {
             let m = &self.mobs.mobs[i as usize];
             let t = (m.pos.x, m.pos.z);
             if m.alive && in_arc(a, yaw, t, reach, arc, tr) {
@@ -589,7 +703,19 @@ impl World {
             }
         }
         if self.cfg.pvp && owner < NPC_ID_BASE {
-            for q in self.players.iter().flatten() {
+            // players can hurt the NPCs they can see
+            for n in self.npcs.npcs.iter().filter(|n| n.lod == Lod::Active && n.down <= 0.0) {
+                let t = (n.pos.x, n.pos.z);
+                if (n.pos.y - ay).abs() < 6.0 && in_arc(a, yaw, t, reach, arc, tr) {
+                    let d = ((t.0 - a.0).powi(2) + (t.1 - a.1).powi(2)).sqrt();
+                    if best.map_or(true, |b| d < b.0) {
+                        best = Some((d, false, n.id));
+                    }
+                }
+            }
+        }
+        if self.cfg.pvp && (owner < NPC_ID_BASE || foe.is_some()) {
+            for q in self.players.iter().flatten().filter(|q| owner < NPC_ID_BASE || Some(q.info.id) == foe) {
                 let t = (q.pos.x, q.pos.z);
                 if q.info.id != owner && q.has_pos && q.down_until.is_none() && q.pos.flags & FLAG_FLY == 0 && (q.pos.flags & FLAG_SNAP != 0 || (q.pos.y - ay).abs() < 6.0) && in_arc(a, yaw, t, reach, arc, tr) {
                     let d = ((t.0 - a.0).powi(2) + (t.1 - a.1).powi(2)).sqrt();
@@ -607,6 +733,8 @@ impl World {
         let grp = damage_type(&group);
         if is_mob {
             self.hit_mob(owner, vid, dmg, &group);
+        } else if vid >= NPC_ID_BASE {
+            self.hurt_npc(vid, dmg, (owner, false), &group);
         } else {
             self.hurt_player(vid, dmg, (owner, false), &group, a);
         }
@@ -656,6 +784,16 @@ impl World {
                     }
                 }
             }
+            if self.cfg.pvp && s.owner < NPC_ID_BASE {
+                for n in self.npcs.npcs.iter().filter(|n| n.lod == Lod::Active && n.down <= 0.0) {
+                    if segment_hits(a, b, (n.pos.x, n.pos.z), r, n.pos.y + 1.5) {
+                        let d = (n.pos.x - a[0]).powi(2) + (n.pos.z - a[2]).powi(2);
+                        if best.map_or(true, |x| d < x.0) {
+                            best = Some((d, false, n.id, 0.0));
+                        }
+                    }
+                }
+            }
             if self.cfg.pvp {
                 for q in self.players.iter().flatten() {
                     if q.info.id != s.owner && q.has_pos && q.down_until.is_none() && q.pos.flags & FLAG_FLY == 0 && segment_hits(a, b, (q.pos.x, q.pos.z), r, if q.pos.flags & FLAG_SNAP != 0 { a[1] } else { q.pos.y + 1.5 }) {
@@ -669,6 +807,8 @@ impl World {
             let Some((_, is_mob, vid, _)) = best else { return true };
             if is_mob {
                 self.hit_mob(s.owner, vid, s.dmg, &s.group);
+            } else if vid >= NPC_ID_BASE {
+                self.hurt_npc(vid, s.dmg, (s.owner, false), &s.group);
             } else {
                 self.hurt_player(vid, s.dmg, (s.owner, false), &s.group, (a[0], a[2]));
             }

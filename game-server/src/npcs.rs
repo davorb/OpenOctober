@@ -57,6 +57,11 @@ const OPEN_REGION: usize = 1500;
 /// An NPC hunts at spawn points this close to the place it is at, and no tougher than `hunt_cap(level)`.
 const HUNT_RADIUS: f32 = 2500.0;
 const GROUND_CELL: f32 = 2000.0;
+/// ASSUMPTION (the game data has no table of who is hostile to whom): the three chaos races are hostile to the other three, as in Darkfall.
+pub fn chaos_race(race: &str) -> bool {
+    matches!(race, "ork" | "mir" | "mhm")
+}
+
 /// Seconds a dead NPC lies there before it is back at its home place.
 pub const DOWN_SECS: f32 = 6.0;
 
@@ -105,6 +110,11 @@ pub struct Npc {
     pub chase: Option<(f32, f32)>,
     pub stop: f32,
     pub no_target: f32,
+    /// The connected player this NPC is fighting (the world sets it), players it holds a grudge against for hurting it (id, seconds left), and
+    /// seconds until it may greet somebody again.
+    pub foe: Option<u16>,
+    pub grudges: Vec<(u16, f32)>,
+    pub greet: f32,
     /// The weapon skill the NPC starts with in whatever class it is armed with (`equip_all`).
     start_melee: f32,
     /// Place the NPC lives in / last arrived at.
@@ -308,6 +318,9 @@ impl Npcs {
                 chase: None,
                 stop: 2.0,
                 no_target: 0.0,
+                foe: None,
+                grudges: Vec::new(),
+                greet: 0.0,
                 start_melee: 5.0 + frac(&mut rng) * frac(&mut rng) * 65.0,
                 home,
                 at: home,
@@ -473,6 +486,8 @@ impl Npcs {
     fn revive(&self, n: &mut Npc) {
         n.down = 0.0;
         n.hp = n.max_hp;
+        n.foe = None;
+        n.grudges.clear();
         n.target = None;
         n.chase = None;
         n.path.clear();
@@ -572,6 +587,20 @@ impl Npcs {
     fn advance(&self, n: &mut Npc, mut dt: f32, active: bool) {
         if n.hp < n.max_hp && !matches!(n.goal, Goal::Hunt { fighting: true, .. }) {
             n.hp = (n.hp + n.max_hp * 0.02 * dt).min(n.max_hp);
+        }
+        if active && n.foe.is_some() {
+            // in a fight with a player: whatever it was doing waits while it walks up to him (the world sets `chase`)
+            match n.chase {
+                Some(c) if dist((n.pos.x, n.pos.z), c) > n.stop => {
+                    let _ = self.walk(n, c, TRAVEL_SPEED, dt, false);
+                }
+                Some(c) => {
+                    n.pos.speed = 0;
+                    n.pos.yaw = (n.pos.x - c.0).atan2(n.pos.z - c.1);
+                }
+                None => n.pos.speed = 0,
+            }
+            return;
         }
         let mut guard = 0;
         while dt > 1e-4 && guard < 64 {
