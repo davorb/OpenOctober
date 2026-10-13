@@ -13,6 +13,7 @@ export const SPEEDS = {
   run: 3.7 * PLAYER_SCALE,
   sprint: 5.5 * PLAYER_SCALE,
   swim: 2.0 * PLAYER_SCALE,
+  crouch: 1.6 * PLAYER_SCALE,
 };
 // Walk-mode tuning.
 export const WALK = {
@@ -176,8 +177,18 @@ export class Player {
     const S = PLAYER_SCALE;
     this.radius = 0.45 * S;
     this.height = 1.8 * S;
-    this.eye = 1.7 * S;
+    this.standEye = 1.7 * S;
+    this.crouchEye = 1.05 * S;
+    this.eye = this.standEye;
+    this.crouching = false;
     this.step = 0.65 * S;
+  }
+  // ease the eye height towards the crouched / standing value; call once per frame
+  setCrouch(on, dt) {
+    this.crouching = on;
+    const to = on ? this.crouchEye : this.standEye;
+    this.eye += (to - this.eye) * Math.min(1, dt * 12);
+    if (Math.abs(to - this.eye) < 0.002) this.eye = to;
   }
   // tiles whose collision data may touch (x, z)
   _tiles(x, z, r) {

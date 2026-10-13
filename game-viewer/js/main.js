@@ -160,18 +160,19 @@ function frameInner() {
     fx += touch.x; fz += touch.y;
     const l = Math.max(1, Math.hypot(fx, fz)), s = Math.sin(yaw), c = Math.cos(yaw);
     // game speeds: W = run, Ctrl = walk, Shift = sprint (see SPEEDS)
-    const moving = fx !== 0 || fz !== 0, sprinting = run && moving && stamina.canSprint && !keys.has('ControlLeft');
+    const crouch = keys.has('KeyC') && !player.swim; player.setCrouch(crouch, dt);
+    const moving = fx !== 0 || fz !== 0, sprinting = run && moving && stamina.canSprint && !keys.has('ControlLeft') && !crouch;
     stamina.update(dt, sprinting);
-    const sp = player.swim ? (sprinting ? SPEEDS.swim * 1.75 : SPEEDS.swim) : keys.has('ControlLeft') ? SPEEDS.walk : sprinting ? SPEEDS.sprint : SPEEDS.run;
+    const sp = player.swim ? (sprinting ? SPEEDS.swim * 1.75 : SPEEDS.swim) : crouch ? SPEEDS.crouch : keys.has('ControlLeft') ? SPEEDS.walk : sprinting ? SPEEDS.sprint : SPEEDS.run;
     const tx = (fx * c + fz * s) / l * sp, tz = (-fx * s + fz * c) / l * sp;
     const k = 1 - Math.exp(-dt * (player.onGround ? 12 : 2.5));          // less air control
     vel.x += (tx - vel.x) * k; vel.z += (tz - vel.z) * k;
-    let left = dt; const jump = keys.has('Space') && stamina.canJump(), wasGround = player.onGround;
+    let left = dt; const jump = keys.has('Space') && !crouch && stamina.canJump(), wasGround = player.onGround;
     while (left > 0) { const h = Math.min(left, 1 / 60); player.update(h, vel.x, vel.z, jump); left -= h; }
     if (jump && wasGround && !player.onGround && player.vy > 0) stamina.spend(STAMINA.jumpCost);
     camera.position.set(player.pos.x, player.pos.y + player.eye, player.pos.z);
   } else {
-    stamina.update(dt, false);
+    stamina.update(dt, false); player.setCrouch(false, dt);
     camera.getWorldDirection(fwd); right.crossVectors(fwd, up).normalize();
     mv.set(0, 0, 0);
     if (keys.has('KeyW')) mv.add(fwd); if (keys.has('KeyS')) mv.sub(fwd);
@@ -272,7 +273,7 @@ function hud(t, gh) {
   $('stats').textContent = `${fps} fps   ${world.stats.terrain} terrain · ${world.stats.objects} object tiles${world.stats.loading ? '   loading ' + world.stats.loading : ''}\n` +
     `x ${p.x.toFixed(0)}  y ${p.y.toFixed(0)}  z ${(-p.z).toFixed(0)}   ${Math.round(baseSpeed)} m/s\n${renderer.info.render.calls} calls · ${(renderer.info.render.triangles / 1e6).toFixed(2)}M tris`;
 }
-$('help').innerHTML = `<b>WASD</b> fly · <b>Shift</b> fast · <b>Ctrl</b> slow · <b>Space/E</b> up · <b>C/Q</b> down · <b>Wheel</b> base speed · <b>G</b> walk with collision (Space jumps, Shift sprints, Ctrl slow walk)<br><b>T</b> pause/resume time · <b>[ ]</b> ±30 min (Shift ±2 h) · <b>V</b> atmosphere · <b>M</b> music · <b>B</b> post-processing · <b>K</b> SSAO · <b>J</b> vegetation · <b>N</b> noclip · <b>H</b> hide this`;
+$('help').innerHTML = `<b>WASD</b> fly · <b>Shift</b> fast · <b>Ctrl</b> slow · <b>Space/E</b> up · <b>C/Q</b> down · <b>Wheel</b> base speed · <b>G</b> walk with collision (Space jumps, Shift sprints, Ctrl slow walk, C crouches)<br><b>T</b> pause/resume time · <b>[ ]</b> ±30 min (Shift ±2 h) · <b>V</b> atmosphere · <b>M</b> music · <b>B</b> post-processing · <b>K</b> SSAO · <b>J</b> vegetation · <b>N</b> noclip · <b>H</b> hide this`;
 setTimeout(setModeLabel, 0);
 
 // ---- boot: preload around the start, then wait for the click (also unlocks audio)
