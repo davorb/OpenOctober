@@ -44,7 +44,7 @@ export class Multiplayer {
   constructor({ scene, camera, world, getSelf, toast, $ }) {
     Object.assign(this, { scene, camera, world, getSelf, toast, $ });
     const q = new URLSearchParams(location.search);
-    this.url = q.get('server') || `ws://${location.hostname || 'localhost'}:9000`;
+    this.url = q.get('server') || `ws://${location.hostname || 'localhost'}:1338`;
     this.factory = new AvatarFactory(); this.mobs = new MobWorld({ scene, camera, world });
     this.players = new Map(); this.shots = new Map(); this.corpses = new Map(); this.me = null; this.ws = null; this.sendAcc = 0; this.last = null; this.speed = 0; this.dotMat = null;
     let saved = {}; try { saved = JSON.parse(localStorage.getItem('dfProfile') || '{}'); } catch {}

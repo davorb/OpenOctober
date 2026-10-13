@@ -9,11 +9,11 @@ use tokio_tungstenite::tungstenite::Message;
 use game_server::proto::*;
 use game_server::world::{self, Cmd, Config, JoinReq};
 
-const USAGE: &str = "usage: game-server [--port 9000] [--radius 900] [--max-players 256] [--tick-hz 15] [--spawns ../game-viewer/data/mobspawns.json | --spawns none] [--weapons ../game-viewer/data/weapons.json | --weapons none] [--pvp on|off]";
+const USAGE: &str = "usage: game-server [--port 1338] [--radius 900] [--max-players 256] [--tick-hz 15] [--spawns ../game-viewer/data/mobspawns.json | --spawns none] [--weapons ../game-viewer/data/weapons.json | --weapons none] [--pvp on|off]";
 
 #[tokio::main]
 async fn main() {
-    let (mut port, mut cfg) = (9000u16, Config { radius: 900.0, max_players: 256, tick_hz: 15, spawns: Some("../game-viewer/data/mobspawns.json".into()), weapons: Some("../game-viewer/data/weapons.json".into()), pvp: true });
+    let (mut port, mut cfg) = (1338u16, Config { radius: 900.0, max_players: 256, tick_hz: 15, spawns: Some("../game-viewer/data/mobspawns.json".into()), weapons: Some("../game-viewer/data/weapons.json".into()), pvp: true });
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let v = args.next().unwrap_or_default();

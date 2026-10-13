@@ -1,6 +1,6 @@
 {
   "version": "0.0.1",
   "configurations": [
-    { "name": "game-viewer", "runtimeExecutable": "node", "runtimeArgs": ["game-viewer/serve.js", "8123"], "port": 8123 }
+    { "name": "game-viewer", "runtimeExecutable": "node", "runtimeArgs": ["game-viewer/serve.js", "1337"], "port": 1337 }
   ]
 }

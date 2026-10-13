@@ -5,12 +5,12 @@ A technology demonstrator — no authentication, no anti-cheat, the server trust
 
 ```
 cd game-server
-cargo run --release                 # ws://0.0.0.0:9000
-cargo run --release -- --port 9000 --radius 900 --max-players 256 --tick-hz 15
+cargo run --release                 # ws://0.0.0.0:1338
+cargo run --release -- --port 1338 --radius 900 --max-players 256 --tick-hz 15
 cargo run --release -- --spawns none     # no mobs (default: ../game-viewer/data/mobspawns.json)
-cargo run --release --bin bots -- ws://127.0.0.1:9000 128      # load test: 128 wandering bots with chat (args: url count centre-x centre-z spread)
+cargo run --release --bin bots -- ws://127.0.0.1:1338 128      # load test: 128 wandering bots with chat (args: url count centre-x centre-z spread)
 ```
-Then `node ../game-viewer/serve.js 8080`, open http://localhost:8080/, pick a character and enter. The viewer connects to `ws://<page host>:9000`
+Then `node ../game-viewer/serve.js`, open http://localhost:1337/, pick a character and enter. The viewer connects to `ws://<page host>:1338`
 (override with `?server=ws://host:port`); `?name=&race=&gender=` preselect the character. Without a server the viewer still works offline and keeps retrying.
 
 ## Design

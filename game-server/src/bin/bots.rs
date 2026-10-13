@@ -1,4 +1,4 @@
-//! Load tester: `cargo run --release --bin bots -- [ws://127.0.0.1:9000] [count=100] [centre-x=-7712] [centre-z=-5600] [spread=400]`
+//! Load tester: `cargo run --release --bin bots -- [ws://127.0.0.1:1338] [count=100] [centre-x=-7712] [centre-z=-5600] [spread=400]`
 //! Each bot joins with a random model, wanders between waypoints at run speed and chats now and then.
 //! Coordinates are viewer (three.js) space; the default centre is the world start (game z 5600 -> -5600).
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -38,7 +38,7 @@ const LINES: [&str; 6] = ["anyone near the keep?", "o/", "nice view up here", "h
 async fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let arg = |i: usize, d: &str| a.get(i).cloned().unwrap_or_else(|| d.to_string());
-    let url = arg(0, "ws://127.0.0.1:9000");
+    let url = arg(0, "ws://127.0.0.1:1338");
     let count: usize = arg(1, "100").parse().unwrap();
     let (cx, cz, spread): (f32, f32, f32) = (arg(2, "-7712").parse().unwrap(), arg(3, "-5600").parse().unwrap(), arg(4, "400").parse().unwrap());
     let net = Arc::new(Net::default());

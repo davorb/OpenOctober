@@ -29,4 +29,4 @@ http.createServer((req, res) => {
       fs.createReadStream(file, { start: s, end: e }).pipe(res);
     } else { res.writeHead(200, { ...h, 'Content-Length': st.size }); fs.createReadStream(file).pipe(res); }
   });
-}).listen(+process.argv[2] || 8080, () => console.log(`Darkfall game-viewer: http://localhost:${+process.argv[2] || 8080}/`));
+}).listen(+process.argv[2] || 1337, () => console.log(`Darkfall game-viewer: http://localhost:${+process.argv[2] || 1337}/`));
