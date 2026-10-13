@@ -1,7 +1,7 @@
 //! Combat rules: weapon table, hit geometry, damage and projectiles.
 //!
 //! What comes from the game data (`game-viewer/data/weapons.json`, built by `tools/build_weapons.js` from `weaponpropertylist.xml`, the skill files and the animation
-//! clips): each weapon's class, reach (m), arc angle (degrees), rank, and the length of every upper-body animation clip. The blow of a melee swing lands 45% into its
+//! clips): each weapon's type, reach (m), arc angle (degrees), rank, and the length of every upper-body animation clip. The blow of a melee swing lands 45% into its
 //! clip (the skills' `Synchronized_StateChange`), a bow takes as long as `bow_load` to draw, arrows fly like `m_Archery_Arrow_01` (100 m/s, 300 m range).
 //!
 //! What the game does not ship (damage numbers, hit points and the like are computed by its server-side Java, which is not decodable) is *invented* below and marked so:
@@ -87,7 +87,7 @@ impl Weapons {
     pub fn get(&self, id: &str) -> Option<&WeaponDef> {
         self.defs.get(id)
     }
-    /// The plainest weapon of a class (lowest rank): what a new character starts with.
+    /// The plainest weapon of a type (lowest rank): what a new character starts with.
     pub fn plainest(&self, group: &str) -> Option<&str> {
         self.defs.iter().filter(|(_, d)| d.group.as_deref() == Some(group) && d.obtainable()).min_by(|a, b| a.1.rank.unwrap().total_cmp(&b.1.rank.unwrap()).then(a.0.cmp(b.0))).map(|(k, _)| k.as_str())
     }
@@ -113,7 +113,7 @@ impl Weapons {
     }
 }
 
-/// How a class attacks: the upper-body clip family (`singlehand_attack_01`, `2handed_attack_01`, ...) decides the swing duration.
+/// How a type of weapon attacks: the upper-body clip family (`singlehand_attack_01`, `2handed_attack_01`, ...) decides the swing duration.
 pub fn swing_clip(group: &str) -> &'static str {
     match group {
         "greatsword" | "greataxe" | "greatclub" => "2handed_attack_01",
@@ -130,12 +130,12 @@ pub fn is_melee(group: &str) -> bool {
     !matches!(group, "bow" | "staff" | "thrown" | "shield")
 }
 
-/// INVENTED (the game's damage table is server-side): damage of a hit before the class multiplier, from the weapon rank (10..80 in the data).
+/// INVENTED (the game's damage table is server-side): damage of a hit before the type multiplier, from the weapon rank (10..80 in the data).
 pub fn base_damage(rank: f32) -> f32 {
     6.0 + rank * 0.55
 }
 
-/// INVENTED: heavier classes hit harder (two-handers 1.6x, daggers 0.7x ...).
+/// INVENTED: heavier types hit harder (two-handers 1.6x, daggers 0.7x ...).
 pub fn class_mult(group: &str) -> f32 {
     match group {
         "knife" => 0.7,
@@ -192,7 +192,7 @@ pub fn difficulty_rank(difficulty: &str) -> u8 {
     }
 }
 
-/// The game's skill (from its skill list) that a weapon class trains and is limited by.
+/// The game's skill (from its skill list) that a weapon type trains and is limited by.
 pub fn weapon_skill(group: &str) -> &'static str {
     match group {
         "axe" => "Axes",

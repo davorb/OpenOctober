@@ -154,7 +154,7 @@ pub struct Npc {
     pub skills: BTreeMap<String, f32>,
     pub hp: f32,
     pub max_hp: f32,
-    /// Weapon class of `info.weapon` ("" = unarmed: such an NPC does not hunt).
+    /// Weapon type of `info.weapon` ("" = unarmed: such an NPC does not hunt).
     pub group: String,
     /// Seconds left lying dead (0 = alive), until the next blow may be struck.
     pub down: f32,
@@ -169,7 +169,7 @@ pub struct Npc {
     pub foe: Option<u16>,
     pub grudges: Vec<(u16, f32)>,
     pub greet: f32,
-    /// The weapon skill the NPC starts with in whatever class it is armed with (`equip_all`).
+    /// The weapon skill the NPC starts with in whatever type of weapon it is armed with (`equip_all`).
     start_melee: f32,
     /// Place the NPC lives in / last arrived at.
     pub home: usize,
@@ -276,7 +276,7 @@ pub struct Npcs {
     /// The goods and the vendors; `place_vendors[p]` = the vendors of place `p` (indices into `econ.vendors`).
     econ: RefCell<Economy>,
     place_vendors: Vec<Vec<usize>>,
-    /// Weapon id -> (class, rank), for NPCs that shop for a better one.
+    /// Weapon id -> (type, rank), for NPCs that shop for a better one.
     weapon_table: HashMap<String, (String, f32)>,
     /// NPCs that changed their weapon in the last step (the world tells whoever sees them).
     pub weapon_changed: RefCell<Vec<u16>>,
@@ -349,7 +349,7 @@ impl Npc {
         self.skills.get(name).copied().unwrap_or(0.0)
     }
 
-    /// The skill of the weapon class it is armed with.
+    /// The skill of the weapon type it is armed with.
     pub fn melee_skill(&self) -> f32 {
         self.skill(weapon_skill(&self.group))
     }
@@ -598,7 +598,7 @@ impl Npcs {
         (taken.gold > 0.0 || !taken.items.is_empty()).then_some(taken)
     }
 
-    /// An NPC (not a vendor) is killed: everything it carries, its weapon too, goes onto its tombstone. It gets up at home with a plain weapon of its class.
+    /// An NPC (not a vendor) is killed: everything it carries, its weapon too, goes onto its tombstone. It gets up at home with a plain weapon of its type.
     pub fn drop_all(&mut self, id: u16) -> Stock {
         let Some(n) = id.checked_sub(NPC_ID_BASE).and_then(|i| self.npcs.get_mut(i as usize)) else { return Stock::default() };
         let mut dropped = std::mem::take(&mut n.stock);
@@ -615,12 +615,12 @@ impl Npcs {
         dropped
     }
 
-    /// The plainest weapon of a class (lowest rank): what an NPC that lost everything picks up.
+    /// The plainest weapon of a type (lowest rank): what an NPC that lost everything picks up.
     fn starter_weapon(&self, group: &str) -> Option<String> {
         self.weapon_table.iter().filter(|(_, w)| w.0 == group).min_by(|a, b| a.1 .1.total_cmp(&b.1 .1).then(a.0.cmp(b.0))).map(|(k, _)| k.clone())
     }
 
-    /// Equip the best weapon of its own class it carries, if it beats the one in hand.
+    /// Equip the best weapon of its own type it carries, if it beats the one in hand.
     fn consider_weapon(&self, n: &mut Npc) {
         if n.group.is_empty() {
             return;
@@ -785,7 +785,7 @@ impl Npcs {
     }
 
     /// `n` at the counter of vendor `v`: sells what the vendor will take (an adventurer keeps a few meals), then buys: an adventurer food and, from a
-    /// blacksmith, a better weapon of its class; a trader whatever sells for much more in the town it is bound for.
+    /// blacksmith, a better weapon of its type; a trader whatever sells for much more in the town it is bound for.
     fn do_trade(&self, n: &mut Npc, v: usize) {
         if self.econ.borrow().vendors[v].closed {
             return; // the shop is shut: its vendor is dead
@@ -885,7 +885,7 @@ impl Npcs {
         }
     }
 
-    /// A better weapon of its own class from the blacksmith, if it can use and afford one.
+    /// A better weapon of its own type from the blacksmith, if it can use and afford one.
     fn try_upgrade(&self, n: &mut Npc, ven: &mut Vendor, items: &Items) {
         let current = self.weapon_table.get(&n.info.weapon).map_or(0.0, |w| w.1);
         let allowed = 15.0 + 0.8 * n.melee_skill();

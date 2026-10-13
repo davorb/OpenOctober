@@ -2,7 +2,7 @@
 // (js/sfx.js, se_weaponswing_*: the whoosh plays 0.18 s into the swing like the skills' SFOffsetStart) and effects (js/effects.js), and the armory panel.
 //
 //   Left mouse   attack (melee: slash / backhand / chop / stab in a combo; bow: hold to draw, release to shoot; staff: cast; thrown: throw)
-//   Right mouse  hold to guard (melee)      R  draw / sheathe      1-9, 0  hotbar (one weapon per class)      I  armory: every weapon in the game data
+//   Right mouse  hold to guard (melee)      R  draw / sheathe      1-9, 0  hotbar (one weapon per type)      I  armory: every weapon in the game data
 //
 // Durations are the lengths of the game's own animation clips (weapons.json `clipDur`).  Combat itself is the server's (game-server/src/combat.rs): this class sends what
 // the player does through `net` (equip / attack / block / shoot) and plays what comes back (`hit`, `died`, ... see onHit).  Without a server the swings still play.
@@ -26,7 +26,7 @@ export function attackClip(group, kind) {
   return { slash: `${fam}_attack_01`, backhand: `${fam}_attack_02`, chop: `${fam}_vertical_attack_01`, stab: `${fam}_stab` }[kind] || `${fam}_attack_01`;
 }
 
-/** the guard clip of a weapon class */
+/** the guard clip of a weapon type */
 export const parryClip = group => `${STANCE[group]?.[1] || 'singlehand'}_parrying`;
 
 export class Weapons {
@@ -41,7 +41,7 @@ export class Weapons {
     this.rebuildHotbar();
     this.buildUI();
   }
-  /** One weapon per class on the hotbar: the plainest in the game, or - when the server only lets us wield what we own (`owned`) - the best we carry or hold. */
+  /** One weapon per type on the hotbar: the plainest in the game, or - when the server only lets us wield what we own (`owned`) - the best we carry or hold. */
   rebuildHotbar() {
     const W = this.data.weapons, mine = id => !this.owned || this.owned.has(id) || id === this.id;
     this.hotbar = HOTBAR.map(g => {
@@ -165,7 +165,7 @@ export class Weapons {
       #armlist a{display:inline-block;margin:2px 3px 2px 0;padding:2px 7px;border:1px solid #3a352c;border-radius:3px;cursor:pointer;color:#bbb}#armlist a:hover{background:#2f2a22;color:#fff}#armlist a.sel{border-color:var(--gold,#d9b86a);color:#fff}`; document.head.appendChild(css);
     const bar = document.createElement('div'); bar.id = 'wbar'; bar.innerHTML = '<div id="wname"></div><div id="hpbar"><div id="hpfill"></div></div><div id="hotbar"></div>'; document.body.appendChild(bar);
     for (const id of ['hurt', 'death']) { const d = document.createElement('div'); d.id = id; if (id === 'death') d.textContent = 'YOU DIED'; document.body.appendChild(d); }
-    const ar = document.createElement('div'); ar.id = 'armory'; ar.innerHTML = '<header><b>ARMORY</b><input id="armq" placeholder="filter weapons (name, class, rank)" autocomplete="off"><span style="color:#887">I to close</span></header><div id="armlist"></div>'; document.body.appendChild(ar);
+    const ar = document.createElement('div'); ar.id = 'armory'; ar.innerHTML = '<header><b>ARMORY</b><input id="armq" placeholder="filter weapons (name, type, rank)" autocomplete="off"><span style="color:#887">I to close</span></header><div id="armlist"></div>'; document.body.appendChild(ar);
     ar.querySelector('#armq').oninput = () => this.drawArmory(); ar.querySelector('#armlist').onclick = e => { const id = e.target.closest('a')?.dataset.id; if (id) { this.equip(id); this.toggleArmory(false); } };
     this.refreshUI();
   }
