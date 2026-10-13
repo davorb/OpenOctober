@@ -9,11 +9,11 @@ use tokio_tungstenite::tungstenite::Message;
 use game_server::proto::*;
 use game_server::world::{self, Cmd, Config, JoinReq};
 
-const USAGE: &str = "usage: game-server [--port 1338] [--radius 900] [--max-players 256] [--tick-hz 15] [--spawns ../game-viewer/data/mobspawns.json | --spawns none] [--weapons ../game-viewer/data/weapons.json | --weapons none] [--pvp on|off] [--npcs 500] [--pois ../game-viewer/data/pois.json] [--capitals ../game-viewer/data/spawns.json] [--npc-seed 1] [--db npcs.db | --db none] [--nav data/nav | --nav none] [--npc-time-scale 1] [--body-secs 45] [--tomb-secs 3600] [--loot-secs 3] [--items ../game-viewer/data/items.json] [--vendors ../game-viewer/data/vendors.json | --items none]";
+const USAGE: &str = "usage: game-server [--port 1338] [--radius 900] [--max-players 256] [--tick-hz 15] [--spawns ../game-viewer/data/mobspawns.json | --spawns none] [--weapons ../game-viewer/data/weapons.json | --weapons none] [--pvp on|off] [--npcs 500] [--pois ../game-viewer/data/pois.json] [--capitals ../game-viewer/data/spawns.json] [--npc-seed 1] [--db npcs.db | --db none] [--nav data/nav | --nav none] [--npc-time-scale 1] [--own-weapons on|off] [--body-secs 45] [--tomb-secs 3600] [--loot-secs 3] [--items ../game-viewer/data/items.json] [--vendors ../game-viewer/data/vendors.json | --items none]";
 
 #[tokio::main]
 async fn main() {
-    let (mut port, mut cfg) = (1338u16, Config { radius: 900.0, max_players: 256, tick_hz: 15, spawns: Some("../game-viewer/data/mobspawns.json".into()), weapons: Some("../game-viewer/data/weapons.json".into()), pvp: true, npcs: 0, pois: Some("../game-viewer/data/pois.json".into()), capitals: Some("../game-viewer/data/spawns.json".into()), npc_seed: 1, db: Some("npcs.db".into()), nav: Some("data/nav".into()), npc_time_scale: 1.0, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: Some("../game-viewer/data/items.json".into()), vendors: Some("../game-viewer/data/vendors.json".into()) });
+    let (mut port, mut cfg) = (1338u16, Config { radius: 900.0, max_players: 256, tick_hz: 15, spawns: Some("../game-viewer/data/mobspawns.json".into()), weapons: Some("../game-viewer/data/weapons.json".into()), pvp: true, npcs: 0, pois: Some("../game-viewer/data/pois.json".into()), capitals: Some("../game-viewer/data/spawns.json".into()), npc_seed: 1, db: Some("npcs.db".into()), nav: Some("data/nav".into()), npc_time_scale: 1.0, own_weapons: true, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: Some("../game-viewer/data/items.json".into()), vendors: Some("../game-viewer/data/vendors.json".into()) });
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let v = args.next().unwrap_or_default();
@@ -33,6 +33,7 @@ async fn main() {
             "--nav" => cfg.nav = (v != "none").then_some(v),
             "--items" => cfg.items = (v != "none").then_some(v),
             "--vendors" => cfg.vendors = (v != "none").then_some(v),
+            "--own-weapons" => cfg.own_weapons = v != "off",
             "--body-secs" => cfg.body_secs = v.parse().expect(USAGE),
             "--tomb-secs" => cfg.tomb_secs = v.parse().expect(USAGE),
             "--loot-secs" => cfg.loot_secs = v.parse().expect(USAGE),
@@ -119,6 +120,9 @@ async fn connection(stream: TcpStream, cmds: mpsc::Sender<Cmd>) {
                         Ok(ClientMsg::Shoot { dir, from, power, spell }) => Some(Cmd::Shoot(id, from, dir, power, spell)),
                         Ok(ClientMsg::Respawn) => Some(Cmd::Respawn(id)),
                         Ok(ClientMsg::Loot { cid }) => Some(Cmd::Loot(id, cid)),
+                        Ok(ClientMsg::Shop { npc }) => Some(Cmd::Shop(id, npc)),
+                        Ok(ClientMsg::Buy { npc, item, qty }) => Some(Cmd::Buy(id, npc, item, qty)),
+                        Ok(ClientMsg::Sell { npc, item, qty }) => Some(Cmd::Sell(id, npc, item, qty)),
                         _ => None,
                     };
                     if let Some(c) = cmd {

@@ -33,13 +33,26 @@ export class Weapons {
   constructor({ camera, post, world, factory, sfx, fx, net, toast, $, profile, light }) {
     Object.assign(this, { camera, post, world, factory, sfx, fx, net, toast, $, profile, lightSrc: light });
     this.data = null; this.id = null; this.drawn = false; this.combo = 0; this.vm = new ViewModel(factory); this.vm.onhit = () => this.landed();
-    this.post.overlay = this.vm; this.down = { 0: false, 2: false }; this.draw = null; this.hp = { hp: 100, max: 100 }; this.dead = false; this.hotbar = []; this.canFight = true; this.self = null; this.eye = null;
+    this.post.overlay = this.vm; this.down = { 0: false, 2: false }; this.draw = null; this.hp = { hp: 100, max: 100 }; this.dead = false; this.hotbar = []; this.owned = null; this.canFight = true; this.self = null; this.eye = null;
   }
   async init() {
     this.data = await fetch('/data/weapons.json').then(r => r.json());
     const W = this.data.weapons;
-    this.hotbar = HOTBAR.map(g => Object.entries(W).filter(([, w]) => w.group === g && w.mesh && w.src === 'tree' && !w.natural && w.rank).sort((a, b) => a[1].rank - b[1].rank || a[1].name.localeCompare(b[1].name))[0]?.[0]).filter(Boolean);
+    this.rebuildHotbar();
     this.buildUI();
+  }
+  /** One weapon per class on the hotbar: the plainest in the game, or - when the server only lets us wield what we own (`owned`) - the best we carry or hold. */
+  rebuildHotbar() {
+    const W = this.data.weapons, mine = id => !this.owned || this.owned.has(id) || id === this.id;
+    this.hotbar = HOTBAR.map(g => {
+      const list = Object.entries(W).filter(([id, w]) => w.group === g && w.mesh && w.src === 'tree' && !w.natural && w.rank && mine(id)).sort((a, b) => a[1].rank - b[1].rank || a[1].name.localeCompare(b[1].name));
+      return (this.owned ? list[list.length - 1] : list[0])?.[0];
+    }).filter(Boolean);
+  }
+  /** The server says what is in our pack (`own`: it enforces ownership): the hotbar and the armory follow. */
+  setOwned(items, own) {
+    this.owned = own ? new Set(Object.keys(items)) : null;
+    if (this.data) { this.rebuildHotbar(); this.refreshUI(); if (this.$('armory')?.classList.contains('on')) this.drawArmory(); }
   }
   get w() { return this.data?.weapons[this.id] || null; }
   /** drawn weapons (except magic staves) are used in third person; sheathed or a staff = first person */
@@ -49,10 +62,13 @@ export class Weapons {
   dur(name, d = 1) { return this.data?.clipDur[name] ?? d; }
 
   // ---- equip / draw
-  async equip(id, draw = true) {
+  /** `silent`: the server told us (the weapon it gave us, or the one it says we hold): do not tell it back. An empty id puts the weapon away for good. */
+  async equip(id, draw = true, silent = false) {
+    if (!id) { this.id = null; this.drawn = false; this.cancelDraw(); await this.vm.setWeapon(null); this.vm.visible = false; this.self?.wield(null, false); this.refreshUI(); if (!silent) this.net?.equip('', false); return; }
     const w = this.data.weapons[id]; if (!w) return;
     this.id = id; this.drawn = draw; this.combo = 0; this.cancelDraw(); await this.vm.setWeapon(draw ? w : null); this.vm.visible = draw;
-    this.net?.equip(id, draw); this.self?.wield(w, draw); this.refreshUI(); this.sfx.play(this.sfx.pick(['/weapons/general/df_weapon_swing_01.wav']), { vol: 0.35, rate: 1.3 });
+    if (!silent) this.net?.equip(id, draw);
+    this.self?.wield(w, draw); this.refreshUI(); this.sfx.play(this.sfx.pick(['/weapons/general/df_weapon_swing_01.wav']), { vol: 0.35, rate: 1.3 });
     this.toast(`${w.name}${w.rank ? ' (rank ' + w.rank + ')' : ''}`);
   }
   async toggleDrawn() { if (!this.id) return; this.drawn = !this.drawn; this.cancelDraw(); await this.vm.setWeapon(this.drawn ? this.w : null); this.vm.visible = this.drawn; this.net?.equip(this.id, this.drawn); this.self?.wield(this.w, this.drawn); this.refreshUI(); }
@@ -156,7 +172,7 @@ export class Weapons {
   toggleArmory(on) { const a = this.$('armory'); on ??= !a.classList.contains('on'); a.classList.toggle('on', on); if (on) { document.exitPointerLock?.(); this.drawArmory(); setTimeout(() => this.$('armq').focus(), 30); } else this.$('armq').blur(); return on; }
   drawArmory() {
     const f = this.$('armq').value.toLowerCase(), W = this.data.weapons, groups = {};
-    for (const [id, w] of Object.entries(W)) { if (!w.mesh || w.natural || (w.group === 'shield')) continue; if (f && !(`${w.name} ${w.group} ${GROUP_NAMES[w.group] || ''} ${w.rank || ''}`).toLowerCase().includes(f)) continue; (groups[w.group] ||= []).push([id, w]); }
+    for (const [id, w] of Object.entries(W)) { if (!w.mesh || w.natural || (w.group === 'shield')) continue; if (this.owned && !this.owned.has(id) && id !== this.id) continue; if (f && !(`${w.name} ${w.group} ${GROUP_NAMES[w.group] || ''} ${w.rank || ''}`).toLowerCase().includes(f)) continue; (groups[w.group] ||= []).push([id, w]); }
     this.$('armlist').innerHTML = Object.keys(GROUP_NAMES).filter(g => groups[g]).map(g => `<h4>${GROUP_NAMES[g]}</h4>` + groups[g].sort((a, b) => (a[1].rank || 0) - (b[1].rank || 0)).map(([id, w]) => `<a data-id="${id}" class="${id === this.id ? 'sel' : ''}" title="${(w.desc || '').replace(/"/g, '&quot;')}">${w.name}${w.rank ? ' <small style="color:#887">' + w.rank + '</small>' : ''}</a>`).join('')).join('');
   }
   refreshUI() {

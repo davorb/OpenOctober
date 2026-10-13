@@ -116,7 +116,7 @@ async fn npcs_show_up_in_snapshots_of_nearby_players_only() {
     // game z = 200 -> wire z = -200
     std::fs::write(&pois, r#"[{"name":"Town","type":"Village","x":100,"z":200}]"#).unwrap();
     std::fs::write(&caps, r#"[{"name":"Shoal","race":"Alfar","x":100,"y":0,"z":200}]"#).unwrap();
-    let cfg = Config { radius: 900.0, max_players: 8, tick_hz: 15, spawns: None, weapons: None, pvp: true, npcs: 5, pois: Some(pois.to_string_lossy().into()), capitals: Some(caps.to_string_lossy().into()), npc_seed: 1, db: None, nav: None, npc_time_scale: 1.0, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: None, vendors: None };
+    let cfg = Config { radius: 900.0, max_players: 8, tick_hz: 15, spawns: None, weapons: None, pvp: true, npcs: 5, pois: Some(pois.to_string_lossy().into()), capitals: Some(caps.to_string_lossy().into()), npc_seed: 1, db: None, nav: None, npc_time_scale: 1.0, own_weapons: false, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: None, vendors: None };
     let (cmds, rx) = mpsc::channel(64);
     tokio::spawn(world::run(cfg, rx));
 

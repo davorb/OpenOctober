@@ -552,6 +552,11 @@ impl Npcs {
         }
     }
 
+    /// A tombstone without a body, for tests.
+    pub fn add_grave_for_test(&self, cid: u32, stock: Stock) {
+        self.graves.borrow_mut().push(Grave { cid, x: 0.0, z: 0.0, stock });
+    }
+
     /// The tombstone rots away.
     pub fn remove_grave(&mut self, cid: u32) {
         self.graves.borrow_mut().retain(|g| g.cid != cid);
@@ -568,6 +573,29 @@ impl Npcs {
         let g = graves.iter_mut().find(|g| g.cid == cid && (g.stock.gold > 0.0 || !g.stock.items.is_empty()))?;
         self.looted.borrow_mut().push(cid);
         Some(std::mem::take(&mut g.stock))
+    }
+
+    /// Take what fits from the tombstone `cid`: all the gold and as many goods as weigh at most `free` together (the rest stays on the tombstone,
+    /// which is gone once it is empty). `None` if nothing could be taken.
+    pub fn take_grave_fitting(&self, cid: u32, mut free: f32, items: &Items) -> Option<Stock> {
+        let mut graves = self.graves.borrow_mut();
+        let g = graves.iter_mut().find(|g| g.cid == cid && (g.stock.gold > 0.0 || !g.stock.items.is_empty()))?;
+        let mut taken = Stock { gold: std::mem::take(&mut g.stock.gold), items: Default::default() };
+        let keys: Vec<String> = g.stock.items.keys().cloned().collect();
+        for k in keys {
+            let w = economy::item_weight(items, &k).max(0.0);
+            let have = g.stock.count(&k);
+            let n = if w <= 0.0 { have } else { have.min((free / w).floor() as u32) };
+            if n > 0 {
+                g.stock.take(&k, n);
+                taken.add(&k, n);
+                free -= w * n as f32;
+            }
+        }
+        if g.stock.gold <= 0.0 && g.stock.items.is_empty() {
+            self.looted.borrow_mut().push(cid);
+        }
+        (taken.gold > 0.0 || !taken.items.is_empty()).then_some(taken)
     }
 
     /// An NPC (not a vendor) is killed: everything it carries, its weapon too, goes onto its tombstone. It gets up at home with a plain weapon of its class.
@@ -937,7 +965,7 @@ impl Npcs {
 
     /// Arm every NPC with a melee weapon from the table that suits its level (a rank-10 weapon at level 1, a rank-80 one at level 20).
     pub fn equip_all(&mut self, weapons: &Weapons) {
-        let mut ids: Vec<(&String, &crate::combat::WeaponDef)> = weapons.defs.iter().filter(|(_, d)| d.rank.is_some() && d.group.as_deref().map_or(false, |g| is_melee(g) && g != "shield")).collect();
+        let mut ids: Vec<(&String, &crate::combat::WeaponDef)> = weapons.defs.iter().filter(|(_, d)| d.obtainable() && d.group.as_deref().map_or(false, |g| is_melee(g) && g != "shield")).collect();
         ids.sort_by(|a, b| a.0.cmp(b.0));
         if ids.is_empty() {
             return;

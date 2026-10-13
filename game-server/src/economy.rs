@@ -25,6 +25,26 @@ pub enum Group {
     Ammo,
 }
 
+impl Group {
+    /// What one unit weighs when the game's data has no weight for the item (INVENTED). Gold weighs nothing.
+    pub fn weight(self) -> f32 {
+        match self {
+            Group::Weapon => 6.0,
+            Group::Armor => 8.0,
+            Group::Food => 0.2,
+            Group::Consumable => 0.3,
+            Group::Herb => 0.1,
+            Group::Material => 1.0,
+            Group::Ammo => 0.05,
+        }
+    }
+}
+
+/// What a player can carry, in the game's weight units (a weapon is about 3, a piece of armour 1-5; the wielded weapon counts). INVENTED.
+pub const CARRY_LIMIT: f32 = 60.0;
+/// Goods the catalogue does not know (a weapon that is not for sale anywhere) weigh this much.
+pub const UNKNOWN_WEIGHT: f32 = 5.0;
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct Item {
     pub id: String,
@@ -32,6 +52,9 @@ pub struct Item {
     pub group: Group,
     #[serde(default)]
     pub stack: bool,
+    /// The game's "Weight" of one unit (`tools/build_items.js`).
+    #[serde(default)]
+    pub weight: Option<f32>,
 }
 
 #[derive(Default)]
@@ -150,6 +173,16 @@ impl Stock {
     pub fn units(&self) -> u32 {
         self.items.values().sum()
     }
+
+    /// What the goods weigh (gold does not).
+    pub fn weight(&self, items: &Items) -> f32 {
+        self.items.iter().map(|(k, &n)| item_weight(items, k) * n as f32).sum()
+    }
+}
+
+/// What one unit of `item` weighs.
+pub fn item_weight(items: &Items, item: &str) -> f32 {
+    items.get(item).map_or(UNKNOWN_WEIGHT, |i| i.weight.unwrap_or_else(|| i.group.weight()))
 }
 
 /// How much dearer (>1) or cheaper (<1) a good is than its base cost, given the vendor's stock and target of it.
@@ -208,7 +241,7 @@ impl Vendor {
         };
         let mut target = BTreeMap::new();
         for &g in kind.groups() {
-            let pool: Vec<&Item> = items.group(g).filter(|i| i.cost <= 3000.0).collect();
+            let pool: Vec<&Item> = items.group(g).filter(|i| i.cost > 0.0 && i.cost <= 3000.0).collect();
             if pool.is_empty() {
                 continue;
             }
@@ -237,14 +270,14 @@ impl Vendor {
     pub fn ask(&self, items: &Items, item: &str) -> Option<f32> {
         let it = items.get(item)?;
         let have = self.stock.count(item);
-        (!self.closed && self.kind.deals_in(it.group) && have > 0).then(|| it.cost * scarcity(have, self.target_of(item)) * SELL_MARGIN)
+        (!self.closed && it.cost > 0.0 && self.kind.deals_in(it.group) && have > 0).then(|| it.cost * scarcity(have, self.target_of(item)) * SELL_MARGIN)
     }
 
     /// What the vendor pays for one unit of `item` now (`None` if it does not deal in it, has too many already, or cannot afford it).
     pub fn bid(&self, items: &Items, item: &str) -> Option<f32> {
         let it = items.get(item)?;
         let have = self.stock.count(item);
-        if self.closed || !self.kind.deals_in(it.group) || have >= self.target_of(item) + GLUT {
+        if self.closed || it.cost <= 0.0 || !self.kind.deals_in(it.group) || have >= self.target_of(item) + GLUT {
             return None;
         }
         let p = it.cost * scarcity(have, self.target_of(item)) * BUY_MARGIN;
@@ -346,7 +379,7 @@ pub fn loot(items: &Items, rank: u8, rng: &mut u32) -> (f32, Vec<(String, u32)>)
             x if x < 0.95 => Group::Weapon,
             _ => Group::Armor,
         };
-        let pool: Vec<&Item> = items.group(g).filter(|i| i.cost <= budget).collect();
+        let pool: Vec<&Item> = items.group(g).filter(|i| i.cost > 0.0 && i.cost <= budget).collect();
         if pool.is_empty() {
             continue;
         }

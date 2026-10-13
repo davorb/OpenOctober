@@ -21,6 +21,20 @@ pub const PLAYER_HP: f32 = 120.0;
 pub const ARROW_GRAVITY: f32 = 9.8 * 0.35;
 pub const VERTICAL_SLACK: f32 = 14.0;
 
+/// A boolean the data sometimes writes as a number.
+fn flag<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Flag {
+        Bool(bool),
+        Num(i64),
+    }
+    Ok(match Flag::deserialize(d)? {
+        Flag::Bool(b) => b,
+        Flag::Num(n) => n != 0,
+    })
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct WeaponDef {
     #[serde(default)]
@@ -33,6 +47,19 @@ pub struct WeaponDef {
     pub angle: Option<f32>,
     #[serde(default)]
     pub rank: Option<f32>,
+    /// A monster's own attack (claws, bites): not a weapon a character can hold. (The data writes it as true or as 1.)
+    #[serde(default, deserialize_with = "flag")]
+    pub natural: bool,
+    /// Where the viewer's data got the weapon from ("none": it has no model).
+    #[serde(default)]
+    pub src: Option<String>,
+}
+
+impl WeaponDef {
+    /// A weapon a character can get: ranked (rank 0 = a monster's weapon), not a natural attack, with a model.
+    pub fn obtainable(&self) -> bool {
+        self.rank.map_or(false, |r| r > 0.0) && !self.natural && self.src.as_deref() != Some("none")
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +87,16 @@ impl Weapons {
     pub fn get(&self, id: &str) -> Option<&WeaponDef> {
         self.defs.get(id)
     }
+    /// The plainest weapon of a class (lowest rank): what a new character starts with.
+    pub fn plainest(&self, group: &str) -> Option<&str> {
+        self.defs.iter().filter(|(_, d)| d.group.as_deref() == Some(group) && d.obtainable()).min_by(|a, b| a.1.rank.unwrap().total_cmp(&b.1.rank.unwrap()).then(a.0.cmp(b.0))).map(|(k, _)| k.as_str())
+    }
+
+    /// The worst melee weapon of the game (lowest rank, then by name): what a character starts with, and gets again every time he gets up.
+    pub fn worst_melee(&self) -> Option<&str> {
+        self.defs.iter().filter(|(_, d)| d.obtainable() && d.group.as_deref().map_or(false, |g| is_melee(g) && g != "shield")).min_by(|a, b| a.1.rank.unwrap().total_cmp(&b.1.rank.unwrap()).then(a.0.cmp(b.0))).map(|(k, _)| k.as_str())
+    }
+
     /// Length (seconds) of a clip; `or` if the data doesn't have it.
     pub fn clip(&self, name: &str, or: f32) -> f32 {
         self.clip_dur.get(name).copied().unwrap_or(or)

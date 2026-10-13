@@ -138,7 +138,7 @@ fn deadly_village(tag: &str, npcs: usize) -> mpsc::Sender<game_server::world::Cm
     std::fs::write(f("caps"), r#"[{"name":"Capital","race":"Human","x":100,"y":0,"z":200}]"#).unwrap();
     std::fs::write(f("spawns"), r#"[{"id":1,"x":112,"z":200,"mobs":[{"id":9,"name":"Boss","qty":3,"difficulty":"Boss"}]}]"#).unwrap();
     let s = |n: &str| Some(f(n).to_string_lossy().to_string());
-    let cfg = Config { radius: 900.0, max_players: 4, tick_hz: 60, spawns: s("spawns"), weapons: None, pvp: false, npcs, pois: s("pois"), capitals: s("caps"), npc_seed: 3, db: None, nav: None, npc_time_scale: 1.0, body_secs: 1.5, tomb_secs: 3600, loot_secs: 0.6, items: None, vendors: None };
+    let cfg = Config { radius: 900.0, max_players: 4, tick_hz: 60, spawns: s("spawns"), weapons: None, pvp: false, npcs, pois: s("pois"), capitals: s("caps"), npc_seed: 3, db: None, nav: None, npc_time_scale: 1.0, own_weapons: false, body_secs: 1.5, tomb_secs: 3600, loot_secs: 0.6, items: None, vendors: None };
     let (cmds, rx) = mpsc::channel(256);
     tokio::spawn(world::run(cfg, rx));
     cmds
@@ -351,4 +351,28 @@ fn an_npc_that_is_hurt_while_looting_is_interrupted() {
         }
     }
     assert!(taken, "and takes it the next time");
+}
+
+#[test]
+fn a_tombstone_gives_only_what_fits_and_keeps_the_rest() {
+    let w = world(1);
+    let items = Items::parse(ITEMS).unwrap();
+    // 100 iron (weight 1 each in the fixture catalogue? the fixture has no weights: the group fallback, 1 per unit) and 40 gold
+    w.add_grave_for_test(7, Stock { gold: 40.0, items: [("r_Iron".to_string(), 100)].into() });
+    let free = 7.5;
+    let taken = w.take_grave_fitting(7, free, &items).expect("something fits");
+    assert_eq!(taken.gold, 40.0, "the gold weighs nothing: all of it");
+    assert_eq!(taken.count("r_Iron"), 7, "7 units of weight 1 in 7.5");
+    assert!(w.grave(7).is_some(), "the rest stays on the tombstone");
+    assert_eq!(w.grave(7).unwrap().stock.count("r_Iron"), 93);
+    assert_eq!(w.grave(7).unwrap().stock.gold, 0.0);
+    assert!(w.looted.borrow().is_empty());
+    // nothing fits at all: nothing taken, nothing lost
+    assert!(w.take_grave_fitting(7, 0.4, &items).is_none());
+    assert_eq!(w.grave(7).unwrap().stock.count("r_Iron"), 93);
+    // room enough: the rest, and now it is empty and gone
+    let taken = w.take_grave_fitting(7, 500.0, &items).unwrap();
+    assert_eq!(taken.count("r_Iron"), 93);
+    assert!(w.grave(7).is_none());
+    assert_eq!(w.looted.borrow().as_slice(), &[7]);
 }

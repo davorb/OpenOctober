@@ -10,7 +10,7 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::combat::*;
 use crate::mobs::{MobAttack, Mobs};
 use crate::nav::Nav;
-use crate::economy::Stock;
+use crate::economy::{item_weight, Stock, CARRY_LIMIT};
 use crate::npcs::{chaos_race, Role, VENDOR_DOWN_SECS, Goal, Lod, LodCounts, Npcs, DOWN_SECS as NPC_DOWN_SECS, NPC_ID_BASE};
 use crate::proto::*;
 use crate::store::Store;
@@ -38,6 +38,8 @@ pub struct Config {
     /// `game-viewer/data/items.json` and `vendors.json`: the goods and the shopkeepers (from `tools/build_items.js` / `build_vendors.js`); without both there is no trade.
     pub items: Option<String>,
     pub vendors: Option<String>,
+    /// A player can only wield a weapon he owns (it is in his stock, or already in his hand); everybody starts, and gets up, with the worst weapon of the game.
+    pub own_weapons: bool,
     /// A body lies there this many seconds, then turns into a lootable tombstone that lasts `tomb_secs`.
     pub body_secs: f32,
     pub tomb_secs: u64,
@@ -77,6 +79,11 @@ pub enum Cmd {
     Respawn(u16),
     /// A player takes everything from the tombstone `cid`.
     Loot(u16, u32),
+    /// Put `Stock` into a player's pack. Not reachable from the network (`main.rs` does not map any client message to it): for tests and, later, game masters.
+    Give(u16, Stock),
+    Shop(u16, u16),
+    Buy(u16, u16, String, u32),
+    Sell(u16, u16, String, u32),
 }
 
 /// A blow whose animation has started and that lands at `due`.
@@ -91,6 +98,9 @@ struct Fighter {
     weapon: String,
     group: String,
 }
+
+/// A player can trade with a vendor from this close (metres).
+const SHOP_REACH: f32 = 8.0;
 
 /// A player can take from a tombstone this close (metres), and it takes this long (seconds), interrupted by damage or by stepping away.
 const LOOT_REACH: f32 = 4.0;
@@ -293,6 +303,18 @@ impl World {
             Cmd::Shoot(id, from, dir, power, spell) => self.shoot(id, from, dir, power, spell),
             Cmd::Respawn(id) => self.respawn(id, false),
             Cmd::Loot(id, cid) => self.loot_grave(id, cid),
+            Cmd::Give(id, stock) => {
+                if let Some(Some(p)) = self.players.get_mut(id as usize) {
+                    p.stock.gold += stock.gold;
+                    for (k, q) in stock.items {
+                        p.stock.add(&k, q);
+                    }
+                }
+                self.send_stock(id);
+            }
+            Cmd::Shop(id, npc) => self.open_shop(id, npc),
+            Cmd::Buy(id, npc, item, qty) => self.trade(id, npc, &item, qty, true),
+            Cmd::Sell(id, npc, item, qty) => self.trade(id, npc, &item, qty, false),
         }
         self.reap();
     }
@@ -324,6 +346,7 @@ impl World {
             self.players[id].as_mut().unwrap().dead = true;
             return;
         }
+        self.give_starter_weapon(id as u16);
         self.send_stock(id as u16);
         if !self.mobs.types.is_empty() {
             let types = serde_json::to_string(&ServerMsg::Mobtypes { types: &self.mobs.types }).unwrap();
@@ -371,7 +394,23 @@ impl World {
         let w = clean(&w, MAX_WEAPON);
         let group = if w.is_empty() { Some(String::new()) } else if self.weapons.defs.is_empty() { Some("sword".to_string()) } else { self.weapons.get(&w).and_then(|d| d.group.clone()) };
         let Some(group) = group else { return };
+        let own = self.owns_weapons();
         let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
+        let mut stock_changed = false;
+        if own && p.weapon != w {
+            // wielding a weapon takes it out of the pack (the one in the hand goes back in)
+            if !w.is_empty() && p.stock.count(&w) == 0 {
+                let (cur, drawn) = (p.weapon.clone(), p.drawn);
+                let msg = serde_json::to_string(&ServerMsg::Equip { id, w: &cur, drawn }).unwrap();
+                let _ = p.tx.try_send(Message::Text(msg)); // refused: he does not have it; tell him what he holds
+                return;
+            }
+            p.stock.take(&w, 1);
+            if !p.weapon.is_empty() {
+                p.stock.add(&std::mem::take(&mut p.weapon), 1);
+            }
+            stock_changed = true;
+        }
         p.weapon = w.clone();
         p.group = group;
         p.drawn = drawn && !w.is_empty();
@@ -380,6 +419,36 @@ impl World {
         p.info.drawn = p.drawn;
         let drawn = p.drawn;
         self.relay(id, |id| serde_json::to_string(&ServerMsg::Equip { id, w: &w, drawn }).unwrap());
+        if stock_changed {
+            self.send_stock(id);
+        }
+    }
+
+    /// Ownership of weapons is enforced when it is switched on and the game has a weapon table (without one nobody could ever hold a weapon).
+    fn owns_weapons(&self) -> bool {
+        self.cfg.own_weapons && !self.weapons.defs.is_empty()
+    }
+
+    /// A new character, and one that has got up again, holds the worst weapon of the game (sheathed): he told about it as well as everybody near.
+    fn give_starter_weapon(&mut self, id: u16) {
+        if !self.owns_weapons() {
+            return;
+        }
+        let Some(worst) = self.weapons.worst_melee().map(str::to_string) else { return };
+        let Some(group) = self.weapons.get(&worst).and_then(|d| d.group.clone()) else { return };
+        let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
+        if !p.weapon.is_empty() {
+            return;
+        }
+        p.weapon = worst.clone();
+        p.group = group;
+        p.drawn = false;
+        p.info.weapon = worst.clone();
+        p.info.drawn = false;
+        let msg = serde_json::to_string(&ServerMsg::Equip { id, w: &worst, drawn: false }).unwrap();
+        let _ = p.tx.try_send(Message::Text(msg.clone()));
+        self.relay(id, |id| serde_json::to_string(&ServerMsg::Equip { id, w: &worst, drawn: false }).unwrap());
+        self.send_stock(id);
     }
 
     fn block(&mut self, id: u16, on: bool) {
@@ -429,7 +498,7 @@ impl World {
             p.next_attack = now + Duration::from_millis(500);
         }
         let group = p.group.clone();
-        let Some(def) = self.weapons.get(&p.weapon).cloned().or_else(|| self.weapons.defs.is_empty().then(|| WeaponDef { group: Some(group.clone()), kind: String::new(), reach: None, angle: None, rank: None })) else { return };
+        let Some(def) = self.weapons.get(&p.weapon).cloned().or_else(|| self.weapons.defs.is_empty().then(|| WeaponDef { group: Some(group.clone()), kind: String::new(), reach: None, angle: None, rank: None, natural: false, src: None })) else { return };
         let power = if spell { 1.0 } else { power.clamp(0.2, 1.0) };
         let speed = if spell { 45.0 } else { 100.0 * (0.45 + 0.55 * power) };
         let d = [dir[0] / len, dir[1] / len, dir[2] / len];
@@ -449,6 +518,7 @@ impl World {
         p.hp = PLAYER_HP;
         let msg = serde_json::to_string(&ServerMsg::Respawn { id, hp: PLAYER_HP, max: PLAYER_HP }).unwrap();
         self.broadcast_text(msg, None);
+        self.give_starter_weapon(id); // he dropped what he held: he gets up with the worst weapon of the game
     }
 
     /// Apply a blow to player `vid`: blocking, hit points, death. `from` is where it came from (for the block test), `by` the attacker (id, is a mob).
@@ -545,7 +615,10 @@ impl World {
     /// Tell player `id` what he carries.
     fn send_stock(&mut self, id: u16) {
         let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
-        let msg = serde_json::to_string(&ServerMsg::Stock { gold: p.stock.gold, items: &p.stock.items }).unwrap();
+        let eco = self.npcs.economy();
+        let weight = p.stock.weight(&eco.items) + if p.weapon.is_empty() { 0.0 } else { crate::economy::item_weight(&eco.items, &p.weapon) };
+        drop(eco);
+        let msg = serde_json::to_string(&ServerMsg::Stock { gold: p.stock.gold, items: &p.stock.items, weight, limit: CARRY_LIMIT, own: self.cfg.own_weapons && !self.weapons.defs.is_empty() }).unwrap();
         if p.tx.try_send(Message::Text(msg)).is_err() {
             p.dead = true;
         }
@@ -587,7 +660,12 @@ impl World {
     fn finish_loots(&mut self, now: Instant) {
         let due: Vec<(u16, u32)> = self.players.iter().flatten().filter_map(|p| p.looting.filter(|l| l.1 <= now).map(|l| (p.info.id, l.0))).collect();
         for (id, cid) in due {
-            let taken = self.npcs.take_grave(cid);
+            // only what fits in the pack comes along; the rest stays on the tombstone
+            let free = {
+                let eco = self.npcs.economy();
+                self.players.get(id as usize).and_then(|p| p.as_ref()).map_or(0.0, |p| (CARRY_LIMIT - p.stock.weight(&eco.items) - if p.weapon.is_empty() { 0.0 } else { item_weight(&eco.items, &p.weapon) }).max(0.0))
+            };
+            let taken = { let eco = self.npcs.economy(); self.npcs.take_grave_fitting(cid, free, &eco.items) };
             let ok = taken.is_some();
             if let (Some(taken), Some(Some(p))) = (taken, self.players.get_mut(id as usize)) {
                 p.stock.gold += taken.gold;
@@ -600,6 +678,140 @@ impl World {
                 self.send_stock(id);
             }
         }
+    }
+
+    /// The vendor index of NPC `npc` if player `id` can trade with it right now, else why not.
+    fn vendor_of(&self, id: u16, npc: u16) -> Result<usize, &'static str> {
+        let Some(Some(p)) = self.players.get(id as usize) else { return Err("no such vendor") };
+        let n = self.npcs.by_id(npc).ok_or("no such vendor")?;
+        let v = n.vendor.ok_or("no such vendor")?;
+        if p.down_until.is_some() || !p.has_pos || (n.pos.x - p.pos.x).powi(2) + (n.pos.z - p.pos.z).powi(2) > SHOP_REACH * SHOP_REACH {
+            return Err("too far");
+        }
+        if n.down > 0.0 || self.npcs.economy().vendors[v].closed {
+            return Err("shut");
+        }
+        Ok(v)
+    }
+
+    fn send_to(&mut self, id: u16, msg: String) {
+        if let Some(Some(p)) = self.players.get_mut(id as usize) {
+            if p.tx.try_send(Message::Text(msg)).is_err() {
+                p.dead = true;
+            }
+        }
+    }
+
+    fn send_trade(&mut self, id: u16, op: &str, item: &str, units: u32, gold: f32, reason: &str) {
+        let msg = serde_json::to_string(&ServerMsg::Trade { ok: reason.is_empty(), op, item, units, gold, reason }).unwrap();
+        self.send_to(id, msg);
+    }
+
+    /// Player `id` opens the shop of the vendor `npc`: he is sent what it sells and what it would pay for what he carries.
+    fn open_shop(&mut self, id: u16, npc: u16) {
+        match self.vendor_of(id, npc) {
+            Ok(v) => self.send_shop(id, npc, v),
+            Err(reason) => self.send_trade(id, "shop", "", 0, 0.0, reason),
+        }
+    }
+
+    fn send_shop(&mut self, id: u16, npc: u16, v: usize) {
+        let msg = {
+            let eco = self.npcs.economy();
+            let ven = &eco.vendors[v];
+            let goods: Vec<ShopGood> = ven.stock.items.iter().filter_map(|(k, &q)| ven.ask(&eco.items, k).map(|ask| ShopGood { item: k.clone(), qty: q, ask, w: item_weight(&eco.items, k) })).collect();
+            let mine = self.players.get(id as usize).and_then(|p| p.as_ref()).map(|p| p.stock.items.clone()).unwrap_or_default();
+            let buys: Vec<ShopBid> = mine.iter().filter_map(|(k, &q)| ven.bid(&eco.items, k).map(|bid| ShopBid { item: k.clone(), qty: q, bid })).collect();
+            serde_json::to_string(&ServerMsg::Shop { npc, name: &ven.name, kind: ven.kind.title(), open: !ven.closed, gold: ven.stock.gold, goods, buys }).unwrap()
+        };
+        self.send_to(id, msg);
+    }
+
+    /// `Buy` / `Sell`: up to `qty` units of `item` against vendor `npc`, unit by unit at the price the vendor then has. What a player can carry limits a purchase.
+    fn trade(&mut self, id: u16, npc: u16, item: &str, qty: u32, buy: bool) {
+        use crate::economy::{Economy, Refusal};
+        let op = if buy { "buy" } else { "sell" };
+        let v = match self.vendor_of(id, npc) {
+            Ok(v) => v,
+            Err(reason) => {
+                self.send_trade(id, op, item, 0, 0.0, reason);
+                return;
+            }
+        };
+        let qty = qty.clamp(1, 1000);
+        let outcome: Result<(u32, f32), &'static str> = {
+            let mut eco = self.npcs.economy_mut();
+            let Economy { items, vendors } = &mut *eco;
+            let ven = &mut vendors[v];
+            let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
+            if items.get(item).is_none() {
+                Err("unknown item")
+            } else if buy {
+                let wielded = if p.weapon.is_empty() { 0.0 } else { item_weight(items, &p.weapon) };
+                let free = CARRY_LIMIT - p.stock.weight(items) - wielded;
+                let w = item_weight(items, item);
+                let fits = if w <= 0.0 { qty } else { (free / w).floor().max(0.0) as u32 };
+                if fits == 0 {
+                    Err("too heavy")
+                } else {
+                    match ven.sell_to(items, &mut p.stock, item, qty.min(fits)) {
+                        Ok(d) => Ok((d.units, d.gold)),
+                        Err(Refusal::UnknownItem) => Err("unknown item"),
+                        Err(Refusal::NotInTrade) => Err("not in trade"),
+                        Err(Refusal::NothingDone) => Err(if ven.stock.count(item) == 0 { "none left" } else { "too poor" }),
+                    }
+                }
+            } else if p.stock.count(item) == 0 {
+                Err("nothing to sell")
+            } else {
+                match ven.buy_from(items, &mut p.stock, item, qty) {
+                    Ok(d) => Ok((d.units, d.gold)),
+                    Err(Refusal::UnknownItem) => Err("unknown item"),
+                    Err(Refusal::NotInTrade) => Err("not in trade"),
+                    Err(Refusal::NothingDone) => Err("vendor cannot pay"),
+                }
+            }
+        };
+        match outcome {
+            Ok((units, gold)) => {
+                self.send_trade(id, op, item, units, gold, "");
+                self.send_stock(id);
+                self.send_shop(id, npc, v);
+            }
+            Err(reason) => self.send_trade(id, op, item, 0, 0.0, reason),
+        }
+    }
+
+    /// A player killed a mob of `rank`: what it drops goes into his pack, as much as fits.
+    fn reward_player(&mut self, id: u16, rank: u8, mid: u16) {
+        let (gold, drops, free) = {
+            let eco = self.npcs.economy();
+            let mut rng = (self.tick.wrapping_mul(2654435761) ^ (mid as u32).wrapping_mul(40503) ^ (id as u32 + 1)) | 1;
+            let (gold, drops) = crate::economy::loot(&eco.items, rank, &mut rng);
+            let free = self.players.get(id as usize).and_then(|p| p.as_ref()).map_or(0.0, |p| (CARRY_LIMIT - p.stock.weight(&eco.items) - if p.weapon.is_empty() { 0.0 } else { item_weight(&eco.items, &p.weapon) }).max(0.0));
+            (gold, drops, free)
+        };
+        let mut free = free;
+        let mut got: Vec<(String, u32)> = Vec::new();
+        {
+            let eco = self.npcs.economy();
+            for (k, q) in drops {
+                let w = item_weight(&eco.items, &k);
+                let n = if w <= 0.0 { q } else { q.min((free / w).floor() as u32) };
+                if n > 0 {
+                    free -= w * n as f32;
+                    got.push((k, n));
+                }
+            }
+        }
+        let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
+        p.stock.gold += gold;
+        for (k, n) in &got {
+            p.stock.add(k, *n);
+        }
+        let msg = serde_json::to_string(&ServerMsg::Drop { gold, items: got }).unwrap();
+        self.send_to(id, msg);
+        self.send_stock(id);
     }
 
     /// Everybody is told a tombstone has been emptied: it is gone.
@@ -624,6 +836,9 @@ impl World {
             if hp <= 0.0 {
                 self.npcs.loot_kill(owner, rank); // and a kill leaves loot
             }
+        } else if hp <= 0.0 {
+            let rank = self.mobs.mobs[mid as usize].rank;
+            self.reward_player(owner, rank, mid); // a player's kill drops straight into his pack
         }
         let m = &self.mobs.mobs[mid as usize];
         let (at, max) = ([m.pos.x, 0.0, m.pos.z], m.max_hp);

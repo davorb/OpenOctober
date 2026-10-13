@@ -249,7 +249,7 @@ async fn vendors_are_in_the_roster_and_visible_near_their_post() {
     // game z 200 -> wire z -200
     std::fs::write(f("vendors"), r#"[{"name":"Serawen","kind":"merchant","x":110,"z":200},{"name":"Targ","kind":"blacksmith","x":90,"z":205},{"name":"Far Away","kind":"merchant","x":9000,"z":9000}]"#).unwrap();
     let s = |n: &str| Some(f(n).to_string_lossy().to_string());
-    let cfg = Config { radius: 900.0, max_players: 4, tick_hz: 30, spawns: None, weapons: None, pvp: false, npcs: 10, pois: s("pois"), capitals: s("caps"), npc_seed: 2, db: None, nav: None, npc_time_scale: 1.0, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: s("items"), vendors: s("vendors") };
+    let cfg = Config { radius: 900.0, max_players: 4, tick_hz: 30, spawns: None, weapons: None, pvp: false, npcs: 10, pois: s("pois"), capitals: s("caps"), npc_seed: 2, db: None, nav: None, npc_time_scale: 1.0, own_weapons: false, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: s("items"), vendors: s("vendors") };
     let (cmds, rx) = mpsc::channel(64);
     tokio::spawn(world::run(cfg, rx));
     let (tx, mut inbox) = mpsc::channel(4096);
@@ -367,7 +367,7 @@ async fn a_vendor_that_is_attacked_strikes_back_hard() {
     std::fs::write(f("weapons"), WEAPONS).unwrap();
     std::fs::write(f("vendors"), r#"[{"name":"Serawen","kind":"merchant","x":110,"z":200}]"#).unwrap();
     let s = |n: &str| Some(f(n).to_string_lossy().to_string());
-    let cfg = Config { radius: 900.0, max_players: 4, tick_hz: 60, spawns: None, weapons: s("weapons"), pvp: true, npcs: 1, pois: s("pois"), capitals: s("caps"), npc_seed: 2, db: None, nav: None, npc_time_scale: 1.0, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: s("items"), vendors: s("vendors") };
+    let cfg = Config { radius: 900.0, max_players: 4, tick_hz: 60, spawns: None, weapons: s("weapons"), pvp: true, npcs: 1, pois: s("pois"), capitals: s("caps"), npc_seed: 2, db: None, nav: None, npc_time_scale: 1.0, own_weapons: false, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: s("items"), vendors: s("vendors") };
     let (cmds, rx) = mpsc::channel(256);
     tokio::spawn(world::run(cfg, rx));
     let (tx, mut inbox) = mpsc::channel(16384);
@@ -426,7 +426,7 @@ async fn a_vendor_defends_its_stall_against_mobs() {
     // wolves 15 m from the stall (game z 200 -> wire z -200)
     std::fs::write(f("spawns"), r#"[{"id":1,"x":125,"z":200,"mobs":[{"id":8,"name":"Wolf","qty":3,"difficulty":"Easy"}]}]"#).unwrap();
     let s = |n: &str| Some(f(n).to_string_lossy().to_string());
-    let cfg = Config { radius: 900.0, max_players: 4, tick_hz: 60, spawns: s("spawns"), weapons: s("weapons"), pvp: false, npcs: 1, pois: s("pois"), capitals: s("caps"), npc_seed: 2, db: None, nav: None, npc_time_scale: 1.0, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: s("items"), vendors: s("vendors") };
+    let cfg = Config { radius: 900.0, max_players: 4, tick_hz: 60, spawns: s("spawns"), weapons: s("weapons"), pvp: false, npcs: 1, pois: s("pois"), capitals: s("caps"), npc_seed: 2, db: None, nav: None, npc_time_scale: 1.0, own_weapons: false, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: s("items"), vendors: s("vendors") };
     let (cmds, rx) = mpsc::channel(256);
     tokio::spawn(world::run(cfg, rx));
     let (tx, mut inbox) = mpsc::channel(16384);

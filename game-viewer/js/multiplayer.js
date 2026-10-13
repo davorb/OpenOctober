@@ -144,10 +144,14 @@ export class Multiplayer {
     if (m.t === 'corpse') { this.addCorpse(m); return true; }
     if (m.t === 'tombstone') { this.addTomb(m); return true; }
     if (m.t === 'looted') { const c = this.corpses.get(m.cid); if (c) { if (c.root) this.scene.remove(c.root); this.corpses.delete(m.cid); } return true; }
+    if (m.t === 'shop') { this.shop = m; this.log(`${esc(m.name)} — ${m.goods.length} goods for sale, wants ${m.buys.length} of yours (${m.open ? 'open' : 'shut'})`, 'sys'); return true; }
+    if (m.t === 'trade') { this.log(m.ok ? `${m.op === 'buy' ? 'Bought' : 'Sold'} ${m.units} × ${esc(m.item.replace(/^r_/, ''))} for ${Math.round(m.gold)} gold` : `Cannot ${m.op === 'shop' ? 'open the shop' : m.op}: ${esc(m.reason)}`, 'sys'); return true; }
+    if (m.t === 'drop') { this.log(`Loot: ${Math.round(m.gold)} gold${m.items.length ? ' and ' + m.items.map(([k, q]) => q + ' × ' + esc(k.replace(/^r_/, ''))).join(', ') : ''}`, 'sys'); return true; }
     if (m.t === 'looting') { this.log(`Looting… stand still for ${m.secs} s`, 'sys'); return true; }
     if (m.t === 'lootend') { if (!m.ok) this.log('Looting interrupted', 'sys'); return true; }
-    if (m.t === 'stock') { const g = Math.round(m.gold), n = Object.values(m.items).reduce((a, b) => a + b, 0), had = this.stock; this.stock = { gold: g, units: n, items: m.items }; if (had && (g > had.gold || n > had.units)) this.log(`Looted — you carry ${g} gold and ${n} goods`, 'sys'); else if (had && g === 0 && n === 0 && (had.gold || had.units)) this.log('You lost everything you carried', 'sys'); return true; }
+    if (m.t === 'stock') { this.weapons?.setOwned(m.items, m.own); this.stockMsg = m; const g = Math.round(m.gold), n = Object.values(m.items).reduce((a, b) => a + b, 0), had = this.stock; this.stock = { gold: g, units: n, items: m.items }; if (had && (g > had.gold || n > had.units)) this.log(`Looted — you carry ${g} gold and ${n} goods`, 'sys'); else if (had && g === 0 && n === 0 && (had.gold || had.units)) this.log('You lost everything you carried', 'sys'); return true; }
     if (m.t === 'corpsegone') { const c = this.corpses.get(m.cid); if (c) { this.scene.remove(c.root); this.corpses.delete(m.cid); } return true; }
+    if (m.t === 'equip' && m.id === this.me) { this.weapons?.equip(m.w, m.drawn, true); return true; }   // the server says what is in our hand
     if (m.t === 'equip') { if (p) { p.info.weapon = m.w; p.info.drawn = m.drawn; this.wield(p); } return true; }
     if (m.t === 'swing') {
       const a = p?.av; if (!a) return true; a.anim?.play(m.clip);
@@ -231,6 +235,7 @@ export class Multiplayer {
     addEventListener('keydown', e => {
       if (!document.body.classList.contains('playing')) return;
       if (e.code === 'KeyF' && !e.repeat && !this.typing) { this.lootNearest(); return; }
+      if (e.code === 'KeyB' && !e.repeat && !this.typing) { this.openShop(); return; }
       if (e.code === 'Tab') { e.preventDefault(); if (!e.repeat) { $('plist').classList.toggle('on'); this.renderList(); } return; }
       if (!this.typing && (e.code === 'Enter' || e.code === 'NumpadEnter') && !e.repeat) { e.preventDefault(); this.openChat(); }
     });
@@ -246,6 +251,15 @@ export class Multiplayer {
     for (const [cid, c] of this.corpses) { if (!c.tomb || !(c.gold > 0 || c.units > 0)) continue; const d = Math.hypot(c.x - cam.x, c.z - cam.z); if (d < bd) { bd = d; best = cid; } }
     if (best !== null) this.sendJson({ t: 'loot', cid: best });
   }
+  /** The vendor NPC nearest to us within reach (the server decides in the end), for a trading window. */
+  nearestVendor(reach = 8) {
+    const cam = this.camera.position; let best = null, bd = reach;
+    for (const p of this.players.values()) { if (p.info.role !== 'vendor' || !p.av?.root) continue; const d = Math.hypot(p.av.root.position.x - cam.x, p.av.root.position.z - cam.z); if (d < bd) { bd = d; best = p.info.id; } }
+    return best;
+  }
+  openShop(npc = this.nearestVendor()) { if (npc != null) this.sendJson({ t: 'shop', npc }); else this.log('No vendor within reach', 'sys'); }
+  buy(npc, item, qty = 1) { this.sendJson({ t: 'buy', npc, item, qty }); }
+  sell(npc, item, qty = 1) { this.sendJson({ t: 'sell', npc, item, qty }); }
   openChat() { this.typing = true; document.exitPointerLock?.(); this.$('chat').classList.add('typing'); this.input.value = ''; this.input.focus(); }
   closeChat() { this.typing = false; this.input.blur(); this.$('chat').classList.remove('typing'); this.$('view').requestPointerLock?.()?.catch?.(() => {}); }
   log(html, cls = '') {

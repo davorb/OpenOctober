@@ -125,6 +125,15 @@ pub enum ClientMsg {
     Respawn,
     /// Take everything from a body's tombstone (`cid` of its `Corpse` message): you have to stand within a few metres of it.
     Loot { cid: u32 },
+    /// Open the shop of the vendor NPC `npc` (you have to be within a few metres): answered by `Shop`.
+    Shop { npc: u16 },
+    /// Buy / sell up to `qty` units of `item` at that vendor: answered by `Trade`, `Stock` and a fresh `Shop`.
+    Buy { npc: u16, item: String, #[serde(default = "one")] qty: u32 },
+    Sell { npc: u16, item: String, #[serde(default = "one")] qty: u32 },
+}
+
+fn one() -> u32 {
+    1
 }
 
 #[derive(Debug, Serialize)]
@@ -163,7 +172,17 @@ pub enum ServerMsg<'a> {
     /// The channel ended: `ok` = you got it; otherwise interrupted or somebody else was first.
     LootEnd { cid: u32, ok: bool },
     /// What you carry (sent after joining and whenever it changes): gold and goods by item id.
-    Stock { gold: f32, items: &'a std::collections::BTreeMap<String, u32> },
+    /// `weight` includes the wielded weapon; `limit` is what you can carry.
+    /// `own`: the server only lets you wield weapons that are in your pack (or already in your hand).
+    Stock { gold: f32, items: &'a std::collections::BTreeMap<String, u32>, weight: f32, limit: f32, own: bool },
+    /// A vendor's shop as you see it: what it sells (`goods`: units in stock, price per unit now, weight per unit) and what it would pay for things you
+    /// carry (`buys`). Prices move with every unit traded, so the total of a purchase is a little more than `ask * qty` when it is large.
+    Shop { npc: u16, name: &'a str, kind: &'a str, open: bool, gold: f32, goods: Vec<ShopGood>, buys: Vec<ShopBid> },
+    /// You killed a mob and what it dropped went into your pack (as much as fits): gold and goods.
+    Drop { gold: f32, items: Vec<(String, u32)> },
+    /// The outcome of a `Buy` / `Sell`: how many units changed hands and for how much gold in all; `reason` says why a refused one was ("too far",
+    /// "shut", "unknown item", "not in trade", "none left", "too poor", "too heavy", "nothing to sell", "vendor cannot pay").
+    Trade { ok: bool, op: &'a str, item: &'a str, units: u32, gold: f32, reason: &'a str },
     /// Your own health (after joining).
     Hp { hp: f32, max: f32 },
 }
@@ -171,4 +190,19 @@ pub enum ServerMsg<'a> {
 /// Trim, drop control characters, cap the length (in chars).
 pub fn clean(s: &str, max: usize) -> String {
     s.chars().filter(|c| !c.is_control()).take(max).collect::<String>().trim().to_string()
+}
+
+#[derive(Debug, Serialize)]
+pub struct ShopGood {
+    pub item: String,
+    pub qty: u32,
+    pub ask: f32,
+    pub w: f32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ShopBid {
+    pub item: String,
+    pub qty: u32,
+    pub bid: f32,
 }
