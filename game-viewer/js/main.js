@@ -124,9 +124,11 @@ addEventListener('keydown', e => {
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
 });
 addEventListener('keyup', e => keys.delete(e.code));
-const touch = touchWanted() ? new TouchControls({ keys, look: (dx, dy) => { yaw -= dx; pitch = Math.max(-1.55, Math.min(1.55, pitch - dy)); } }) : { x: 0, y: 0, sprint: false, setMode() {} };
+const touch = touchWanted() ? new TouchControls({ keys, look: (dx, dy) => aim(dx, dy) }) : { x: 0, y: 0, sprint: false, setMode() {} };
 addEventListener('blur', () => keys.clear());
-addEventListener('mousemove', e => { if (!locked && !dragging) return; yaw -= e.movementX * 0.0022; pitch = Math.max(-1.55, Math.min(1.55, pitch - e.movementY * 0.0022)); });
+// a dead player lies where he fell: no look until he gets up
+function aim(dx, dy) { if (weapons?.dead) return; yaw -= dx; pitch = Math.max(-1.55, Math.min(1.55, pitch - dy)); }
+addEventListener('mousemove', e => { if (!locked && !dragging) return; aim(e.movementX * 0.0022, e.movementY * 0.0022); });
 let dragging = false;
 $('view').addEventListener('mousedown', e => { if (!document.body.classList.contains('playing')) return; if (!locked) $('view').requestPointerLock?.(); else weapons.mouse(e.button, true); });
 addEventListener('mouseup', e => { if (locked) weapons.mouse(e.button, false); });
@@ -156,18 +158,18 @@ function frameInner() {
   if (mode === 'walk') {
     // WASD relative to where you look, flattened onto the ground plane
     let fx = 0, fz = 0;
-    if (keys.has('KeyW')) fz -= 1; if (keys.has('KeyS')) fz += 1; if (keys.has('KeyD')) fx += 1; if (keys.has('KeyA')) fx -= 1;
-    fx += touch.x; fz += touch.y;
+    const dead = weapons?.dead;
+    if (!dead) { if (keys.has('KeyW')) fz -= 1; if (keys.has('KeyS')) fz += 1; if (keys.has('KeyD')) fx += 1; if (keys.has('KeyA')) fx -= 1; fx += touch.x; fz += touch.y; }
     const l = Math.max(1, Math.hypot(fx, fz)), s = Math.sin(yaw), c = Math.cos(yaw);
     // game speeds: W = run, Ctrl = walk, Shift = sprint (see SPEEDS)
-    const crouch = keys.has('KeyC') && !player.swim; player.setCrouch(crouch, dt);
+    const crouch = !dead && keys.has('KeyC') && !player.swim; player.setCrouch(crouch, dt);
     const moving = fx !== 0 || fz !== 0, sprinting = run && moving && stamina.canSprint && !keys.has('ControlLeft') && !crouch;
     stamina.update(dt, sprinting);
     const sp = player.swim ? (sprinting ? SPEEDS.swim * 1.75 : SPEEDS.swim) : crouch ? SPEEDS.crouch : keys.has('ControlLeft') ? SPEEDS.walk : sprinting ? SPEEDS.sprint : SPEEDS.run;
     const tx = (fx * c + fz * s) / l * sp, tz = (-fx * s + fz * c) / l * sp;
     const k = 1 - Math.exp(-dt * (player.onGround ? 12 : 2.5));          // less air control
     vel.x += (tx - vel.x) * k; vel.z += (tz - vel.z) * k;
-    let left = dt; const jump = keys.has('Space') && !crouch && stamina.canJump(), wasGround = player.onGround;
+    let left = dt; const jump = !dead && keys.has('Space') && !crouch && stamina.canJump(), wasGround = player.onGround;
     while (left > 0) { const h = Math.min(left, 1 / 60); player.update(h, vel.x, vel.z, jump); left -= h; }
     if (jump && wasGround && !player.onGround && player.vy > 0) stamina.spend(STAMINA.jumpCost);
     camera.position.set(player.pos.x, player.pos.y + player.eye, player.pos.z);
@@ -175,10 +177,12 @@ function frameInner() {
     stamina.update(dt, false); player.setCrouch(false, dt);
     camera.getWorldDirection(fwd); right.crossVectors(fwd, up).normalize();
     mv.set(0, 0, 0);
-    if (keys.has('KeyW')) mv.add(fwd); if (keys.has('KeyS')) mv.sub(fwd);
-    if (keys.has('KeyD')) mv.add(right); if (keys.has('KeyA')) mv.sub(right);
-    mv.addScaledVector(fwd, -touch.y).addScaledVector(right, touch.x);
-    if (keys.has('Space') || keys.has('KeyE')) mv.y += 1; if (keys.has('KeyC') || keys.has('KeyQ')) mv.y -= 1;
+    if (!weapons?.dead) {
+      if (keys.has('KeyW')) mv.add(fwd); if (keys.has('KeyS')) mv.sub(fwd);
+      if (keys.has('KeyD')) mv.add(right); if (keys.has('KeyA')) mv.sub(right);
+      mv.addScaledVector(fwd, -touch.y).addScaledVector(right, touch.x);
+      if (keys.has('Space') || keys.has('KeyE')) mv.y += 1; if (keys.has('KeyC') || keys.has('KeyQ')) mv.y -= 1;
+    }
     if (mv.lengthSq() > 1) mv.normalize();
     const sp = baseSpeed * (run ? 5 : 1) * (keys.has('ControlLeft') ? 0.2 : 1);
     vel.lerp(mv.multiplyScalar(sp), 1 - Math.exp(-dt * 6));
