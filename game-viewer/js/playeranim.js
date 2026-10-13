@@ -44,6 +44,13 @@ export class PlayerAnim {
     for (const p of [PREFIX[this.stance], PREFIX.one, PREFIX.none]) if (this.clips[`${p}_${g}`]) return `${p}_${g}`;
     return null;
   }
+  /** The crouch clip for the move direction (body frame; others' avatars only report speed, so they crouch-walk forward). Null when the file lacks crouch clips. */
+  pickCrouch(speed, move) {
+    if (speed < 0.15) return this.clips.crouch_idle ? 'crouch_idle' : null;
+    let d = 'forward';
+    if (move && (move.x || move.z)) { const m = Math.hypot(move.x, move.z), z = move.z / m, x = move.x / m, f = z > 0.38 ? 'forward' : z < -0.38 ? 'backward' : '', s = x > 0.38 ? 'right' : x < -0.38 ? 'left' : ''; d = f && s ? `${f}_${s}` : f || s || 'forward'; }
+    return this.clips[`crouch_${d}`] ? `crouch_${d}` : this.clips.crouch_forward ? 'crouch_forward' : null;
+  }
   /** One upper-body clip (a name from data/playeranims, e.g. 'singlehand_attack_01'); returns its duration in seconds, 0 if the file lacks it. */
   play(name, rate = 1) {
     const c = this.clips[name]; if (!c) return 0;
@@ -53,14 +60,14 @@ export class PlayerAnim {
 
   frame(name, t) { const c = this.clips[name]; return name === 'gank_death' ? Math.min(t, c.period) / c.dt : (t % c.period) / c.dt; }   // dying plays once and stays down
   update(dt, speed = 0, air = false, swim = false, move = null) {
-    const want = this.pick(speed, air, swim, move);
+    const want = (!air && !swim && !this.dead && move?.crouch && this.pickCrouch(speed, move.x !== undefined ? move : null)) || this.pick(speed, air, swim, move?.crouch ? null : move);
     if (want && want !== this.cur) {
       const loco = n => /_(walk|run|sprint)_forward$/.test(n || '');
       if (this.cur) { this.prev = this.cur; this.pt = this.t; this.fade = 0; }
       this.t = loco(want) && loco(this.cur) ? this.t * this.clips[want].period / this.clips[this.cur].period : 0; this.cur = want;
     }
     if (!this.cur) return;
-    const gait = GAIT.find(([n]) => this.cur.endsWith(n)) || (/run_(left|right)$/.test(this.cur) ? GAIT[2] : /walk_backward$/.test(this.cur) ? GAIT[1] : null), ref = gait && gait[1] ? gait[1] : 0, rate = ref && speed > 0.15 ? Math.min(1.5, Math.max(0.5, speed / ref)) : 1;
+    const gait = /^crouch_/.test(this.cur) ? null : GAIT.find(([n]) => this.cur.endsWith(n)) || (/run_(left|right)$/.test(this.cur) ? GAIT[2] : /walk_backward$/.test(this.cur) ? GAIT[1] : null), ref = gait && gait[1] ? gait[1] : 0, rate = ref && speed > 0.15 ? Math.min(1.5, Math.max(0.5, speed / ref)) : 1;
     this.t += dt * rate; this.pt += dt; if (this.fade < 1) this.fade = Math.min(1, this.fade + dt / FADE);
     if (this.dead) this.up = null;
     this.holdT = (this.holdT || 0) + dt;

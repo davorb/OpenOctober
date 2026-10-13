@@ -203,7 +203,7 @@ function frameInner() {
     camera.position.copy(bodyEye).addScaledVector(f3, -4.6 * (1 + Math.max(0, -pitch) * 0.2)); camera.position.x += Math.cos(yaw) * 0.8; camera.position.z -= Math.sin(yaw) * 0.8; camera.position.y += 0.5;
     const gc = world.groundHeight(camera.position.x, camera.position.z, camera.position.y + 3); if (gc != null && gc > -1e8 && camera.position.y < gc + 0.7) camera.position.y = gc + 0.7;
   }
-  selfAv.show(third); selfAv.update(dt, body, yaw, hv, mode === 'fly' || !player.onGround, player.swim, { x: vel.x * Math.cos(yaw) - vel.z * Math.sin(yaw), z: -vel.x * Math.sin(yaw) - vel.z * Math.cos(yaw) });
+  selfAv.show(third); selfAv.update(dt, body, yaw, hv, mode === 'fly' || !player.onGround, player.swim, { crouch: mode === 'walk' && player.crouching, x: vel.x * Math.cos(yaw) - vel.z * Math.sin(yaw), z: -vel.x * Math.sin(yaw) - vel.z * Math.cos(yaw) });
   weapons.eye = bodyEye;
   camera.updateMatrixWorld(true);
   mp.update(dt, performance.now() / 1000);
@@ -284,7 +284,7 @@ setTimeout(setModeLabel, 0);
 window.dbg = { post, player, tp: (x, y, z) => { camera.position.set(x, y, -z); player.pos.set(x, y - player.eye, -z); player.vy = 0; }, camera, world, env, music, scene, renderer, ambience, set: (x, y, z) => camera.position.set(x, y, -z), look: (yw, pt) => { yaw = yw; pitch = pt; } };
 const intro = $('intro');
 const mp = new Multiplayer({ scene, camera, world, $, toast,
-  getSelf: () => ({ x: body.x, y: body.y, z: body.z, yaw: camera.rotation.y, swim: mode === 'walk' && player.swim, air: mode === 'fly' || !player.onGround, fly: mode === 'fly' }) });
+  getSelf: () => ({ x: body.x, y: body.y, z: body.z, yaw: camera.rotation.y, swim: mode === 'walk' && player.swim, air: mode === 'fly' || !player.onGround, fly: mode === 'fly', crouch: mode === 'walk' && player.crouching && !player.swim }) });
 window.dbg.mp = mp;
 const sfx = new Sfx(), fx = new CombatFx({ scene, world, sfx, factory: mp.factory, data: await J('/data/combatfx.json') });
 weapons = new Weapons({ camera, post, world, factory: mp.factory, sfx, fx, net: mp.combat, toast, $, light: { sun: sunL, hemi }, stamina });

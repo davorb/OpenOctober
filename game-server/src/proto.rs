@@ -27,6 +27,8 @@ pub const FLAG_DEAD: u8 = 8;
 pub const FLAG_FIGHT: u8 = 16;
 /// Players only: the avatar is a server-run NPC (its `PlayerInfo::npc` is set too).
 pub const FLAG_NPC: u8 = 64;
+/// Players only: the avatar is crouching (clients play the crouch clips). Relayed untouched.
+pub const FLAG_CROUCH: u8 = 128;
 
 pub const RACES: [&str; 6] = ["hum", "alf", "dwf", "ork", "mir", "mhm"];
 pub const GENDERS: [&str; 2] = ["m", "f"];

@@ -8,7 +8,7 @@
 const fs = require('fs'), path = require('path'), crypto = require('crypto');
 const { parse } = require('./build_mobanims.js');
 const ROOT = path.join(__dirname, '../..'), OUT = path.join(__dirname, '../data/playeranims');
-const PRIMARY = /^(normal|attackmode|attackmode_2handed|attackmode_halberd)_(idle|idle_01|walk_forward|walk_backward|run_forward|run_left|run_right|sprint_forward)$|^(jump_start|jump_end|jump_01|falling|swim_idle|swim_forward|swim_sprint|gank_death|gank_idle_death|get_up|dodge_(singlehand|2handed|halberd)_(forward|backward|left|right))$/;
+const PRIMARY = /^(normal|attackmode|attackmode_2handed|attackmode_halberd)_(idle|idle_01|walk_forward|walk_backward|run_forward|run_left|run_right|sprint_forward)$|^crouch_(idle|forward|backward|left|right|forward_left|forward_right|backward_left|backward_right)$|^(jump_start|jump_end|jump_01|falling|swim_idle|swim_forward|swim_sprint|gank_death|gank_idle_death|get_up|dodge_(singlehand|2handed|halberd)_(forward|backward|left|right))$/;
 const SECONDARY = /^(singlehand|2handed|halberd|2daggers)_(attack_0[1-4]|vertical_attack_01|stab|wirlwind|parrying|knockback|seize)$|^combo_|^melee_disabling|^(unsheathe|sheathe)_|^(bow_|magic_|attack_throw)/;
 const cache = {};
 const sfas = n => (cache[n] ??= (() => { try { return parse(path.join(ROOT, 'export/mesh/sfa', n)); } catch (e) { console.warn(n + ': ' + e.message); return null; } })());

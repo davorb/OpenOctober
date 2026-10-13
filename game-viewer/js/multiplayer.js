@@ -7,7 +7,7 @@ import { AvatarFactory, RACES, AVATAR_HEIGHT, pose } from './avatars.js';
 import { MobWorld, OP_MOBS } from './mobs.js';
 import { PlayerAnim } from './playeranim.js';
 
-const OP_POS = 1, OP_SNAPSHOT = 2, FLAG_SWIM = 1, FLAG_AIR = 2, FLAG_SNAP = 4, FLAG_FLY = 32;
+const OP_POS = 1, OP_SNAPSHOT = 2, FLAG_SWIM = 1, FLAG_AIR = 2, FLAG_SNAP = 4, FLAG_FLY = 32, FLAG_CROUCH = 128;
 const SEND_HZ = 15, INTERP = 0.13;                  // render remote players this many seconds in the past (a bit over one tick)
 const AVATAR_NEAR = 420, NAME_NEAR = 260, DOT_FAR = 1500, SHADOW_NEAR = 90, POSE_NEAR = 180;
 const RUN = 3.7 * 1.5;                              // m/s of a full-speed stride (matches SPEEDS.run)
@@ -222,7 +222,7 @@ export class Multiplayer {
     b.setFloat32(1, s.x, true); b.setFloat32(5, s.y, true); b.setFloat32(9, s.z, true); b.setFloat32(13, s.yaw, true);
     if (this.last) this.speed += (Math.hypot(s.x - this.last.x, s.z - this.last.z) / dt - this.speed) * 0.5;   // smoothed horizontal speed
     this.last = s;
-    b.setUint8(17, Math.min(255, Math.round(this.speed * 10))); b.setUint8(18, (s.swim ? FLAG_SWIM : 0) | (s.air ? FLAG_AIR : 0) | (s.fly ? FLAG_FLY : 0));
+    b.setUint8(17, Math.min(255, Math.round(this.speed * 10))); b.setUint8(18, (s.swim ? FLAG_SWIM : 0) | (s.air ? FLAG_AIR : 0) | (s.fly ? FLAG_FLY : 0) | (s.crouch ? FLAG_CROUCH : 0));
     this.ws.send(b.buffer);
   }
   sendJson(o) { if (this.online && this.ws?.readyState === 1) this.ws.send(JSON.stringify(o)); }
@@ -321,7 +321,7 @@ export class Multiplayer {
       // animation: stride phase advances with distance travelled
       const amp = Math.min(1, st.speed / RUN), air = !!(st.flags & FLAG_AIR) && !(st.flags & FLAG_SWIM);
       if (st.speed > 0.15 && !air) a.phase += dt * (3 + st.speed * 1.9);
-      if (dist < POSE_NEAR || !a.posed) { if (a.anim) a.anim.update(dt, st.speed, air, !!(st.flags & FLAG_SWIM)); else pose(a, Math.sin(a.phase), st.speed > 0.15 ? Math.max(0.25, amp) : 0, air); a.posed = true; }
+      if (dist < POSE_NEAR || !a.posed) { if (a.anim) a.anim.update(dt, st.speed, air, !!(st.flags & FLAG_SWIM), (st.flags & FLAG_CROUCH) ? { crouch: true } : null); else pose(a, Math.sin(a.phase), st.speed > 0.15 ? Math.max(0.25, amp) : 0, air); a.posed = true; }
       const shadow = dist < SHADOW_NEAR; if (shadow !== a.cast) { a.cast = shadow; a.root.traverse(n => { if (n.isMesh) n.castShadow = shadow; }); }
       // tags above the head, constant on-screen size
       const topY = st.y + AVATAR_HEIGHT + 0.25, th = 22 * fovK * dist, ty = th + 0.1;
