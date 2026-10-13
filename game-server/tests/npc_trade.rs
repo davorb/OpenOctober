@@ -3,6 +3,7 @@ use game_server::combat::Weapons;
 use game_server::economy::*;
 use game_server::nav::{Nav, NavTile};
 use game_server::npcs::*;
+use std::time::Duration;
 
 const ITEMS: &str = r#"[
  {"id":"r_Apple","cost":2,"group":"food","stack":true},{"id":"r_Bread","cost":4,"group":"food","stack":true},
@@ -248,7 +249,7 @@ async fn vendors_are_in_the_roster_and_visible_near_their_post() {
     // game z 200 -> wire z -200
     std::fs::write(f("vendors"), r#"[{"name":"Serawen","kind":"merchant","x":110,"z":200},{"name":"Targ","kind":"blacksmith","x":90,"z":205},{"name":"Far Away","kind":"merchant","x":9000,"z":9000}]"#).unwrap();
     let s = |n: &str| Some(f(n).to_string_lossy().to_string());
-    let cfg = Config { radius: 900.0, max_players: 4, tick_hz: 30, spawns: None, weapons: None, pvp: false, npcs: 10, pois: s("pois"), capitals: s("caps"), npc_seed: 2, db: None, nav: None, npc_time_scale: 1.0, items: s("items"), vendors: s("vendors") };
+    let cfg = Config { radius: 900.0, max_players: 4, tick_hz: 30, spawns: None, weapons: None, pvp: false, npcs: 10, pois: s("pois"), capitals: s("caps"), npc_seed: 2, db: None, nav: None, npc_time_scale: 1.0, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: s("items"), vendors: s("vendors") };
     let (cmds, rx) = mpsc::channel(64);
     tokio::spawn(world::run(cfg, rx));
     let (tx, mut inbox) = mpsc::channel(4096);
@@ -285,4 +286,170 @@ async fn vendors_are_in_the_roster_and_visible_near_their_post() {
     assert_eq!(vendors_in_roster, 2, "the vendor 9 km out of town is dropped: {roles:?}");
     assert_eq!(roles.len(), 12, "two vendors and ten others");
     assert!(seen_vendor, "the vendors stand in view of a player at the counter");
+}
+
+#[test]
+fn vendors_are_killable_but_enormously_strong_and_a_dead_one_drops_its_shop() {
+    let mut w = world(2, 5);
+    w.equip_all(&Weapons::parse(WEAPONS).unwrap());
+    let v = w.npcs.iter().position(|n| n.role == Role::Vendor).unwrap();
+    let id = w.npcs[v].id;
+    // armed with the best weapon there is, ordinary NPCs are an order of magnitude weaker
+    assert_eq!(w.npcs[v].info.weapon, "r_War Sword");
+    assert_eq!(w.npcs[v].max_hp, VENDOR_HP);
+    assert!(VENDOR_HP >= 20.0 * game_server::combat::npc_hp(100.0), "a vendor takes an army to kill");
+    let adventurer = w.npcs.iter().find(|n| n.role == Role::Adventurer).unwrap().id;
+    assert!(w.damage_factor(id) > 5.0 * w.damage_factor(adventurer), "and hits far harder: {} vs {}", w.damage_factor(id), w.damage_factor(adventurer));
+    // killed: the shelves and the purse go onto the body, the shop is shut
+    let (gold, shelves) = {
+        let eco = w.economy();
+        (eco.vendors[0].stock.gold, eco.vendors[0].stock.items.clone())
+    };
+    assert!(gold > 0.0 && !shelves.is_empty());
+    let dropped = w.drop_all(id);
+    assert_eq!(dropped.gold, gold);
+    assert!(shelves.iter().all(|(k, &q)| dropped.count(k) == q), "all of the shelves lie on the body");
+    assert_eq!(dropped.count("r_War Sword"), 1, "and the weapon from its hand");
+    {
+        let eco = w.economy();
+        assert!(eco.vendors[0].closed && eco.vendors[0].stock.items.is_empty() && eco.vendors[0].stock.gold == 0.0);
+        let any = eco.items.list.first().unwrap().id.clone();
+        assert!(eco.vendors[0].ask(&eco.items, &any).is_none() && eco.vendors[0].bid(&eco.items, &any).is_none(), "nothing is asked or bid in a shut shop");
+    }
+    // it is back at its post later, the shop open again with bare shelves and a little gold
+    w.npcs[v].pos.x = 500.0;
+    w.npcs[v].down = 0.3;
+    w.npcs[v].lod = Lod::Active;
+    w.step(1.0, &[(500.0, 0.0)], 900.0);
+    let n = &w.npcs[v];
+    let post = w.economy().vendors[0].post;
+    assert_eq!((n.pos.x, n.pos.z), post, "back at its post");
+    let eco = w.economy();
+    assert!(!eco.vendors[0].closed && eco.vendors[0].stock.items.is_empty());
+    assert!((eco.vendors[0].stock.gold - eco.vendors[0].base_gold * 0.2).abs() < 0.01);
+    assert_eq!(n.max_hp, VENDOR_HP);
+}
+
+#[test]
+fn nobody_trades_with_a_dead_vendor() {
+    let mut w = world(1, 11);
+    let i = w.npcs.iter().position(|n| n.role != Role::Vendor).unwrap();
+    for v in 0..w.vendor_count() {
+        w.economy_mut().vendors[v].closed = true; // the whole town's shops are shut
+    }
+    {
+        let n = &mut w.npcs[i];
+        n.role = Role::Adventurer;
+        n.stock = Stock { gold: 50.0, items: Default::default() };
+        n.stock.add("r_Iron", 5);
+        n.pos.x = 1000.0;
+        n.pos.z = 700.0;
+        n.at = 1;
+        n.goal = Goal::Travel { dest: 0 };
+    }
+    far(&mut w, 900.0);
+    assert_eq!(w.npcs[i].stock.count("r_Iron"), 5, "nobody to sell it to");
+}
+
+#[tokio::test]
+async fn a_vendor_that_is_attacked_strikes_back_hard() {
+    use game_server::npcs::NPC_ID_BASE;
+    use game_server::proto::*;
+    use game_server::world::{self, Cmd, Config, JoinReq};
+    use tokio::sync::{mpsc, oneshot};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let dir = std::env::temp_dir();
+    let f = |n: &str| dir.join(format!("df_vfight_{n}.json"));
+    std::fs::write(f("pois"), r#"[{"name":"Town","type":"Village","x":100,"z":200}]"#).unwrap();
+    std::fs::write(f("caps"), r#"[{"name":"Capital","race":"Ork","x":100,"y":0,"z":200}]"#).unwrap(); // an orcish town: its vendor must not attack a human on sight
+    std::fs::write(f("items"), ITEMS).unwrap();
+    std::fs::write(f("weapons"), WEAPONS).unwrap();
+    std::fs::write(f("vendors"), r#"[{"name":"Serawen","kind":"merchant","x":110,"z":200}]"#).unwrap();
+    let s = |n: &str| Some(f(n).to_string_lossy().to_string());
+    let cfg = Config { radius: 900.0, max_players: 4, tick_hz: 60, spawns: None, weapons: s("weapons"), pvp: true, npcs: 1, pois: s("pois"), capitals: s("caps"), npc_seed: 2, db: None, nav: None, npc_time_scale: 1.0, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: s("items"), vendors: s("vendors") };
+    let (cmds, rx) = mpsc::channel(256);
+    tokio::spawn(world::run(cfg, rx));
+    let (tx, mut inbox) = mpsc::channel(16384);
+    let (reply, reply_rx) = oneshot::channel();
+    cmds.send(Cmd::Join(JoinReq { name: "attacker".into(), race: "hum".into(), gender: "m".into(), gear: String::new(), tx, reply })).await.unwrap();
+    let me = reply_rx.await.unwrap().unwrap();
+    let vendor_id = NPC_ID_BASE as u64;
+    // first he just stands next to the vendor: nothing happens, even in a town of the other side
+    cmds.send(Cmd::Pos(me, PosUpdate { x: 110.0, y: 0.0, z: -197.0, ..Default::default() })).await.unwrap();
+    cmds.send(Cmd::Equip(me, "r_Iron Sword".into(), true)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    while let Ok(m) = inbox.try_recv() {
+        if let Message::Text(t) = m {
+            let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+            assert!(v["t"] != "hit" && v["t"] != "swing", "a vendor never attacks first: {v}");
+        }
+    }
+    // then he strikes it
+    let (mut struck, mut hit_back) = (false, None::<f64>);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while tokio::time::Instant::now() < deadline && hit_back.is_none() {
+        cmds.send(Cmd::Pos(me, PosUpdate { x: 110.0, y: 0.0, z: -198.0, yaw: 0.0, ..Default::default() })).await.unwrap(); // 2 m south of the vendor, facing it
+        cmds.send(Cmd::Attack(me, "melee".into(), "singlehand_attack_01".into())).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        while let Ok(m) = inbox.try_recv() {
+            let Message::Text(t) = m else { continue };
+            let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+            if v["t"] == "hit" && v["a"].as_u64() == Some(me as u64) && v["i"].as_u64() == Some(vendor_id) {
+                struck = true;
+                assert!(v["max"].as_f64().unwrap() >= 5000.0, "a vendor has an enormous health pool: {v}");
+            }
+            if v["t"] == "hit" && v["a"].as_u64() == Some(vendor_id) && v["i"].as_u64() == Some(me as u64) {
+                hit_back = Some(v["dmg"].as_f64().unwrap());
+            }
+        }
+    }
+    assert!(struck, "the blow landed on the vendor");
+    assert!(hit_back.expect("the vendor struck back") > 100.0, "and it hits hard: {hit_back:?}");
+}
+
+#[tokio::test]
+async fn a_vendor_defends_its_stall_against_mobs() {
+    use game_server::npcs::NPC_ID_BASE;
+    use game_server::proto::*;
+    use game_server::world::{self, Cmd, Config, JoinReq};
+    use tokio::sync::{mpsc, oneshot};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let dir = std::env::temp_dir();
+    let f = |n: &str| dir.join(format!("df_vguard_{n}.json"));
+    std::fs::write(f("pois"), r#"[{"name":"Town","type":"Village","x":100,"z":200}]"#).unwrap();
+    std::fs::write(f("caps"), r#"[{"name":"Capital","race":"Human","x":100,"y":0,"z":200}]"#).unwrap();
+    std::fs::write(f("items"), ITEMS).unwrap();
+    std::fs::write(f("weapons"), WEAPONS).unwrap();
+    std::fs::write(f("vendors"), r#"[{"name":"Serawen","kind":"merchant","x":110,"z":200}]"#).unwrap();
+    // wolves 15 m from the stall (game z 200 -> wire z -200)
+    std::fs::write(f("spawns"), r#"[{"id":1,"x":125,"z":200,"mobs":[{"id":8,"name":"Wolf","qty":3,"difficulty":"Easy"}]}]"#).unwrap();
+    let s = |n: &str| Some(f(n).to_string_lossy().to_string());
+    let cfg = Config { radius: 900.0, max_players: 4, tick_hz: 60, spawns: s("spawns"), weapons: s("weapons"), pvp: false, npcs: 1, pois: s("pois"), capitals: s("caps"), npc_seed: 2, db: None, nav: None, npc_time_scale: 1.0, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: s("items"), vendors: s("vendors") };
+    let (cmds, rx) = mpsc::channel(256);
+    tokio::spawn(world::run(cfg, rx));
+    let (tx, mut inbox) = mpsc::channel(16384);
+    let (reply, reply_rx) = oneshot::channel();
+    cmds.send(Cmd::Join(JoinReq { name: "watcher".into(), race: "hum".into(), gender: "m".into(), gear: String::new(), tx, reply })).await.unwrap();
+    let me = reply_rx.await.unwrap().unwrap();
+    cmds.send(Cmd::Pos(me, PosUpdate { x: 110.0, y: 0.0, z: -230.0, flags: FLAG_FLY, ..Default::default() })).await.unwrap();
+    let vendor_id = NPC_ID_BASE as u64;
+    let (mut struck_mob, mut killed) = (0, 0);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+    while tokio::time::Instant::now() < deadline && killed < 3 {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        while let Ok(m) = inbox.try_recv() {
+            let Message::Text(t) = m else { continue };
+            let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+            if v["t"] == "hit" && v["a"].as_u64() == Some(vendor_id) && v["v"] == "m" {
+                struck_mob += 1;
+                if v["killed"] == true {
+                    killed += 1;
+                }
+            }
+        }
+    }
+    assert!(struck_mob > 0, "the vendor fought the wolves that came to its stall");
+    assert_eq!(killed, 3, "and killed all of them, being what it is");
 }

@@ -142,7 +142,10 @@ export class Multiplayer {
   onCombat(m) {
     const W = this.weapons, now = performance.now() / 1000, p = this.players.get(m.id), at = a => new THREE.Vector3(a[0], a[1], a[2]);
     if (m.t === 'corpse') { this.addCorpse(m); return true; }
-    if (m.t === 'looted') { const c = this.corpses.get(m.cid); if (c) { c.gold = 0; c.units = 0; } return true; }
+    if (m.t === 'tombstone') { this.addTomb(m); return true; }
+    if (m.t === 'looted') { const c = this.corpses.get(m.cid); if (c) { if (c.root) this.scene.remove(c.root); this.corpses.delete(m.cid); } return true; }
+    if (m.t === 'looting') { this.log(`Looting… stand still for ${m.secs} s`, 'sys'); return true; }
+    if (m.t === 'lootend') { if (!m.ok) this.log('Looting interrupted', 'sys'); return true; }
     if (m.t === 'stock') { const g = Math.round(m.gold), n = Object.values(m.items).reduce((a, b) => a + b, 0), had = this.stock; this.stock = { gold: g, units: n, items: m.items }; if (had && (g > had.gold || n > had.units)) this.log(`Looted — you carry ${g} gold and ${n} goods`, 'sys'); else if (had && g === 0 && n === 0 && (had.gold || had.units)) this.log('You lost everything you carried', 'sys'); return true; }
     if (m.t === 'corpsegone') { const c = this.corpses.get(m.cid); if (c) { this.scene.remove(c.root); this.corpses.delete(m.cid); } return true; }
     if (m.t === 'equip') { if (p) { p.info.weapon = m.w; p.info.drawn = m.drawn; this.wield(p); } return true; }
@@ -185,6 +188,15 @@ export class Multiplayer {
       const an = await PlayerAnim.create(av).catch(() => null); if (an) { an.dead = true; an.update(0.01); an.update(10); }   // pose: lying where it fell
       av.root.rotation.y = m.yaw + Math.PI; c.root = av.root; c.av = av;
     } catch (e) { console.warn('corpse', e); }
+  }
+  /** A body turned into its tombstone (the game's own model, tombstone_player_characters_01): what is still on it is lootable with F. */
+  async addTomb(m) {
+    const old = this.corpses.get(m.cid); if (old?.root) this.scene.remove(old.root);   // the body goes
+    const c = { root: null, x: m.x, y: m.y, z: m.z, yaw: m.yaw, snap: m.snap, shown: false, gyT: -9, gold: m.gold || 0, units: m.units || 0, tomb: true, name: m.name }; this.corpses.set(m.cid, c);
+    try {
+      const src = await this.factory.static('tombstone_player_characters_01'); if (!src || this.corpses.get(m.cid) !== c) return;
+      const g = src.clone(true); g.scale.setScalar(1.5); g.rotation.y = m.yaw; g.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } }); c.root = g;
+    } catch (e) { console.warn('tombstone', e); }
   }
   /** put the player's weapon into his avatar's hand (and pick the matching stance clips) */
   async wield(p) {
@@ -231,7 +243,7 @@ export class Multiplayer {
   /** F: take everything from the nearest body with something on it within reach (the server checks the distance too). */
   lootNearest() {
     const cam = this.camera.position; let best = null, bd = 6;
-    for (const [cid, c] of this.corpses) { if (!(c.gold > 0 || c.units > 0)) continue; const d = Math.hypot(c.x - cam.x, c.z - cam.z); if (d < bd) { bd = d; best = cid; } }
+    for (const [cid, c] of this.corpses) { if (!c.tomb || !(c.gold > 0 || c.units > 0)) continue; const d = Math.hypot(c.x - cam.x, c.z - cam.z); if (d < bd) { bd = d; best = cid; } }
     if (best !== null) this.sendJson({ t: 'loot', cid: best });
   }
   openChat() { this.typing = true; document.exitPointerLock?.(); this.$('chat').classList.add('typing'); this.input.value = ''; this.input.focus(); }

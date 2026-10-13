@@ -30,7 +30,7 @@ async fn visible_npcs_hunt_mobs_and_mobs_hit_back() {
     std::fs::write(&spawns, r#"[{"id":1,"x":140,"z":200,"mobs":[{"id":7,"name":"Rat","qty":4,"difficulty":"Very Easy"},{"id":8,"name":"Wolf","qty":4,"difficulty":"Easy"}]}]"#).unwrap();
     std::fs::write(&weapons, WEAPONS).unwrap();
     let s = |p: &std::path::PathBuf| Some(p.to_string_lossy().to_string());
-    let cfg = Config { radius: 900.0, max_players: 8, tick_hz: 60, spawns: s(&spawns), weapons: s(&weapons), pvp: false, npcs: 40, pois: s(&pois), capitals: s(&caps), npc_seed: 3, db: None, nav: None, npc_time_scale: 1.0, items: None, vendors: None };
+    let cfg = Config { radius: 900.0, max_players: 8, tick_hz: 60, spawns: s(&spawns), weapons: s(&weapons), pvp: false, npcs: 40, pois: s(&pois), capitals: s(&caps), npc_seed: 3, db: None, nav: None, npc_time_scale: 1.0, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: None, vendors: None };
     let (cmds, rx) = mpsc::channel(256);
     tokio::spawn(world::run(cfg, rx));
     let mut watcher = join(&cmds, (120.0, -200.0)).await;
@@ -74,7 +74,7 @@ async fn an_npc_killed_by_a_mob_leaves_a_corpse_and_gets_up_at_home() {
     std::fs::write(&spawns, r#"[{"id":1,"x":112,"z":200,"mobs":[{"id":9,"name":"Boss","qty":3,"difficulty":"Boss"}]}]"#).unwrap();
     std::fs::write(&weapons, WEAPONS).unwrap();
     let s = |p: &std::path::PathBuf| Some(p.to_string_lossy().to_string());
-    let cfg = Config { radius: 900.0, max_players: 8, tick_hz: 60, spawns: s(&spawns), weapons: s(&weapons), pvp: false, npcs: 150, pois: s(&pois), capitals: s(&caps), npc_seed: 3, db: None, nav: None, npc_time_scale: 1.0, items: None, vendors: None };
+    let cfg = Config { radius: 900.0, max_players: 8, tick_hz: 60, spawns: s(&spawns), weapons: s(&weapons), pvp: false, npcs: 150, pois: s(&pois), capitals: s(&caps), npc_seed: 3, db: None, nav: None, npc_time_scale: 1.0, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: None, vendors: None };
     let (cmds, rx) = mpsc::channel(256);
     tokio::spawn(world::run(cfg, rx));
     let mut watcher = join(&cmds, (100.0, -200.0)).await;

@@ -128,41 +128,55 @@ fn the_owner_goes_back_for_its_things() {
     assert!(n.info.weapon == "r_Iron Sword" || n.stock.count("r_Iron Sword") > 0, "its sword is back: {} / {:?}", n.info.weapon, n.stock.items);
 }
 
-#[tokio::test]
-async fn a_player_takes_a_tombstone_then_dies_and_drops_what_he_carried() {
-    use game_server::proto::*;
-    use game_server::world::{self, Cmd, Config, JoinReq};
-    use std::time::Duration;
-    use tokio::sync::{mpsc, oneshot};
-    use tokio_tungstenite::tungstenite::Message;
-
+/// A village with three bosses 12 m from its centre: the villagers wander in and die (see npc_combat.rs). Bodies turn into tombstones after 1.5 s,
+/// a loot channel takes 0.6 s.
+fn deadly_village(tag: &str, npcs: usize) -> mpsc::Sender<game_server::world::Cmd> {
+    use game_server::world::{self, Config};
     let dir = std::env::temp_dir();
-    let f = |n: &str| dir.join(format!("df_lootw_{n}.json"));
-    // a village with three bosses 12 m from its centre: the villagers wander in and die (see npc_combat.rs)
+    let f = |n: &str| dir.join(format!("df_lootw_{tag}_{n}.json"));
     std::fs::write(f("pois"), r#"[{"name":"Town","type":"Village","x":100,"z":200}]"#).unwrap();
     std::fs::write(f("caps"), r#"[{"name":"Capital","race":"Human","x":100,"y":0,"z":200}]"#).unwrap();
     std::fs::write(f("spawns"), r#"[{"id":1,"x":112,"z":200,"mobs":[{"id":9,"name":"Boss","qty":3,"difficulty":"Boss"}]}]"#).unwrap();
     let s = |n: &str| Some(f(n).to_string_lossy().to_string());
-    let cfg = Config { radius: 900.0, max_players: 4, tick_hz: 60, spawns: s("spawns"), weapons: None, pvp: false, npcs: 150, pois: s("pois"), capitals: s("caps"), npc_seed: 3, db: None, nav: None, npc_time_scale: 1.0, items: None, vendors: None };
+    let cfg = Config { radius: 900.0, max_players: 4, tick_hz: 60, spawns: s("spawns"), weapons: None, pvp: false, npcs, pois: s("pois"), capitals: s("caps"), npc_seed: 3, db: None, nav: None, npc_time_scale: 1.0, body_secs: 1.5, tomb_secs: 3600, loot_secs: 0.6, items: None, vendors: None };
     let (cmds, rx) = mpsc::channel(256);
     tokio::spawn(world::run(cfg, rx));
-    let (tx, mut inbox) = mpsc::channel(32768);
+    cmds
+}
+
+async fn visitor(cmds: &mpsc::Sender<game_server::world::Cmd>) -> (u16, mpsc::Receiver<tokio_tungstenite::tungstenite::Message>) {
+    use game_server::proto::*;
+    use game_server::world::{Cmd, JoinReq};
+    let (tx, inbox) = mpsc::channel(32768);
     let (reply, reply_rx) = oneshot::channel();
     cmds.send(Cmd::Join(JoinReq { name: "visitor".into(), race: "hum".into(), gender: "m".into(), gear: String::new(), tx, reply })).await.unwrap();
     let me = reply_rx.await.unwrap().unwrap();
     // watching from the edge of the village, out of the fight (free-fly)
     cmds.send(Cmd::Pos(me, PosUpdate { x: 100.0, y: 0.0, z: -230.0, flags: FLAG_FLY, ..Default::default() })).await.unwrap();
+    (me, inbox)
+}
 
-    let (mut bodies, mut my_gold, mut taken_cid, mut looted_msgs) = (Vec::new(), 0.0f64, None::<u64>, Vec::new());
-    let (mut dropped_gold, mut stock_after_death) = (None::<f64>, None::<f64>);
-    let mut boss: Option<(f32, f32)> = None;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
-    while tokio::time::Instant::now() < deadline && dropped_gold.is_none() {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+use game_server::world::Cmd;
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
+use tokio_tungstenite::tungstenite::Message;
+
+#[tokio::test]
+async fn a_body_turns_into_a_tombstone_that_a_player_takes_in_a_channel_and_a_dying_player_drops_everything() {
+    use game_server::proto::*;
+    let cmds = deadly_village("full", 150);
+    let (me, mut inbox) = visitor(&cmds).await;
+
+    let (mut bodies, mut tombs) = (std::collections::HashMap::<u64, std::time::Instant>::new(), Vec::new());
+    let (mut my_gold, mut looting_started, mut loot_ok, mut looted_msgs) = (0.0f64, false, false, Vec::new());
+    let (mut boss, mut my_corpse, mut my_tomb, mut equipped) = (None::<(f32, f32)>, false, None::<(f64, u64)>, false);
+    let mut early_loot_got_looting = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(150);
+    while tokio::time::Instant::now() < deadline && my_tomb.is_none() {
+        tokio::time::sleep(Duration::from_millis(80)).await;
         while let Ok(m) = inbox.try_recv() {
             if let Message::Binary(b) = &m {
                 if b[0] == OP_MOBS && u16::from_le_bytes([b[5], b[6]]) > 0 {
-                    // the first mob of the frame (a boss: the only mobs there are)
                     let f = |k: usize| f32::from_le_bytes([b[7 + k], b[8 + k], b[9 + k], b[10 + k]]);
                     boss = Some((f(4), f(12)));
                 }
@@ -171,46 +185,170 @@ async fn a_player_takes_a_tombstone_then_dies_and_drops_what_he_carried() {
             let Message::Text(t) = m else { continue };
             let v: serde_json::Value = serde_json::from_str(&t).unwrap();
             match v["t"].as_str() {
-                Some("corpse") if v["name"] != "visitor" && v["gold"].as_f64().unwrap_or(0.0) > 0.0 => bodies.push((v["cid"].as_u64().unwrap(), v["x"].as_f64().unwrap() as f32, v["z"].as_f64().unwrap() as f32, v["gold"].as_f64().unwrap())),
-                Some("corpse") if v["name"] == "visitor" => dropped_gold = Some(v["gold"].as_f64().unwrap()),
+                Some("corpse") if v["name"] != "visitor" => {
+                    bodies.insert(v["cid"].as_u64().unwrap(), std::time::Instant::now());
+                }
+                Some("corpse") => my_corpse = true,
+                Some("tombstone") if v["name"] != "visitor" => {
+                    let cid = v["cid"].as_u64().unwrap();
+                    if let Some(at) = bodies.get(&cid) {
+                        assert!(at.elapsed() > Duration::from_millis(1200), "the body lay there for its 1.5 s first");
+                    }
+                    tombs.push((cid, v["x"].as_f64().unwrap() as f32, v["z"].as_f64().unwrap() as f32, v["gold"].as_f64().unwrap()));
+                }
+                Some("tombstone") => my_tomb = Some((v["gold"].as_f64().unwrap(), v["units"].as_u64().unwrap())),
+                Some("looting") => looting_started = true,
+                Some("lootend") => loot_ok = v["ok"] == true,
                 Some("looted") => looted_msgs.push(v["cid"].as_u64().unwrap()),
                 Some("stock") => {
                     let g = v["gold"].as_f64().unwrap();
-                    if taken_cid.is_some() && g > my_gold {
+                    if g > my_gold && loot_ok {
                         my_gold = g;
-                    }
-                    if dropped_gold.is_some() || (my_gold > 0.0 && g == 0.0) {
-                        stock_after_death = Some(g);
                     }
                 }
                 _ => {}
             }
         }
-        // step 1: run to the first untouched body and take it (before any villager can walk over)
-        if taken_cid.is_none() {
-            if let Some(&(cid, x, z, _)) = bodies.iter().find(|b| !looted_msgs.contains(&b.0)) {
+        if my_gold == 0.0 {
+            // the first tombstone nobody has emptied: stand by it and take it
+            if let Some(&(cid, x, z, _)) = tombs.iter().find(|t| !looted_msgs.contains(&t.0)) {
+                if !early_loot_got_looting {
+                    // a body that is still lying there (not yet a tombstone) cannot be looted: nothing starts
+                    early_loot_got_looting = true;
+                    if let Some((&bcid, _)) = bodies.iter().find(|(k, _)| !tombs.iter().any(|t| t.0 == **k)) {
+                        cmds.send(Cmd::Loot(me, bcid as u32)).await.unwrap();
+                    }
+                }
+                looting_started = false;
                 cmds.send(Cmd::Pos(me, PosUpdate { x, y: 0.0, z, flags: FLAG_FLY, ..Default::default() })).await.unwrap();
                 cmds.send(Cmd::Loot(me, cid as u32)).await.unwrap();
-                tokio::time::sleep(Duration::from_millis(250)).await;
-                taken_cid = Some(cid);
-                // if a villager beat us to it, try the next body
-                continue;
+                tokio::time::sleep(Duration::from_millis(1100)).await; // the 0.6 s channel
             }
-        } else if my_gold == 0.0 {
-            if looted_msgs.contains(&taken_cid.unwrap()) {
-                taken_cid = None; // somebody else emptied it: next one
-                bodies.retain(|b| b.0 != taken_cid.unwrap_or(0));
-            }
+        } else if !equipped {
+            // wields a sword (so there is a weapon to drop), then walks into the bosses
+            cmds.send(Cmd::Equip(me, "r_Test Sword".into(), true)).await.unwrap();
+            equipped = true;
         } else {
-            // step 2: walk into the bosses, out of free-fly: he dies and drops what he carries
             let (bx, bz) = boss.unwrap_or((112.0, -200.0));
             cmds.send(Cmd::Pos(me, PosUpdate { x: bx + 0.5, y: 0.0, z: bz, ..Default::default() })).await.unwrap();
         }
     }
+    assert!(looting_started || my_gold > 0.0, "the channel started");
     assert!(my_gold > 0.0, "the player took the gold of a tombstone");
-    let taken = taken_cid.unwrap();
-    assert!(looted_msgs.contains(&taken), "everybody was told it was emptied");
-    let dropped = dropped_gold.expect("the visitor died and left a body");
-    assert!((dropped - my_gold).abs() < 0.01, "he dropped all he carried: {dropped} of {my_gold}");
-    assert_eq!(stock_after_death, Some(0.0), "and was told he carries nothing now");
+    assert!(my_corpse, "the visitor died and left a body");
+    let (dropped_gold, units) = my_tomb.expect("and the body turned into a tombstone");
+    assert!((dropped_gold - my_gold).abs() < 0.01, "he dropped all he carried: {dropped_gold} of {my_gold}");
+    assert!(units >= 1, "his sword too: {units}");
+}
+
+#[tokio::test]
+async fn nothing_can_be_taken_from_a_body_and_an_empty_handed_one_just_goes() {
+    use game_server::proto::*;
+    let cmds = deadly_village("empty", 0);
+    let (me, mut inbox) = visitor(&cmds).await;
+    // no villagers: only the visitor can die. He carries nothing and wields nothing.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let mut boss = None;
+    while let Ok(m) = inbox.try_recv() {
+        if let Message::Binary(b) = &m {
+            if b[0] == OP_MOBS && u16::from_le_bytes([b[5], b[6]]) > 0 {
+                let f = |k: usize| f32::from_le_bytes([b[7 + k], b[8 + k], b[9 + k], b[10 + k]]);
+                boss = Some((f(4), f(12)));
+            }
+        }
+    }
+    let (bx, bz) = boss.expect("a mob frame");
+    let (mut corpse, mut tomb, mut gone, mut looting) = (None::<(u64, std::time::Instant)>, false, false, false);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    while tokio::time::Instant::now() < deadline && !gone {
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        if corpse.is_none() {
+            cmds.send(Cmd::Pos(me, PosUpdate { x: bx + 0.5, y: 0.0, z: bz, ..Default::default() })).await.unwrap();
+        } else {
+            // standing at the body: it cannot be looted
+            cmds.send(Cmd::Loot(me, corpse.unwrap().0 as u32)).await.unwrap();
+        }
+        while let Ok(m) = inbox.try_recv() {
+            let Message::Text(t) = m else { continue };
+            let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+            match v["t"].as_str() {
+                Some("corpse") if v["name"] == "visitor" => {
+                    corpse = Some((v["cid"].as_u64().unwrap(), std::time::Instant::now()));
+                    // the dead rise after 6 s, but the body is what matters here; stay down by not moving
+                }
+                Some("tombstone") => tomb = true,
+                Some("looting") => looting = true,
+                Some("corpsegone") if corpse.map_or(false, |c| v["cid"].as_u64() == Some(c.0)) => {
+                    assert!(corpse.unwrap().1.elapsed() > Duration::from_millis(1200), "it lay there its 1.5 s");
+                    gone = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(gone, "the empty-handed body went away");
+    assert!(!tomb, "with no tombstone");
+    assert!(!looting, "and there was nothing to loot meanwhile");
+}
+
+#[tokio::test]
+async fn a_loot_channel_is_interrupted_by_walking_away() {
+    use game_server::proto::*;
+    let cmds = deadly_village("walk", 150);
+    let (me, mut inbox) = visitor(&cmds).await;
+    let (mut tomb, mut started, mut ended) = (None::<(u64, f32, f32)>, false, None::<bool>);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(150);
+    while tokio::time::Instant::now() < deadline && ended.is_none() {
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        while let Ok(m) = inbox.try_recv() {
+            let Message::Text(t) = m else { continue };
+            let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+            match v["t"].as_str() {
+                Some("tombstone") if tomb.is_none() => tomb = Some((v["cid"].as_u64().unwrap(), v["x"].as_f64().unwrap() as f32, v["z"].as_f64().unwrap() as f32)),
+                Some("looting") => started = true,
+                Some("lootend") if started => ended = Some(v["ok"] == true),
+                _ => {}
+            }
+        }
+        if let (Some((cid, x, z)), false) = (tomb, started) {
+            cmds.send(Cmd::Pos(me, PosUpdate { x, y: 0.0, z, flags: FLAG_FLY, ..Default::default() })).await.unwrap();
+            cmds.send(Cmd::Loot(me, cid as u32)).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            // a step away, half way through
+            cmds.send(Cmd::Pos(me, PosUpdate { x: x + 5.0, y: 0.0, z, flags: FLAG_FLY, ..Default::default() })).await.unwrap();
+        }
+    }
+    assert_eq!(ended, Some(false), "walking away interrupted the channel");
+}
+
+#[test]
+fn an_npc_that_is_hurt_while_looting_is_interrupted() {
+    let mut w = world(4);
+    let i = adventurer(&mut w, 300.0, 0.0);
+    w.add_grave(31, 330.0, 0.0, Stock { gold: 33.0, items: Default::default() }, None);
+    // a player watches: the NPC is active and stepped in real time. It walks to the body and the channel starts.
+    let mut at_body = false;
+    for _ in 0..(15 * 30) {
+        w.step(1.0 / 15.0, &[(300.0, 0.0)], 900.0);
+        if matches!(w.npcs[i].goal, Goal::Loot { arrived: true, .. }) {
+            at_body = true;
+            break;
+        }
+    }
+    assert!(at_body, "it walked to the body and started taking it");
+    assert!(w.grave(31).is_some(), "the contents are only taken at the end of the channel");
+    w.npcs[i].hp -= 5.0; // something hits it
+    w.step(1.0 / 15.0, &[(300.0, 0.0)], 900.0);
+    assert!(!matches!(w.npcs[i].goal, Goal::Loot { arrived: true, .. }), "the channel stopped");
+    assert!(w.grave(31).is_some(), "interrupted: the body is untouched");
+    // left alone it goes back to it and finishes
+    let mut taken = false;
+    for _ in 0..(15 * 60) {
+        w.step(1.0 / 15.0, &[(300.0, 0.0)], 900.0);
+        if w.grave(31).is_none() {
+            taken = true;
+            break;
+        }
+    }
+    assert!(taken, "and takes it the next time");
 }

@@ -22,7 +22,7 @@ async fn start(spawns: Option<&str>, tag: &str) -> mpsc::Sender<Cmd> {
     if let Some(sp) = spawns {
         std::fs::write(&s, sp).unwrap();
     }
-    let cfg = Config { radius: 900.0, max_players: 8, tick_hz: 30, spawns: spawns.map(|_| s.to_string_lossy().into()), weapons: Some(w.to_string_lossy().into()), pvp: true, npcs: 0, pois: None, capitals: None, npc_seed: 1, db: None, nav: None, npc_time_scale: 1.0, items: None, vendors: None };
+    let cfg = Config { radius: 900.0, max_players: 8, tick_hz: 30, spawns: spawns.map(|_| s.to_string_lossy().into()), weapons: Some(w.to_string_lossy().into()), pvp: true, npcs: 0, pois: None, capitals: None, npc_seed: 1, db: None, nav: None, npc_time_scale: 1.0, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: None, vendors: None };
     let (cmds, rx) = mpsc::channel(256);
     tokio::spawn(world::run(cfg, rx));
     cmds

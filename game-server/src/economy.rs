@@ -178,6 +178,8 @@ pub struct Vendor {
     pub base_gold: f32,
     /// Seconds since it last restocked.
     pub restock_acc: f32,
+    /// The vendor is dead: the shop is shut until it is back (nothing is asked or bid).
+    pub closed: bool,
 }
 
 /// Why a trade did not (fully) happen.
@@ -224,7 +226,7 @@ impl Vendor {
         }
         let base_gold = 1500.0 + (next() % 3000) as f32;
         let stock = Stock { gold: base_gold, items: target.clone() };
-        Vendor { name, kind, post, place, stock, target, base_gold, restock_acc: 0.0 }
+        Vendor { name, kind, post, place, stock, target, base_gold, restock_acc: 0.0, closed: false }
     }
 
     fn target_of(&self, item: &str) -> u32 {
@@ -235,14 +237,14 @@ impl Vendor {
     pub fn ask(&self, items: &Items, item: &str) -> Option<f32> {
         let it = items.get(item)?;
         let have = self.stock.count(item);
-        (self.kind.deals_in(it.group) && have > 0).then(|| it.cost * scarcity(have, self.target_of(item)) * SELL_MARGIN)
+        (!self.closed && self.kind.deals_in(it.group) && have > 0).then(|| it.cost * scarcity(have, self.target_of(item)) * SELL_MARGIN)
     }
 
     /// What the vendor pays for one unit of `item` now (`None` if it does not deal in it, has too many already, or cannot afford it).
     pub fn bid(&self, items: &Items, item: &str) -> Option<f32> {
         let it = items.get(item)?;
         let have = self.stock.count(item);
-        if !self.kind.deals_in(it.group) || have >= self.target_of(item) + GLUT {
+        if self.closed || !self.kind.deals_in(it.group) || have >= self.target_of(item) + GLUT {
             return None;
         }
         let p = it.cost * scarcity(have, self.target_of(item)) * BUY_MARGIN;

@@ -110,6 +110,12 @@ pub fn chaos_race(race: &str) -> bool {
     matches!(race, "ork" | "mir" | "mhm")
 }
 
+/// Vendors can be killed, but it takes an army: they are very hard to hurt, hit very hard and fight back. A dead vendor drops its shelves and purse,
+/// its shop stays shut and it is back at its post after VENDOR_DOWN_SECS with empty shelves that fill up again as the vendor restocks.
+pub const VENDOR_HP: f32 = 6000.0;
+pub const VENDOR_DAMAGE: f32 = 6.0;
+pub const VENDOR_DOWN_SECS: f32 = 600.0;
+
 /// Seconds a dead NPC lies there before it is back at its home place.
 pub const DOWN_SECS: f32 = 6.0;
 
@@ -195,6 +201,8 @@ pub struct Npc {
     /// Seconds hunting since the last drop, since the last meal / restock.
     loot_acc: f32,
     eat_acc: f32,
+    /// Its hit points when it started a loot channel (hurt = interrupted).
+    chan_hp: f32,
     /// The tombstone with its own things on it, and how often it has gone back for them.
     grave: Option<u32>,
     retrievals: u8,
@@ -261,6 +269,8 @@ pub struct Npcs {
     pub revived: Vec<u16>,
     /// NPC time that nobody watches runs this many times faster (1.0 = real time; a debugging aid: visible NPCs always run in real time).
     pub time_scale: f32,
+    /// Seconds an NPC needs to take everything from a tombstone (the world copies `Config::loot_secs` here).
+    pub loot_secs: f32,
     /// `standable` answers by target cell (places and grounds do not move).
     stand_cache: RefCell<HashMap<(i32, i32), Option<(f32, f32)>>>,
     /// The goods and the vendors; `place_vendors[p]` = the vendors of place `p` (indices into `econ.vendors`).
@@ -412,7 +422,7 @@ impl Npcs {
             .collect();
         let race_of: Vec<usize> = places.iter().map(|p| capitals.iter().min_by(|a, b| dist((p.x, p.z), a.1).total_cmp(&dist((p.x, p.z), b.1))).map_or(0, |c| c.0)).collect();
         let n_places = places.len();
-        Npcs { npcs: Vec::new(), places, links, race_of, tick: 0, grounds: Vec::new(), ground_grid: HashMap::new(), promoted: Vec::new(), revived: Vec::new(), time_scale: 1.0, stand_cache: RefCell::new(HashMap::new()), econ: RefCell::new(Economy::default()), place_vendors: vec![Vec::new(); n_places], weapon_table: HashMap::new(), weapon_changed: RefCell::new(Vec::new()), trades: std::cell::Cell::new((0, 0.0)), graves: RefCell::new(Vec::new()), looted: RefCell::new(Vec::new()), nav: None }
+        Npcs { npcs: Vec::new(), places, links, race_of, tick: 0, grounds: Vec::new(), ground_grid: HashMap::new(), promoted: Vec::new(), revived: Vec::new(), time_scale: 1.0, loot_secs: 3.0, stand_cache: RefCell::new(HashMap::new()), econ: RefCell::new(Economy::default()), place_vendors: vec![Vec::new(); n_places], weapon_table: HashMap::new(), weapon_changed: RefCell::new(Vec::new()), trades: std::cell::Cell::new((0, 0.0)), graves: RefCell::new(Vec::new()), looted: RefCell::new(Vec::new()), nav: None }
     }
 
     fn blank(&self, idx: usize, name: String, role: Role, home: usize, pos: (f32, f32), rng: &mut u32) -> Npc {
@@ -462,10 +472,11 @@ impl Npcs {
             trade_dest: None,
             loot_acc: 0.0,
             eat_acc: 0.0,
+            chan_hp: 0.0,
             grave: None,
             retrievals: 0,
         };
-        npc.max_hp = npc_hp(npc.skill("Health"));
+        npc.max_hp = if role == Role::Vendor { VENDOR_HP } else { npc_hp(npc.skill("Health")) };
         npc.hp = npc.max_hp;
         npc
     }
@@ -563,6 +574,13 @@ impl Npcs {
     pub fn drop_all(&mut self, id: u16) -> Stock {
         let Some(n) = id.checked_sub(NPC_ID_BASE).and_then(|i| self.npcs.get_mut(i as usize)) else { return Stock::default() };
         let mut dropped = std::mem::take(&mut n.stock);
+        if let Some(v) = n.vendor {
+            // a vendor drops its shelves and its purse, and the shop is shut
+            if let Some(ven) = self.econ.borrow_mut().vendors.get_mut(v) {
+                dropped = std::mem::take(&mut ven.stock);
+                ven.closed = true;
+            }
+        }
         if !n.info.weapon.is_empty() {
             dropped.add(&std::mem::take(&mut n.info.weapon), 1);
         }
@@ -650,7 +668,7 @@ impl Npcs {
                 n.grave = None;
             } else if n.hp >= n.max_hp * 0.8 && frac(&mut n.rng) < 0.9 {
                 n.retrievals += 1;
-                n.goal = Goal::Loot { cid, left: 2.0, arrived: false };
+                n.goal = Goal::Loot { cid, left: 0.0, arrived: false };
                 return;
             }
         }
@@ -684,7 +702,7 @@ impl Npcs {
         }
         let econ = self.econ.borrow();
         let here = (n.pos.x, n.pos.z);
-        self.place_vendors[n.at].iter().copied().filter(|v| !n.visited.contains(v)).min_by(|&a, &b| dist(here, econ.vendors[a].post).total_cmp(&dist(here, econ.vendors[b].post)))
+        self.place_vendors[n.at].iter().copied().filter(|v| !n.visited.contains(v) && !econ.vendors[*v].closed).min_by(|&a, &b| dist(here, econ.vendors[a].post).total_cmp(&dist(here, econ.vendors[b].post)))
     }
 
     /// Arrived at the place `n.at`: does it have business with the vendors here?
@@ -741,6 +759,9 @@ impl Npcs {
     /// `n` at the counter of vendor `v`: sells what the vendor will take (an adventurer keeps a few meals), then buys: an adventurer food and, from a
     /// blacksmith, a better weapon of its class; a trader whatever sells for much more in the town it is bound for.
     fn do_trade(&self, n: &mut Npc, v: usize) {
+        if self.econ.borrow().vendors[v].closed {
+            return; // the shop is shut: its vendor is dead
+        }
         let gold_before = n.stock.gold;
         self.do_trade_inner(n, v);
         let (count, gold) = self.trades.get();
@@ -932,10 +953,22 @@ impl Npcs {
             let start = n.start_melee;
             n.skills.entry(weapon_skill(&n.group).to_string()).or_insert(start);
         }
+        // the vendors are armed with the best melee weapon there is, and are masters of it
+        let best = ids.iter().max_by(|a, b| a.1.rank.unwrap_or(0.0).total_cmp(&b.1.rank.unwrap_or(0.0)).then(b.0.cmp(a.0))).map(|(id, d)| ((*id).clone(), d.group.clone().unwrap_or_default()));
+        if let Some((id, group)) = best {
+            for n in self.npcs.iter_mut().filter(|n| n.role == Role::Vendor) {
+                n.info.weapon = id.clone();
+                n.group = group.clone();
+                n.skills.insert(weapon_skill(&group).to_string(), 100.0);
+            }
+        }
     }
 
     /// Raise a skill of `n` by `amount` (capped at 100); Health also raises the hit points.
     fn train(&self, n: &mut Npc, skill: &str, amount: f32) {
+        if n.role == Role::Vendor {
+            return; // a vendor is as good as it gets
+        }
         let v = n.skills.entry(skill.to_string()).or_insert(0.0);
         *v = (*v + amount).min(100.0);
         if skill == "Health" {
@@ -970,7 +1003,7 @@ impl Npcs {
 
     /// Multiplier on the damage of an NPC's blows from its weapon skill.
     pub fn damage_factor(&self, id: u16) -> f32 {
-        self.by_id(id).map_or(1.0, |n| skill_damage(n.melee_skill()))
+        self.by_id(id).map_or(1.0, |n| skill_damage(n.melee_skill()) * if n.role == Role::Vendor { VENDOR_DAMAGE } else { 1.0 })
     }
 
     /// Stop hunting (hurt, or nothing left to fight): choose something else to do.
@@ -1008,11 +1041,19 @@ impl Npcs {
             }
         }
         n.at = n.home;
-        let p = &self.places[n.home];
-        n.pos.x = p.x;
-        n.pos.z = p.z;
+        let mut home = (self.places[n.home].x, self.places[n.home].z);
+        if let Some(v) = n.vendor {
+            // back at its post, the shop open again with empty shelves and a little gold
+            if let Some(ven) = self.econ.borrow_mut().vendors.get_mut(v) {
+                ven.closed = false;
+                ven.stock.gold = ven.base_gold * 0.2;
+                home = ven.post;
+            }
+        }
+        n.pos.x = home.0;
+        n.pos.z = home.1;
         n.pos.speed = 0;
-        n.good = (p.x, p.z);
+        n.good = home;
         n.goal = Goal::Rest { left: 5.0 };
         n.lod = Lod::Far;
     }
@@ -1106,9 +1147,29 @@ impl Npcs {
         // a tombstone in sight with something on it: anybody not busy fighting goes for it
         if n.role != Role::Vendor && n.foe.is_none() && !matches!(n.goal, Goal::Loot { .. } | Goal::Hunt { fighting: true, .. }) {
             if let Some(cid) = self.grave_in_sight(n) {
-                n.goal = Goal::Loot { cid, left: 2.0, arrived: false };
+                n.goal = Goal::Loot { cid, left: 0.0, arrived: false };
                 n.path.clear();
                 n.path_goal = None;
+            }
+        }
+        // a vendor that has been drawn away (guarding its stall, or in a fight) walks back to its post
+        if active && n.role == Role::Vendor && n.foe.is_none() {
+            let post = n.vendor.and_then(|v| self.econ.borrow().vendors.get(v).map(|x| x.post)).unwrap_or((n.pos.x, n.pos.z));
+            match n.chase {
+                Some(c) if dist((n.pos.x, n.pos.z), c) > n.stop => {
+                    let _ = self.walk(n, c, TRAVEL_SPEED, dt, false);
+                    return;
+                }
+                Some(c) => {
+                    n.pos.speed = 0;
+                    n.pos.yaw = (n.pos.x - c.0).atan2(n.pos.z - c.1);
+                    return;
+                }
+                None if dist((n.pos.x, n.pos.z), post) > 1.0 => {
+                    let _ = self.walk(n, post, TRAVEL_SPEED, dt, false);
+                    return;
+                }
+                None => {}
             }
         }
         if active && n.foe.is_some() {
@@ -1232,6 +1293,18 @@ impl Npcs {
                         };
                         dt -= used;
                         if reached {
+                            // at the body: the channel starts (hurt during it, and it stops)
+                            n.chan_hp = n.hp;
+                            n.goal = Goal::Loot { cid, left: self.loot_secs, arrived: true };
+                        }
+                    } else {
+                        // taking everything from the tombstone: standing still until the channel is over
+                        let used = dt.min(left);
+                        n.pos.speed = 0;
+                        dt -= used;
+                        if n.hp < n.chan_hp - 0.01 {
+                            self.think(n); // hurt: interrupted
+                        } else if left - used <= 1e-3 {
                             if let Some(stock) = self.take_grave(cid) {
                                 n.stock.gold += stock.gold;
                                 for (k, q) in stock.items {
@@ -1241,18 +1314,10 @@ impl Npcs {
                                     self.consider_weapon(n);
                                 }
                                 n.retrievals = 0;
+                                if n.grave == Some(cid) {
+                                    n.grave = None;
+                                }
                             }
-                            if n.grave == Some(cid) {
-                                n.grave = None;
-                            }
-                            n.goal = Goal::Loot { cid, left, arrived: true };
-                        }
-                    } else {
-                        // going through the pockets
-                        let used = dt.min(left);
-                        n.pos.speed = 0;
-                        dt -= used;
-                        if left - used <= 1e-3 {
                             self.think(n);
                         } else {
                             n.goal = Goal::Loot { cid, left: left - used, arrived: true };
@@ -1568,7 +1633,7 @@ impl Npcs {
             if let Ok(skills) = serde_json::from_str::<BTreeMap<String, f32>>(&st.skills) {
                 n.skills = skills;
             }
-            n.max_hp = npc_hp(n.skill("Health"));
+            n.max_hp = if n.role == Role::Vendor { VENDOR_HP } else { npc_hp(n.skill("Health")) };
             n.hp = n.max_hp;
             if !st.weapon.is_empty() {
                 n.info.weapon = st.weapon.clone();

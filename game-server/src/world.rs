@@ -11,7 +11,7 @@ use crate::combat::*;
 use crate::mobs::{MobAttack, Mobs};
 use crate::nav::Nav;
 use crate::economy::Stock;
-use crate::npcs::{chaos_race, Role, Goal, Lod, LodCounts, Npcs, DOWN_SECS as NPC_DOWN_SECS, NPC_ID_BASE};
+use crate::npcs::{chaos_race, Role, VENDOR_DOWN_SECS, Goal, Lod, LodCounts, Npcs, DOWN_SECS as NPC_DOWN_SECS, NPC_ID_BASE};
 use crate::proto::*;
 use crate::store::Store;
 
@@ -38,6 +38,11 @@ pub struct Config {
     /// `game-viewer/data/items.json` and `vendors.json`: the goods and the shopkeepers (from `tools/build_items.js` / `build_vendors.js`); without both there is no trade.
     pub items: Option<String>,
     pub vendors: Option<String>,
+    /// A body lies there this many seconds, then turns into a lootable tombstone that lasts `tomb_secs`.
+    pub body_secs: f32,
+    pub tomb_secs: u64,
+    /// How long taking everything from a tombstone takes (a channel: damage or walking away interrupts it).
+    pub loot_secs: f32,
     /// NPC time runs this many times faster than real time (1.0 = normal; for watching NPC life without waiting).
     pub npc_time_scale: f32,
     /// SQLite file the NPCs are saved to and restored from; `None` = they start fresh every time.
@@ -87,19 +92,28 @@ struct Fighter {
     group: String,
 }
 
-/// A player can take from a tombstone this close (metres).
+/// A player can take from a tombstone this close (metres), and it takes this long (seconds), interrupted by damage or by stepping away.
 const LOOT_REACH: f32 = 4.0;
+const LOOT_STEP_AWAY: f32 = 1.5;
 
-/// How long a body stays on the ground after its owner died.
-pub const CORPSE_SECS: u64 = 3600;
 
 struct Corpse {
     cid: u32,
-    expires: Instant,
-    /// The JSON of its `Corpse` message, kept for players who join later.
+    /// The body is replaced by the tombstone at `tomb_at`; the tombstone rots at `expires` (set then).
+    tomb_at: Instant,
+    expires: Option<Instant>,
+    /// The JSON the late joiners get: the body's `Corpse` message, later the `Tombstone`.
     msg: String,
+    /// What lies on the body, for the tombstone (empty: the body just goes), and who will come back for it.
+    stock: Stock,
+    owner: Option<u16>,
+    info: PlayerInfo,
+    pos: PosUpdate,
 }
 
+/// A vendor fights mobs this close to it (and no further than GUARD_LEASH from its post).
+const GUARD_RADIUS: f32 = 25.0;
+const GUARD_LEASH: f32 = 40.0;
 /// How long an NPC holds a grudge against a player who hurt it.
 const GRUDGE_SECS: f32 = 90.0;
 /// A hostile NPC notices a player this close (m); a friendly one greets him from this close.
@@ -122,6 +136,8 @@ struct Player {
     dead: bool,
     /// What the player carries (gold and goods): picked up from tombstones, dropped on his own when he dies.
     stock: Stock,
+    /// A loot channel in progress: tombstone, when it completes, where he stood.
+    looting: Option<(u32, Instant, f32, f32)>,
     // combat
     weapon: String,
     group: String,
@@ -196,6 +212,7 @@ pub async fn run(cfg: Config, mut rx: mpsc::Receiver<Cmd>) {
     println!("{} npcs in {} places", npcs.npcs.len(), npcs.places.len());
     let mut npcs = npcs;
     npcs.time_scale = cfg.npc_time_scale.max(0.1);
+    npcs.loot_secs = cfg.loot_secs;
     npcs.equip_all(&weapons); // armed first: only an armed NPC thinks of hunting
     npcs.set_grounds(mobs.grounds());
     if let (Some(dir), false) = (&cfg.nav, npcs.npcs.is_empty()) {
@@ -259,6 +276,12 @@ impl World {
                         pl.pos = p;
                         pl.has_pos = true;
                     }
+                    // walking away interrupts a loot channel
+                    if let Some((cid, _, x, z)) = pl.looting {
+                        if (p.x - x).powi(2) + (p.z - z).powi(2) > LOOT_STEP_AWAY * LOOT_STEP_AWAY {
+                            self.end_loot(id, cid, false);
+                        }
+                    }
                 }
             }
             Cmd::Chat(id, text) => self.chat(id, &text),
@@ -290,7 +313,7 @@ impl World {
             name = format!("Player{id}");
         }
         let info = PlayerInfo { id: id as u16, name, race: req.race, gender: req.gender, gear: clean(&req.gear, MAX_GEAR), weapon: String::new(), drawn: false, npc: false, role: String::new() };
-        self.players[id] = Some(Player { info, pos: PosUpdate::default(), has_pos: false, tx: req.tx, last_chat: Instant::now() - Duration::from_secs(10), last_sent: 0, last_mobs: 0, dead: false, stock: Stock::default(), weapon: String::new(), group: String::new(), drawn: false, blocking: false, hp: PLAYER_HP, down_until: None, next_attack: Instant::now() });
+        self.players[id] = Some(Player { info, pos: PosUpdate::default(), has_pos: false, tx: req.tx, last_chat: Instant::now() - Duration::from_secs(10), last_sent: 0, last_mobs: 0, dead: false, stock: Stock::default(), looting: None, weapon: String::new(), group: String::new(), drawn: false, blocking: false, hp: PLAYER_HP, down_until: None, next_attack: Instant::now() });
         self.online += 1;
         let _ = req.reply.send(Ok(id as u16));
 
@@ -443,7 +466,11 @@ impl World {
             p.down_until = Some(now + Duration::from_secs_f32(DOWN_SECS));
             p.blocking = false;
         }
+        let interrupted = p.looting.map(|l| l.0);
         let (at, hp, snap) = ([p.pos.x, p.pos.y, p.pos.z], p.hp, p.pos.flags & FLAG_SNAP != 0);
+        if let Some(cid) = interrupted {
+            self.end_loot(vid, cid, false); // damage interrupts a loot channel
+        }
         let msg = serde_json::to_string(&ServerMsg::Hit { a: by.0, am: by.1, v: "p", i: vid, dmg, hp, max: PLAYER_HP, grp, blocked, at, snap, killed }).unwrap();
         self.send_near(at[0], at[2], msg, None);
         if killed {
@@ -456,20 +483,63 @@ impl World {
     fn leave_corpse(&mut self, id: u16) {
         let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
         let (info, pos) = (p.info.clone(), p.pos);
-        let stock = std::mem::take(&mut p.stock); // everything he carried lies on the body
+        let mut stock = std::mem::take(&mut p.stock); // everything he carried lies on the body ...
+        if !p.weapon.is_empty() {
+            stock.add(&std::mem::take(&mut p.weapon), 1); // ... the weapon from his hand too
+            p.group.clear();
+            p.drawn = false;
+            p.info.weapon.clear();
+            p.info.drawn = false;
+            self.relay(id, |id| serde_json::to_string(&ServerMsg::Equip { id, w: "", drawn: false }).unwrap());
+        }
         self.send_stock(id);
         self.add_corpse(&info, pos, stock, None);
     }
 
-    /// A body falls: everybody sees it (for CORPSE_SECS) and `stock` lies on it for whoever takes it (`owner`: an NPC that will come back for it).
+    /// A body falls: everybody sees it for `body_secs`. Then it turns into a tombstone with `stock` on it (or, empty-handed, just goes). `owner`: an
+    /// NPC that will come back for its things.
     fn add_corpse(&mut self, info: &PlayerInfo, pos: PosUpdate, stock: Stock, owner: Option<u16>) {
         let cid = self.next_corpse;
         self.next_corpse += 1;
-        let (gold, units) = (stock.gold, stock.units());
-        let msg = serde_json::to_string(&ServerMsg::Corpse { cid, name: &info.name, race: &info.race, gender: &info.gender, gear: &info.gear, x: pos.x, y: pos.y, z: pos.z, yaw: pos.yaw, snap: pos.flags & FLAG_SNAP != 0, gold, units }).unwrap();
-        self.corpses.push(Corpse { cid, expires: Instant::now() + Duration::from_secs(CORPSE_SECS), msg: msg.clone() });
-        self.npcs.add_grave(cid, pos.x, pos.z, stock, owner);
+        let msg = serde_json::to_string(&ServerMsg::Corpse { cid, name: &info.name, race: &info.race, gender: &info.gender, gear: &info.gear, x: pos.x, y: pos.y, z: pos.z, yaw: pos.yaw, snap: pos.flags & FLAG_SNAP != 0 }).unwrap();
+        let tomb_at = Instant::now() + Duration::from_secs_f32(self.cfg.body_secs);
+        self.corpses.push(Corpse { cid, tomb_at, expires: None, msg: msg.clone(), stock, owner, info: info.clone(), pos });
         self.broadcast_text(msg, None);
+    }
+
+    /// Bodies that have lain long enough become tombstones; tombstones rot after `tomb_secs`.
+    fn age_corpses(&mut self, now: Instant) {
+        let mut turned: Vec<(u32, String)> = Vec::new();
+        let mut gone: Vec<u32> = Vec::new();
+        let tomb_secs = Duration::from_secs(self.cfg.tomb_secs);
+        for c in self.corpses.iter_mut() {
+            match c.expires {
+                None if c.tomb_at <= now => {
+                    let stock = std::mem::take(&mut c.stock);
+                    if stock.gold <= 0.0 && stock.items.is_empty() {
+                        gone.push(c.cid); // nothing to leave
+                        continue;
+                    }
+                    c.expires = Some(now + tomb_secs);
+                    let (gold, units) = (stock.gold, stock.units());
+                    c.msg = serde_json::to_string(&ServerMsg::Tombstone { cid: c.cid, name: &c.info.name, x: c.pos.x, y: c.pos.y, z: c.pos.z, yaw: c.pos.yaw, snap: c.pos.flags & FLAG_SNAP != 0, gold, units }).unwrap();
+                    turned.push((c.cid, c.msg.clone()));
+                    self.npcs.add_grave(c.cid, c.pos.x, c.pos.z, stock, c.owner);
+                }
+                Some(t) if t <= now => gone.push(c.cid),
+                _ => {}
+            }
+        }
+        for (_, msg) in turned {
+            self.broadcast_text(msg, None);
+        }
+        if !gone.is_empty() {
+            self.corpses.retain(|c| !gone.contains(&c.cid));
+            for cid in gone {
+                self.npcs.remove_grave(cid);
+                self.broadcast_text(serde_json::to_string(&ServerMsg::CorpseGone { cid }).unwrap(), None);
+            }
+        }
     }
 
     /// Tell player `id` what he carries.
@@ -481,7 +551,7 @@ impl World {
         }
     }
 
-    /// A player takes what lies on the tombstone `cid`: he has to be up and within a few metres of it.
+    /// A player starts taking what lies on the tombstone `cid`: he has to be up and within a few metres, and then to stand still for `LOOT_SECS`.
     fn loot_grave(&mut self, id: u16, cid: u32) {
         let Some(Some(p)) = self.players.get(id as usize) else { return };
         if p.down_until.is_some() || !p.has_pos {
@@ -491,27 +561,58 @@ impl World {
         if (g.x - p.pos.x).powi(2) + (g.z - p.pos.z).powi(2) > LOOT_REACH * LOOT_REACH {
             return;
         }
-        let Some(taken) = self.npcs.take_grave(cid) else { return };
         let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
-        p.stock.gold += taken.gold;
-        for (k, q) in taken.items {
-            p.stock.add(&k, q);
+        if p.looting.map(|l| l.0) == Some(cid) {
+            return; // already at it
         }
-        self.send_stock(id);
+        let secs = self.cfg.loot_secs;
+        p.looting = Some((cid, Instant::now() + Duration::from_secs_f32(secs), p.pos.x, p.pos.z));
+        let msg = serde_json::to_string(&ServerMsg::Looting { cid, secs }).unwrap();
+        if p.tx.try_send(Message::Text(msg)).is_err() {
+            p.dead = true;
+        }
     }
 
-    /// Everybody is told a tombstone has been emptied; a player joining later sees it empty too.
+    /// The channel of player `id` ends (interrupted, or `ok`).
+    fn end_loot(&mut self, id: u16, cid: u32, ok: bool) {
+        let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
+        p.looting = None;
+        let msg = serde_json::to_string(&ServerMsg::LootEnd { cid, ok }).unwrap();
+        if p.tx.try_send(Message::Text(msg)).is_err() {
+            p.dead = true;
+        }
+    }
+
+    /// Loot channels that have run their time: whoever is still standing there takes the contents (if nobody was quicker).
+    fn finish_loots(&mut self, now: Instant) {
+        let due: Vec<(u16, u32)> = self.players.iter().flatten().filter_map(|p| p.looting.filter(|l| l.1 <= now).map(|l| (p.info.id, l.0))).collect();
+        for (id, cid) in due {
+            let taken = self.npcs.take_grave(cid);
+            let ok = taken.is_some();
+            if let (Some(taken), Some(Some(p))) = (taken, self.players.get_mut(id as usize)) {
+                p.stock.gold += taken.gold;
+                for (k, q) in taken.items {
+                    p.stock.add(&k, q);
+                }
+            }
+            self.end_loot(id, cid, ok);
+            if ok {
+                self.send_stock(id);
+            }
+        }
+    }
+
+    /// Everybody is told a tombstone has been emptied: it is gone.
     fn announce_looted(&mut self) {
         let looted: Vec<u32> = std::mem::take(&mut *self.npcs.looted.borrow_mut());
         for cid in looted {
-            if let Some(c) = self.corpses.iter_mut().find(|c| c.cid == cid) {
-                if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&c.msg) {
-                    v["gold"] = 0.0.into();
-                    v["units"] = 0.into();
-                    c.msg = v.to_string();
-                }
-            }
+            self.corpses.retain(|c| c.cid != cid);
             self.broadcast_text(serde_json::to_string(&ServerMsg::Looted { cid }).unwrap(), None);
+        }
+        // a player whose tombstone was emptied by somebody else stops looting it
+        let stale: Vec<(u16, u32)> = self.players.iter().flatten().filter_map(|p| p.looting.map(|l| (p.info.id, l.0))).filter(|(_, cid)| self.npcs.grave(*cid).is_none()).collect();
+        for (id, cid) in stale {
+            self.end_loot(id, cid, false);
         }
     }
 
@@ -553,8 +654,8 @@ impl World {
     fn hurt_npc(&mut self, vid: u16, dmg: f32, by: (u16, bool), grp: &str) {
         let Some(i) = vid.checked_sub(NPC_ID_BASE) else { return };
         let Some(n) = self.npcs.npcs.get_mut(i as usize) else { return };
-        if n.down > 0.0 || n.lod != Lod::Active || n.role == Role::Vendor {
-            return; // (a vendor cannot be killed: nobody can raid a shop by killing the shopkeeper)
+        if n.down > 0.0 || n.lod != Lod::Active {
+            return;
         }
         n.hp = (n.hp - dmg).max(0.0);
         let killed = n.hp <= 0.0;
@@ -567,7 +668,7 @@ impl World {
             }
         }
         if killed {
-            n.down = NPC_DOWN_SECS;
+            n.down = if n.role == Role::Vendor { VENDOR_DOWN_SECS } else { NPC_DOWN_SECS };
             n.foe = None;
             n.target = None;
             n.chase = None;
@@ -593,7 +694,7 @@ impl World {
         // stance: drawn while fighting. Everybody who can see it is told.
         let mut stance: Vec<(u16, String, bool, PosUpdate)> = Vec::new();
         for n in self.npcs.npcs.iter_mut() {
-            let should = n.lod == Lod::Active && n.down <= 0.0 && (n.foe.is_some() || matches!(n.goal, Goal::Hunt { fighting: true, .. }));
+            let should = n.lod == Lod::Active && n.down <= 0.0 && (n.foe.is_some() || n.target.is_some() || matches!(n.goal, Goal::Hunt { fighting: true, .. }));
             if n.info.drawn != should && !n.info.weapon.is_empty() {
                 n.info.drawn = should;
                 if n.lod == Lod::Active {
@@ -605,6 +706,7 @@ impl World {
             self.send_near(pos.x, pos.z, serde_json::to_string(&ServerMsg::Equip { id, w: &w, drawn }).unwrap(), None);
         }
         self.npc_social(dt, now);
+        self.vendor_guard(dt, now);
         let fighting: Vec<usize> = self.npcs.npcs.iter().enumerate().filter(|(_, n)| n.lod == Lod::Active && n.down <= 0.0 && n.foe.is_none() && matches!(n.goal, Goal::Hunt { fighting: true, .. })).map(|(i, _)| i).collect();
         let mut done: Vec<usize> = Vec::new();
         for i in fighting {
@@ -654,6 +756,37 @@ impl World {
         }
         for i in done {
             self.npcs.end_hunt(i);
+        }
+    }
+
+    /// Vendors defend their stall: a mob within reach of the post is fought (and only within `GUARD_LEASH` of it), then the vendor goes back to its post.
+    fn vendor_guard(&mut self, dt: f32, now: Instant) {
+        let guards: Vec<usize> = self.npcs.npcs.iter().enumerate().filter(|(_, n)| n.role == Role::Vendor && n.lod == Lod::Active && n.down <= 0.0 && n.foe.is_none() && !n.info.weapon.is_empty()).map(|(i, _)| i).collect();
+        for i in guards {
+            let n = &self.npcs.npcs[i];
+            let Some(def) = self.weapons.get(&n.info.weapon).cloned() else { continue };
+            let (reach, tr) = (def.reach.unwrap_or(2.1) * WORLD_SCALE, BODY_RADIUS * WORLD_SCALE);
+            let post = n.vendor.and_then(|v| self.npcs.economy().vendors.get(v).map(|x| x.post)).unwrap_or((n.pos.x, n.pos.z));
+            let p = n.pos;
+            let from_post = |m: &crate::mobs::Mob| ((m.pos.x - post.0).powi(2) + (m.pos.z - post.1).powi(2)).sqrt();
+            let dist_to = |m: &crate::mobs::Mob| ((m.pos.x - p.x).powi(2) + (m.pos.z - p.z).powi(2)).sqrt();
+            let target = self.mobs.candidates(p.x, p.z).map(|k| &self.mobs.mobs[k as usize]).filter(|m| m.alive && dist_to(m) < GUARD_RADIUS && from_post(m) < GUARD_LEASH).min_by(|a, b| dist_to(a).total_cmp(&dist_to(b))).map(|m| m.id);
+            let n = &mut self.npcs.npcs[i];
+            n.next_attack = (n.next_attack - dt).max(0.0);
+            let Some(t) = target else {
+                n.target = None;
+                n.chase = None;
+                continue;
+            };
+            let m = &self.mobs.mobs[t as usize];
+            let (mx, mz, d) = (m.pos.x, m.pos.z, dist_to(m));
+            n.target = Some(t);
+            n.chase = Some((mx, mz));
+            n.stop = reach * 0.7 + tr;
+            n.pos.yaw = (p.x - mx).atan2(p.z - mz);
+            if d <= reach + tr * 0.8 && n.next_attack <= 0.0 && n.info.drawn {
+                self.npc_swing(i, now);
+            }
         }
     }
 
@@ -721,7 +854,7 @@ impl World {
             for &(pid, x, z, pchaos, _) in &people {
                 let d = near(x, z);
                 let grudge = n.grudges.iter().any(|g| g.0 == pid);
-                if pvp && d < NPC_AGGRO && n.hp >= n.max_hp * 0.5 && (grudge || (chaos && !pchaos)) {
+                if pvp && d < NPC_AGGRO && n.hp >= n.max_hp * 0.5 && (grudge || (chaos && !pchaos && n.role != Role::Vendor)) {
                     n.foe = Some(pid);
                     n.chase = Some((x, z));
                     break;
@@ -889,15 +1022,9 @@ impl World {
             false
         });
         self.shots.append(&mut shots);
-        // bodies rot away
-        let gone: Vec<u32> = self.corpses.iter().filter(|c| c.expires <= now).map(|c| c.cid).collect();
-        if !gone.is_empty() {
-            self.corpses.retain(|c| c.expires > now);
-            for cid in gone {
-                self.npcs.remove_grave(cid);
-                self.broadcast_text(serde_json::to_string(&ServerMsg::CorpseGone { cid }).unwrap(), None);
-            }
-        }
+        // bodies turn into tombstones, tombstones rot away; loot channels finish
+        self.age_corpses(now);
+        self.finish_loots(now);
         // get up
         let up: Vec<u16> = self.players.iter().flatten().filter(|p| p.down_until.map_or(false, |t| t <= now)).map(|p| p.info.id).collect();
         for id in up {

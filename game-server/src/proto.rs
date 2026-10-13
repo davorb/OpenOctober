@@ -149,11 +149,19 @@ pub enum ServerMsg<'a> {
     /// A player got up again (full health) - the client puts itself back at a spawn point.
     Respawn { id: u16, hp: f32, max: f32 },
     /// A player died here: his body stays on the ground (CORPSE_SECS) for everybody, joiners get the existing ones too. `snap`: the body has no height of its own (bots).
-    /// `gold` and `units` (goods) say what is still on the body; `Looted` follows when somebody has taken it.
-    Corpse { cid: u32, name: &'a str, race: &'a str, gender: &'a str, gear: &'a str, x: f32, y: f32, z: f32, yaw: f32, snap: bool, gold: f32, units: u32 },
+    /// The body lies there for `Config::body_secs` (45 s); nothing can be taken from it. Then it is replaced by a `Tombstone` of the same `cid`
+    /// (if it carried anything) or goes (`CorpseGone`).
+    Corpse { cid: u32, name: &'a str, race: &'a str, gender: &'a str, gear: &'a str, x: f32, y: f32, z: f32, yaw: f32, snap: bool },
+    /// The body of `cid` has turned into a tombstone (model `tombstone_player_characters_01`) with `gold` and `units` goods on it, for
+    /// `Config::tomb_secs` (an hour) or until it is emptied. Late joiners get the tombstone without the body.
+    Tombstone { cid: u32, name: &'a str, x: f32, y: f32, z: f32, yaw: f32, snap: bool, gold: f32, units: u32 },
     CorpseGone { cid: u32 },
-    /// The body of `cid` has been emptied.
+    /// The tombstone `cid` has been emptied (it is gone).
     Looted { cid: u32 },
+    /// You started taking everything from the tombstone `cid`: stand still for `secs`, damage or walking away interrupts.
+    Looting { cid: u32, secs: f32 },
+    /// The channel ended: `ok` = you got it; otherwise interrupted or somebody else was first.
+    LootEnd { cid: u32, ok: bool },
     /// What you carry (sent after joining and whenever it changes): gold and goods by item id.
     Stock { gold: f32, items: &'a std::collections::BTreeMap<String, u32> },
     /// Your own health (after joining).
