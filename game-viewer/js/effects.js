@@ -89,7 +89,7 @@ export class CombatFx {
       a.trail.geometry.attributes.position.needsUpdate = true;
       if (hit || a.left <= 0 || a.done) {
         this.arrows.splice(i, 1); this.scene.remove(a.trail); a.trail.geometry.dispose();
-        if (hit && !a.done) { a.pos.y = gh; a.g.position.y = gh + 0.05; this.stuck.push({ g: a.g, age: 0 }); this.play('se_arrow_impact', a.pos.clone().setY(gh - 1.0), { vol: 0.8 }); } else this.scene.remove(a.g);
+        if (hit && !a.done) { a.pos.y = gh; a.g.position.y = gh + 0.05; this.stuck.push({ g: a.g, age: 0 }); } else this.scene.remove(a.g);
         a.onEnd?.(a.pos, hit); a.dead = true;
       }
     }

@@ -137,8 +137,8 @@ export class Weapons {
   /** a blow landed: { a: attacker id, v: 'm' | 'p', i: victim id, dmg, hp, max, grp, blocked, at: [x, y, z], killed } */
   onHit(m) {
     const at = new THREE.Vector3(m.at[0], m.at[1], m.at[2]); const gh = this.world.groundHeight(at.x, at.z, at.y + 5); if (m.snap && gh != null && gh > -1e8) at.y = gh;
-    if (m.a === this.selfId && !m.am) this.hitMarker(!!m.killed);
     if (m.blocked) { this.sfx.play(`/weapons/parry/df_weapon_parry_${PARRY[m.grp] || 'one_handed'}_1.wav`, { at, min: 5, max: 50 }); return; }
+    if (m.a === this.selfId && !m.am) this.hitMarker(!!m.killed);   // only a blow the server says landed, and wasn't parried
     this.fx.play(m.grp === 'bow' ? 'se_arrow_impact' : m.grp === 'staff' ? 'se_impact_fire' : 'se_impact_' + (IMPACT[m.grp] || 'slashing'), at);
     if (m.killed) this.fx.play('se_bloodsplatter0' + (1 + ((Math.random() * 3) | 0)), at);
     if (m.v === 'p' && m.self) { this.hp.hp = m.hp; this.hp.max = m.max; this.refreshUI(); const f = this.$('hurt'); if (f) { f.classList.add('on'); setTimeout(() => f.classList.remove('on'), 160); } }
