@@ -150,3 +150,22 @@ fn snap_open_leaves_a_sealed_room_and_basins_are_still_big_enough() {
     // nothing but a tiny walled pocket in reach: no answer
     assert!(nav.snap_open(inside, 3, 1500).is_none());
 }
+
+#[test]
+fn closed_regions_are_rejected_without_a_search() {
+    // a closed room, and open ground around it: no route in or out, answered at once
+    let mut blocked = Vec::new();
+    for i in 300..311 {
+        blocked.extend([(i, 300, F_WALL), (i, 310, F_WALL), (300, i, F_WALL), (310, i, F_WALL)]);
+    }
+    let nav = Nav::from_tiles(vec![NavTile::flat(0, 0, 230.0, &blocked)]);
+    let inside = (2.0 * 305.0 + 1.0, 2.0 * 305.0 + 1.0);
+    let t = std::time::Instant::now();
+    assert!(nav.find_path(inside, (100.0, 100.0), 1_000_000).is_none(), "out of a closed room");
+    assert!(nav.find_path((100.0, 100.0), inside, 1_000_000).is_none(), "into a closed room");
+    assert!(t.elapsed() < std::time::Duration::from_millis(50), "no search was needed: {:?}", t.elapsed());
+    // inside the room itself everything is reachable
+    assert!(nav.find_path((603.0, 603.0), (617.0, 617.0), 10_000).is_some());
+    // open ground to open ground still works
+    assert!(nav.find_path((100.0, 100.0), (900.0, 900.0), 100_000).is_some());
+}

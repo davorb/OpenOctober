@@ -27,6 +27,51 @@ pub struct NavTile {
     pub z0: i32,
     heights: Vec<u16>,
     flags: Vec<u8>,
+    /// Connected region of every free cell (0 = blocked, regions count from 1) and whether that region touches the tile's border. A region that
+    /// does not is closed: nothing outside it can be reached from inside it, which `find_path` knows without searching.
+    comp: Vec<u32>,
+    closed: Vec<bool>,
+}
+
+/// Label the connected regions of free cells (the same 8-neighbour rule without corner cutting as the path search).
+fn label(flags: &[u8]) -> (Vec<u32>, Vec<bool>) {
+    let mut comp = vec![0u32; N * N];
+    let mut closed = vec![false]; // index 0 = blocked
+    let mut stack: Vec<usize> = Vec::new();
+    for start in 0..N * N {
+        if flags[start] != 0 || comp[start] != 0 {
+            continue;
+        }
+        let id = closed.len() as u32;
+        let mut touches = false;
+        comp[start] = id;
+        stack.push(start);
+        while let Some(c) = stack.pop() {
+            let (x, z) = ((c % N) as i32, (c / N) as i32);
+            if x == 0 || z == 0 || x == N as i32 - 1 || z == N as i32 - 1 {
+                touches = true;
+            }
+            for dz in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    let (nx, nz) = (x + dx, z + dz);
+                    if (dx == 0 && dz == 0) || nx < 0 || nz < 0 || nx >= N as i32 || nz >= N as i32 {
+                        continue;
+                    }
+                    let n = nz as usize * N + nx as usize;
+                    if flags[n] != 0 || comp[n] != 0 {
+                        continue;
+                    }
+                    if dx != 0 && dz != 0 && (flags[z as usize * N + nx as usize] != 0 || flags[nz as usize * N + x as usize] != 0) {
+                        continue;
+                    }
+                    comp[n] = id;
+                    stack.push(n);
+                }
+            }
+        }
+        closed.push(!touches);
+    }
+    (comp, closed)
 }
 
 impl NavTile {
@@ -37,7 +82,9 @@ impl NavTile {
         }
         let i32_at = |o: usize| i32::from_le_bytes(b[o..o + 4].try_into().unwrap());
         let heights = b[HEADER..HEADER + W * W * 2].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        Ok(NavTile { x0: i32_at(8), z0: i32_at(12), heights, flags: b[HEADER + W * W * 2..].to_vec() })
+        let flags = b[HEADER + W * W * 2..].to_vec();
+        let (comp, closed) = label(&flags);
+        Ok(NavTile { x0: i32_at(8), z0: i32_at(12), heights, flags, comp, closed })
     }
 
     /// A tile of flat ground at `height` with the given blocked cells (local cell x, z, flag); for tests.
@@ -46,7 +93,8 @@ impl NavTile {
         for &(x, z, f) in blocked {
             flags[z * N + x] = f;
         }
-        NavTile { x0, z0, heights: vec![((height + 500.0) * 20.0) as u16; W * W], flags }
+        let (comp, closed) = label(&flags);
+        NavTile { x0, z0, heights: vec![((height + 500.0) * 20.0) as u16; W * W], flags, comp, closed }
     }
 }
 
@@ -284,6 +332,15 @@ impl Nav {
         self.cell(ex, ez) == 0
     }
 
+    /// (tile, region, region is closed) of cell (cx, cz), or `None` where it is blocked or off the map.
+    fn region(&self, cx: i32, cz: i32) -> Option<((i32, i32), u32, bool)> {
+        let per = N as i32;
+        let key = (cx.div_euclid(per), cz.div_euclid(per));
+        let t = self.tile(key)?;
+        let id = t.comp[cz.rem_euclid(per) as usize * N + cx.rem_euclid(per) as usize];
+        (id != 0).then(|| (key, id, t.closed[id as usize]))
+    }
+
     /// A route from `from` to `to` (waypoints after `from`, ending at `to`'s walkable cell), or `None` when none is found within `max_expand` cells.
     pub fn find_path(&self, from: (f32, f32), to: (f32, f32), max_expand: usize) -> Option<Vec<(f32, f32)>> {
         let start = Self::cell_of(self.snap(from, 8)?);
@@ -292,9 +349,16 @@ impl Nav {
         if start == goal {
             return Some(vec![goal_p]);
         }
+        // a closed region (a house, a pocket, a basin) cannot be left, and nothing outside can be entered
+        if let (Some(a), Some(b)) = (self.region(start.0, start.1), self.region(goal.0, goal.1)) {
+            if (a.2 || b.2) && (a.0 != b.0 || a.1 != b.1) {
+                return None;
+            }
+        }
         let h = |c: (i32, i32)| {
             let (dx, dz) = ((c.0 - goal.0).unsigned_abs(), (c.1 - goal.1).unsigned_abs());
-            10 * dx.max(dz) + 4 * dx.min(dz)
+            // weighted (3x): the route may be a little longer than the best one, and far fewer cells are searched
+            (10 * dx.max(dz) + 4 * dx.min(dz)) * 3
         };
         let mut best: HashMap<(i32, i32), (u32, (i32, i32))> = HashMap::new();
         let mut open = BinaryHeap::new();

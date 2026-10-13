@@ -78,7 +78,7 @@ pub fn skill_gain(skill: f32, rank: u8, per: f32) -> f32 {
 
 /// An active NPC plans its route this far ahead at a time, searching at most this many cells.
 const ROUTE_LEG: f32 = 250.0;
-const ROUTE_EXPAND: usize = 60000;
+const ROUTE_EXPAND: usize = 40000;
 
 #[derive(Clone, Debug)]
 pub struct Place {
