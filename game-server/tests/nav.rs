@@ -131,3 +131,22 @@ fn npcs_in_the_real_world_never_stand_in_walls_or_water() {
     assert!(!seen_active.is_empty(), "somebody lives within 900 m of Sanguine");
     assert!(moved > 100, "and they walk about ({moved} moving samples)");
 }
+
+#[test]
+fn snap_open_leaves_a_sealed_room_and_basins_are_still_big_enough() {
+    // a closed room of 9 x 9 cells: standing inside it is free ground, but there is no way out
+    let mut blocked = Vec::new();
+    for i in 300..311 {
+        blocked.extend([(i, 300, F_WALL), (i, 310, F_WALL), (300, i, F_WALL), (310, i, F_WALL)]);
+    }
+    let nav = Nav::from_tiles(vec![NavTile::flat(0, 0, 230.0, &blocked)]);
+    let inside = (2.0 * 305.0 + 1.0, 2.0 * 305.0 + 1.0);
+    assert_eq!(nav.snap(inside, 8), Some(inside), "plain snap is happy inside the room");
+    let out = nav.snap_open(inside, 40, 1500).expect("open ground nearby");
+    assert!(out.0 < 600.0 || out.0 >= 622.0 || out.1 < 600.0 || out.1 >= 622.0, "moved out of the room (walls span 600..622 m): {out:?}");
+    assert!(nav.find_path(out, (100.0, 100.0), 30000).is_some());
+    // open ground stays where it is
+    assert_eq!(nav.snap_open((100.0, 100.0), 40, 1500), Some((100.0, 100.0)));
+    // nothing but a tiny walled pocket in reach: no answer
+    assert!(nav.snap_open(inside, 3, 1500).is_none());
+}

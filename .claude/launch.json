@@ -39,6 +39,15 @@
         "none"
       ],
       "port": 1399
+    },
+    {
+      "name": "game-viewer-npc",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "game-viewer/serve.js",
+        "1340"
+      ],
+      "port": 1340
     }
   ]
 }

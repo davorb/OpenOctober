@@ -8,6 +8,7 @@
 //! A step moves the NPC along its current goal by the accumulated time, so a far NPC covers (and may finish) whole legs in one go, and an NPC that
 //! gets close is caught up to "now" first, so it never appears to jump. Travel is a hop along a graph that joins every place to its nearest neighbours
 //! (a stand-in for a road network). Positions use the wire convention (viewer three.js space: game z negated); height is left to the clients (`FLAG_SNAP`).
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
 use serde::Deserialize;
@@ -51,6 +52,8 @@ pub enum Goal {
 }
 
 const WANDER_R: f32 = 45.0;
+/// Ground an NPC can use is a connected region of at least this many 2 m cells (a house is a few hundred).
+const OPEN_REGION: usize = 1500;
 /// An NPC hunts at spawn points this close to the place it is at, and no tougher than `hunt_cap(level)`.
 const HUNT_RADIUS: f32 = 2500.0;
 const GROUND_CELL: f32 = 2000.0;
@@ -118,6 +121,8 @@ pub struct Npc {
     path_goal: Option<(f32, f32)>,
     /// Last position (active NPCs) known to be walkable.
     good: (f32, f32),
+    /// Destinations (kind 0 place, 1 hunting ground) it found no route to; it does not pick them again for a while.
+    avoid: Vec<(u8, usize)>,
 }
 
 /// The persisted part of an NPC (see `store.rs`).
@@ -175,6 +180,10 @@ pub struct Npcs {
     /// Ids that became visible / came back to life in the last `step` (the world announces them).
     pub promoted: Vec<u16>,
     pub revived: Vec<u16>,
+    /// NPC time that nobody watches runs this many times faster (1.0 = real time; a debugging aid: visible NPCs always run in real time).
+    pub time_scale: f32,
+    /// `standable` answers by target cell (places and grounds do not move).
+    stand_cache: RefCell<HashMap<(i32, i32), Option<(f32, f32)>>>,
     /// Walkability of the world: active NPCs path-find on it and stand at its terrain height.
     pub nav: Option<Nav>,
 }
@@ -272,7 +281,7 @@ impl Npcs {
             .collect();
         let race_of: Vec<usize> = places.iter().map(|p| capitals.iter().min_by(|a, b| dist((p.x, p.z), a.1).total_cmp(&dist((p.x, p.z), b.1))).map_or(0, |c| c.0)).collect();
         let towns: Vec<usize> = (0..places.len()).filter(|&i| places[i].town).collect();
-        let mut me = Npcs { npcs: Vec::new(), places, links, race_of, tick: 0, grounds: Vec::new(), ground_grid: HashMap::new(), promoted: Vec::new(), revived: Vec::new(), nav: None };
+        let mut me = Npcs { npcs: Vec::new(), places, links, race_of, tick: 0, grounds: Vec::new(), ground_grid: HashMap::new(), promoted: Vec::new(), revived: Vec::new(), time_scale: 1.0, stand_cache: RefCell::new(HashMap::new()), nav: None };
         if towns.is_empty() {
             return me;
         }
@@ -309,6 +318,7 @@ impl Npcs {
                 path: Vec::new(),
                 path_goal: None,
                 good: (x, z),
+                avoid: Vec::new(),
             };
             npc.max_hp = npc_hp(npc.skill("Health"));
             npc.hp = npc.max_hp;
@@ -337,9 +347,14 @@ impl Npcs {
             Goal::Rest { left: 15.0 + n.fatigue * 90.0 * (0.5 + frac(&mut n.rng)) }
         } else if travel >= wander {
             // a dungeon is a place to look at, not to live in: towns are the more likely stop
-            let towns: Vec<usize> = links.iter().copied().filter(|&p| self.places[p].town).collect();
-            let pool = if !towns.is_empty() && frac(&mut n.rng) < 0.75 { &towns } else { links };
-            Goal::Travel { dest: pool[xorshift(&mut n.rng) as usize % pool.len()] }
+            let open: Vec<usize> = links.iter().copied().filter(|&p| !n.avoid.contains(&(0, p))).collect();
+            let towns: Vec<usize> = open.iter().copied().filter(|&p| self.places[p].town).collect();
+            let pool = if !towns.is_empty() && frac(&mut n.rng) < 0.75 { &towns } else { &open };
+            if pool.is_empty() {
+                Goal::Wander { left: 10.0 + frac(&mut n.rng) * 30.0, to: None } // nowhere it can get to from here
+            } else {
+                Goal::Travel { dest: pool[xorshift(&mut n.rng) as usize % pool.len()] }
+            }
         } else {
             Goal::Wander { left: 10.0 + frac(&mut n.rng) * 30.0, to: None }
         };
@@ -355,7 +370,7 @@ impl Npcs {
             for dz in -1..=1 {
                 for &g in self.ground_grid.get(&(cx + dx, cz + dz)).into_iter().flatten() {
                     let gr = self.grounds[g];
-                    if gr.2 <= cap && dist((p.x, p.z), (gr.0, gr.1)) <= HUNT_RADIUS {
+                    if gr.2 <= cap && dist((p.x, p.z), (gr.0, gr.1)) <= HUNT_RADIUS && !n.avoid.contains(&(1, g)) {
                         pool.push(g);
                     }
                 }
@@ -519,16 +534,34 @@ impl Npcs {
         }
     }
 
-    /// Where an active NPC actually goes to for `target`: the nearest free cell (a town's centre may be inside a building).
+    /// Where an active NPC actually goes to for `target`: the nearest cell of open ground (a town's centre may be inside a building).
     fn standable(&self, target: (f32, f32), active: bool) -> (f32, f32) {
-        match (&self.nav, active) {
-            (Some(nav), true) => nav.snap(target, 12).unwrap_or(target),
-            _ => target,
-        }
+        let (Some(nav), true) = (&self.nav, active) else { return target };
+        let key = ((target.0 / 2.0).floor() as i32, (target.1 / 2.0).floor() as i32);
+        let cached = self.stand_cache.borrow().get(&key).copied();
+        let found = cached.unwrap_or_else(|| {
+            let p = nav.snap_open(target, 40, OPEN_REGION);
+            self.stand_cache.borrow_mut().insert(key, p);
+            p
+        });
+        found.unwrap_or(target)
     }
 
     /// The goal can't be reached (no route): wait a moment, then think again.
     fn give_up(&self, n: &mut Npc) {
+        let failed = match n.goal {
+            Goal::Travel { dest } => Some((0u8, dest)),
+            Goal::Hunt { ground, .. } => Some((1u8, ground)),
+            _ => None,
+        };
+        if let Some(f) = failed {
+            if !n.avoid.contains(&f) {
+                n.avoid.push(f);
+                if n.avoid.len() > 6 {
+                    n.avoid.remove(0);
+                }
+            }
+        }
         n.path.clear();
         n.path_goal = None;
         n.pos.speed = 0;
@@ -657,7 +690,7 @@ impl Npcs {
         n.path.clear();
         n.path_goal = None;
         let Some(nav) = &self.nav else { return true };
-        match nav.snap((n.pos.x, n.pos.z), 40) {
+        match nav.snap_open((n.pos.x, n.pos.z), 40, OPEN_REGION) {
             Some((x, z)) => {
                 n.pos.x = x;
                 n.pos.z = z;
@@ -714,7 +747,7 @@ impl Npcs {
             }
             // a far NPC re-checks its distance only now and then; one that is already close checks every tick
             if n.lod == Lod::Far && (i as u32 + self.tick) % 15 != 0 {
-                n.acc += dt;
+                n.acc += dt * self.time_scale;
                 if n.acc >= FAR_EVERY {
                     let a = std::mem::take(&mut n.acc);
                     self.advance(n, a, false);
@@ -734,7 +767,7 @@ impl Npcs {
                 }
             }
             let mut lod = if best <= radius { Lod::Active } else if best <= NEAR_RADIUS { Lod::Near } else { Lod::Far };
-            n.acc += dt;
+            n.acc += if lod == Lod::Active && n.lod == Lod::Active { dt } else { dt * self.time_scale };
             if lod == Lod::Active && n.lod != Lod::Active {
                 // Becoming visible: tried twice a second at most, and only from ground an avatar can stand on (the abstract walk of a near
                 // or far NPC ignores lakes and mountains). Until then it stays near, unseen, and walks on.
@@ -773,6 +806,21 @@ impl Npcs {
         }
         self.npcs = npcs;
         counts
+    }
+
+    /// How many NPCs are resting / wandering / travelling / walking to a hunt / fighting (for the stats line).
+    pub fn goal_counts(&self) -> [u32; 5] {
+        let mut c = [0u32; 5];
+        for n in &self.npcs {
+            c[match n.goal {
+                Goal::Rest { .. } => 0,
+                Goal::Wander { .. } => 1,
+                Goal::Travel { .. } => 2,
+                Goal::Hunt { fighting: false, .. } => 3,
+                Goal::Hunt { fighting: true, .. } => 4,
+            }] += 1;
+        }
+        c
     }
 
     /// NPCs the players can currently see (sent in the player snapshots).

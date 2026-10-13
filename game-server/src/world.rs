@@ -34,6 +34,8 @@ pub struct Config {
     pub npc_seed: u32,
     /// Directory of baked nav tiles (`game-viewer/tools/build_nav.js` writes `game-server/data/nav`); `None` = NPCs ignore terrain and walk straight lines.
     pub nav: Option<String>,
+    /// NPC time runs this many times faster than real time (1.0 = normal; for watching NPC life without waiting).
+    pub npc_time_scale: f32,
     /// SQLite file the NPCs are saved to and restored from; `None` = they start fresh every time.
     pub db: Option<String>,
 }
@@ -166,8 +168,9 @@ pub async fn run(cfg: Config, mut rx: mpsc::Receiver<Cmd>) {
     };
     println!("{} npcs in {} places", npcs.npcs.len(), npcs.places.len());
     let mut npcs = npcs;
+    npcs.time_scale = cfg.npc_time_scale.max(0.1);
+    npcs.equip_all(&weapons); // armed first: only an armed NPC thinks of hunting
     npcs.set_grounds(mobs.grounds());
-    npcs.equip_all(&weapons);
     if let (Some(dir), false) = (&cfg.nav, npcs.npcs.is_empty()) {
         match Nav::open(dir) {
             Ok(nav) => {
@@ -843,10 +846,11 @@ impl World {
 
     fn report(&mut self) {
         let s = std::mem::take(&mut self.stats);
+        let goals = self.npcs.goal_counts();
         let avg = if s.ticks > 0 { s.tick_us_sum / s.ticks as u128 } else { 0 };
         println!(
-            "[stats] {} online | npcs {} active/{} near/{} far | tick avg {} µs max {} µs | out {:.1} KB/s ({:.0} snapshots/s) | dropped {}",
-            self.online, s.lod.active, s.lod.near, s.lod.far, avg, s.tick_us_max, s.bytes_out as f64 / 5.0 / 1024.0, s.snapshots_out as f64 / 5.0, s.dropped
+            "[stats] {} online | npcs {} active/{} near/{} far, {} rest/{} wander/{} travel/{} to hunt/{} fight | tick avg {} µs max {} µs | out {:.1} KB/s ({:.0} snapshots/s) | dropped {}",
+            self.online, s.lod.active, s.lod.near, s.lod.far, goals[0], goals[1], goals[2], goals[3], goals[4], avg, s.tick_us_max, s.bytes_out as f64 / 5.0 / 1024.0, s.snapshots_out as f64 / 5.0, s.dropped
         );
     }
 }

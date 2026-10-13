@@ -6,7 +6,7 @@
 //! string pulling, so the result is a few waypoints with a clear line between each.
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -187,6 +187,60 @@ impl Nav {
             }
             if let Some((_, cell)) = best {
                 return Some(Self::center(cell));
+            }
+        }
+        None
+    }
+
+    /// Does the free cell `start` belong to a region of at least `n` connected free cells (not a closed room or a pocket)? Cells of regions found to be
+    /// too small are added to `small`, so a search over many candidates does not walk the same room twice.
+    fn region_at_least(&self, start: (i32, i32), n: usize, small: &mut HashSet<(i32, i32)>) -> bool {
+        let mut seen: HashSet<(i32, i32)> = HashSet::from([start]);
+        let mut queue = VecDeque::from([start]);
+        while let Some(c) = queue.pop_front() {
+            if seen.len() >= n {
+                return true;
+            }
+            for dz in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    let q = (c.0 + dx, c.1 + dz);
+                    if (dx == 0 && dz == 0) || seen.contains(&q) || self.cell(q.0, q.1) != 0 {
+                        continue;
+                    }
+                    if dx != 0 && dz != 0 && (self.cell(c.0 + dx, c.1) != 0 || self.cell(c.0, c.1 + dz) != 0) {
+                        continue;
+                    }
+                    seen.insert(q);
+                    queue.push_back(q);
+                }
+            }
+        }
+        let big = seen.len() >= n;
+        if !big {
+            small.extend(seen);
+        }
+        big
+    }
+
+    /// Like `snap`, but the cell must lie in a region of at least `min_region` connected free cells: an NPC put down inside a house (a sealed room
+    /// of the baked walls) would never find a route out, so it is moved to the nearest open ground instead.
+    pub fn snap_open(&self, p: (f32, f32), max_cells: i32, min_region: usize) -> Option<(f32, f32)> {
+        let c = Self::cell_of(p);
+        let mut small: HashSet<(i32, i32)> = HashSet::new();
+        for r in 0..=max_cells {
+            let mut ring: Vec<(i32, (i32, i32))> = Vec::new();
+            for dz in -r..=r {
+                for dx in -r..=r {
+                    if dx.abs().max(dz.abs()) == r && self.cell(c.0 + dx, c.1 + dz) == 0 && !small.contains(&(c.0 + dx, c.1 + dz)) {
+                        ring.push((dx * dx + dz * dz, (c.0 + dx, c.1 + dz)));
+                    }
+                }
+            }
+            ring.sort();
+            for (_, cell) in ring {
+                if self.region_at_least(cell, min_region, &mut small) {
+                    return Some(if cell == c { p } else { Self::center(cell) });
+                }
             }
         }
         None
