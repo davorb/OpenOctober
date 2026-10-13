@@ -190,7 +190,8 @@ export class World {
     return m;
   }
   _objMaterial(src, fade) {
-    if (/bindstone_\w+\.sfm_0$/i.test(src.name || '')) return this._beamMaterial(src, fade);
+    // every clanstone variant (bindstone_*, clanstone_hamlet, all_clanstone_chaos001, ...) names its beam subset differently, but they all share the beam texture
+    if (/bindstone_\w+\.sfm_0$/i.test(src.name || '') || /sfx_clanstone_lightbeam/i.test(src.map?.name || '')) return this._beamMaterial(src, fade);
     // MeshStandardMaterial from glTF -> cheaper Lambert with the game's fog
     const solid = this._shaderIsSolid(src.name);
     const m = new THREE.MeshLambertMaterial({ map: src.map, color: src.color, side: THREE.DoubleSide, alphaTest: solid ? 0 : (src.alphaTest && this._maskIsBogus(src.map) ? 0 : src.alphaTest), transparent: solid ? false : src.transparent, opacity: src.opacity, emissive: src.emissive, emissiveMap: src.emissiveMap, vertexColors: src.vertexColors });
