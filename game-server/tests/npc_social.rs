@@ -1,8 +1,8 @@
-//! How NPCs treat players: the chaos races attack the others (with pvp on), friendly ones greet, and anybody fights back against a player who hurt it.
+//! How NPCs treat players: most adventurers are friendly, some attack the other side, a few attack every player, and anybody fights back against a player who hurt it.
 use std::collections::HashSet;
 use std::time::Duration;
 
-use game_server::npcs::NPC_ID_BASE;
+use game_server::npcs::{Temper, NPC_ID_BASE};
 use game_server::proto::*;
 use game_server::world::{self, Cmd, Config, JoinReq};
 use tokio::sync::{mpsc, oneshot};
@@ -56,7 +56,9 @@ async fn hostile_npcs_attack_players_of_the_other_side() {
             let Some(v) = json(m) else { continue };
             match v["t"].as_str() {
                 Some("swing") if v["id"].as_u64().unwrap() >= NPC_ID_BASE as u64 => {
-                    swings.insert(v["id"].as_u64().unwrap());
+                    let id = v["id"].as_u64().unwrap();
+                    assert_ne!(Temper::of_adventurer(id as u16), Temper::Friendly, "a friendly orc does not swing at a human");
+                    swings.insert(id);
                 }
                 Some("hit") if v["v"] == "p" && v["i"].as_u64() == Some(me as u64) && v["a"].as_u64().unwrap() >= NPC_ID_BASE as u64 && v["am"] == false => hits += 1,
                 _ => {}
@@ -68,7 +70,7 @@ async fn hostile_npcs_attack_players_of_the_other_side() {
 }
 
 #[tokio::test]
-async fn no_hostility_without_pvp_and_none_between_friends() {
+async fn no_hostility_without_pvp_and_only_outlaws_attack_their_own() {
     for (tag, npc_race, pvp) in [("nopvp", "Ork", false), ("friends", "Human", true)] {
         let s = start(tag, npc_race, pvp);
         let (me, mut rx) = join(&s.cmds, "hum", (110.0, -200.0)).await;
@@ -80,8 +82,14 @@ async fn no_hostility_without_pvp_and_none_between_friends() {
             while let Ok(m) = rx.try_recv() {
                 let Some(v) = json(m) else { continue };
                 match v["t"].as_str() {
-                    Some("hit") => assert!(v["i"].as_u64() != Some(me as u64), "{tag}: nobody hits the visitor: {v}"),
-                    Some("swing") => assert!(v["id"].as_u64().unwrap() < NPC_ID_BASE as u64, "{tag}: no npc swings"),
+                    Some("hit") if v["i"].as_u64() == Some(me as u64) => {
+                        let attacker = v["a"].as_u64().unwrap();
+                        assert!(tag == "friends" && attacker >= NPC_ID_BASE as u64 && Temper::of_adventurer(attacker as u16) == Temper::Outlaw, "{tag}: only an outlaw hits a player of his own side: {v}");
+                    }
+                    Some("swing") if v["id"].as_u64().unwrap() >= NPC_ID_BASE as u64 => {
+                        let id = v["id"].as_u64().unwrap();
+                        assert!(tag == "friends" && Temper::of_adventurer(id as u16) == Temper::Outlaw, "{tag}: only an outlaw swings at his own side");
+                    }
                     Some("chat") if v["id"].as_u64().unwrap() >= NPC_ID_BASE as u64 => {
                         greeted.insert(v["id"].as_u64().unwrap());
                     }
@@ -91,6 +99,7 @@ async fn no_hostility_without_pvp_and_none_between_friends() {
         }
         if tag == "friends" {
             assert!(!greeted.is_empty(), "a friendly npc greets a player of its own side");
+            assert!(greeted.iter().all(|&id| Temper::of_adventurer(id as u16) != Temper::Outlaw), "an outlaw greets nobody");
         } else {
             assert!(greeted.is_empty(), "orcs do not greet a human");
         }
@@ -99,11 +108,12 @@ async fn no_hostility_without_pvp_and_none_between_friends() {
 
 #[tokio::test]
 async fn a_player_who_hurts_an_npc_is_fought_back() {
-    // friendly (human) NPCs in a village; the visitor is human too, so nobody minds him until he strikes
+    // human NPCs; a friendly one greets and would not attack first, but holds a grudge once struck. An outlaw of the same race may attack anyway.
     let s = start("grudge", "Human", true);
     let (me, mut rx) = join(&s.cmds, "hum", (110.0, -200.0)).await;
     s.cmds.send(Cmd::Equip(me, "r_Test Sword".into(), true)).await.unwrap();
     let (mut struck, mut retaliated) = (false, false);
+    let mut greeted = HashSet::new();
     let mut target: Option<(u16, f32, f32)> = None;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while tokio::time::Instant::now() < deadline && !retaliated {
@@ -116,7 +126,8 @@ async fn a_player_who_hurts_an_npc_is_fought_back() {
                         let o = 7 + i * 20;
                         let id = u16::from_le_bytes([b[o], b[o + 1]]);
                         let f = |k: usize| f32::from_le_bytes([b[o + k], b[o + k + 1], b[o + k + 2], b[o + k + 3]]);
-                        if id >= NPC_ID_BASE && target.map_or(true, |t| t.0 == id) {
+                        let friendly = greeted.contains(&id);
+                        if id >= NPC_ID_BASE && friendly && target.map_or(true, |t| t.0 == id) {
                             target = Some((id, f(2), f(10)));
                         }
                     }
@@ -124,8 +135,11 @@ async fn a_player_who_hurts_an_npc_is_fought_back() {
                 Message::Text(t) => {
                     let v: serde_json::Value = serde_json::from_str(&t).unwrap();
                     match v["t"].as_str() {
-                        Some("hit") if v["a"].as_u64() == Some(me as u64) && v["v"] == "p" && v["i"].as_u64().unwrap() >= NPC_ID_BASE as u64 => struck = true,
-                        Some("hit") if v["i"].as_u64() == Some(me as u64) && v["a"].as_u64().unwrap() >= NPC_ID_BASE as u64 => retaliated = true,
+                        Some("chat") if v["id"].as_u64().unwrap() >= NPC_ID_BASE as u64 => {
+                            greeted.insert(v["id"].as_u64().unwrap() as u16);
+                        }
+                        Some("hit") if v["a"].as_u64() == Some(me as u64) && v["v"] == "p" && target.is_some_and(|t| v["i"].as_u64() == Some(t.0 as u64)) => struck = true,
+                        Some("hit") if v["i"].as_u64() == Some(me as u64) && target.is_some_and(|t| v["a"].as_u64() == Some(t.0 as u64)) => retaliated = true,
                         _ => {}
                     }
                 }
@@ -140,6 +154,6 @@ async fn a_player_who_hurts_an_npc_is_fought_back() {
             }
         }
     }
-    assert!(struck, "the visitor's blow landed on an npc");
-    assert!(retaliated, "and the npc hit him back");
+    assert!(struck, "the visitor's blow landed on a friendly npc");
+    assert!(retaliated, "and that npc hit him back");
 }

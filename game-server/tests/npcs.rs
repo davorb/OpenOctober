@@ -17,6 +17,36 @@ fn dist(a: &PosUpdate, b: (f32, f32)) -> f32 {
 }
 
 #[test]
+fn most_adventurers_are_friendly_and_a_few_hate_everyone() {
+    // race index 3 is ork: the other side is a human (player_chaos == false)
+    let w = Npcs::build(places(), &[(3, (0.0, 0.0))], 200, 1);
+    let (mut friendly, mut faction, mut outlaw) = (0, 0, 0);
+    for n in &w.npcs {
+        assert_eq!(n.info.race, "ork");
+        match n.temper() {
+            Temper::Friendly => {
+                friendly += 1;
+                assert!(!n.hostile_to(false) && !n.hostile_to(true));
+            }
+            Temper::Faction => {
+                faction += 1;
+                assert!(n.hostile_to(false), "a faction ork attacks the other side");
+                assert!(!n.hostile_to(true), "and not his own");
+            }
+            Temper::Outlaw => {
+                outlaw += 1;
+                assert!(n.hostile_to(false) && n.hostile_to(true), "an outlaw attacks every player");
+            }
+        }
+    }
+    assert_eq!((friendly, faction, outlaw), (140, 40, 20), "70% friendly, 20% the other side, 10% everyone");
+    let mut vendor = w.npcs.iter().find(|n| n.temper() == Temper::Outlaw).unwrap().clone();
+    vendor.role = Role::Vendor;
+    assert_eq!(vendor.temper(), Temper::Friendly);
+    assert!(!vendor.hostile_to(false), "a vendor never attacks on sight");
+}
+
+#[test]
 fn population_is_reproducible_and_labeled() {
     let a = Npcs::build(places(), &[(0, (0.0, 0.0))], 40, 7);
     let b = Npcs::build(places(), &[(0, (0.0, 0.0))], 40, 7);

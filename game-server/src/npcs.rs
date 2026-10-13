@@ -105,9 +105,31 @@ const MAX_RETRIEVALS: u8 = 2;
 /// An NPC hunts at spawn points this close to the place it is at, and no tougher than `hunt_cap(level)`.
 const HUNT_RADIUS: f32 = 2500.0;
 const GROUND_CELL: f32 = 2000.0;
-/// ASSUMPTION (the game data has no table of who is hostile to whom): the three chaos races are hostile to the other three, as in Darkfall.
+/// ASSUMPTION (the game data has no table of who is hostile to whom): the three chaos races are one side, the other three the other, as in Darkfall.
 pub fn chaos_race(race: &str) -> bool {
     matches!(race, "ork" | "mir" | "mhm")
+}
+
+/// How an adventurer treats players. Fixed from its id, so a saved NPC keeps it: 70% friendly, 20% hostile to the other side, 10% hostile to every player.
+/// Vendors and traders are never hostile on sight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Temper {
+    Friendly,
+    /// Attacks players of the other side.
+    Faction,
+    /// Attacks every player.
+    Outlaw,
+}
+
+impl Temper {
+    /// The temper an adventurer with this id has.
+    pub fn of_adventurer(id: u16) -> Self {
+        match id.wrapping_sub(NPC_ID_BASE) % 10 {
+            0 => Temper::Outlaw,
+            1 | 2 => Temper::Faction,
+            _ => Temper::Friendly,
+        }
+    }
 }
 
 /// Vendors can be killed, but it takes an army: they are very hard to hurt, hit very hard and fight back. A dead vendor drops its shelves and purse,
@@ -357,6 +379,20 @@ impl Npc {
     /// The toughest mob rank it dares to hunt.
     pub fn hunt_cap(&self) -> u8 {
         hunt_cap(self.melee_skill())
+    }
+
+    /// Friendly, hostile to the other side, or hostile to every player. Only adventurers are ever the last two.
+    pub fn temper(&self) -> Temper {
+        if self.role == Role::Adventurer { Temper::of_adventurer(self.id) } else { Temper::Friendly }
+    }
+
+    /// Would attack a player of this side on sight. A grudge is separate, and so is pvp being on.
+    pub fn hostile_to(&self, player_chaos: bool) -> bool {
+        match self.temper() {
+            Temper::Outlaw => true,
+            Temper::Faction => chaos_race(&self.info.race) != player_chaos,
+            Temper::Friendly => false,
+        }
     }
 }
 

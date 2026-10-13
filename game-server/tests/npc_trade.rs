@@ -382,7 +382,8 @@ async fn a_vendor_that_is_attacked_strikes_back_hard() {
     while let Ok(m) = inbox.try_recv() {
         if let Message::Text(t) = m {
             let v: serde_json::Value = serde_json::from_str(&t).unwrap();
-            assert!(v["t"] != "hit" && v["t"] != "swing", "a vendor never attacks first: {v}");
+            let from_vendor = v["id"].as_u64() == Some(vendor_id) || v["a"].as_u64() == Some(vendor_id);
+            assert!(!(from_vendor && (v["t"] == "hit" || v["t"] == "swing")), "a vendor never attacks first: {v}");
         }
     }
     // then he strikes it

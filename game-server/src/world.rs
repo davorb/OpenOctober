@@ -11,7 +11,7 @@ use crate::combat::*;
 use crate::mobs::{MobAttack, Mobs};
 use crate::nav::Nav;
 use crate::economy::{item_weight, Stock, CARRY_LIMIT};
-use crate::npcs::{chaos_race, Role, VENDOR_DOWN_SECS, Goal, Lod, LodCounts, Npcs, DOWN_SECS as NPC_DOWN_SECS, NPC_ID_BASE};
+use crate::npcs::{chaos_race, Role, Temper, VENDOR_DOWN_SECS, Goal, Lod, LodCounts, Npcs, DOWN_SECS as NPC_DOWN_SECS, NPC_ID_BASE};
 use crate::proto::*;
 use crate::store::Store;
 
@@ -1026,8 +1026,9 @@ impl World {
         self.send_near(p.x, p.z, msg, None);
     }
 
-    /// How NPCs deal with the players around them: hostile ones (the chaos races, with pvp on) attack players of the other side, anybody attacks a player
-    /// who hurt it lately, friendly ones greet players of their own side. A fight lasts while the foe is near, up and the NPC is not badly hurt.
+    /// How NPCs deal with the players around them. An adventurer's temper (not its race alone) decides: most are friendly, some attack the other side,
+    /// a few attack every player. Anybody attacks a player who hurt it lately, and friendly ones greet players of their own side. A fight lasts while the
+    /// foe is near, up and the NPC is not badly hurt.
     fn npc_social(&mut self, dt: f32, now: Instant) {
         for n in self.npcs.npcs.iter_mut() {
             n.greet = (n.greet - dt).max(0.0);
@@ -1079,12 +1080,12 @@ impl World {
             for &(pid, x, z, pchaos, _) in &people {
                 let d = near(x, z);
                 let grudge = n.grudges.iter().any(|g| g.0 == pid);
-                if pvp && d < NPC_AGGRO && n.hp >= n.max_hp * 0.5 && (grudge || (chaos && !pchaos && n.role != Role::Vendor)) {
+                if pvp && d < NPC_AGGRO && n.hp >= n.max_hp * 0.5 && (grudge || n.hostile_to(pchaos)) {
                     n.foe = Some(pid);
                     n.chase = Some((x, z));
                     break;
                 }
-                if d < NPC_GREET && n.greet <= 0.0 && !busy && chaos == pchaos {
+                if d < NPC_GREET && n.greet <= 0.0 && !busy && n.temper() != Temper::Outlaw && chaos == pchaos {
                     n.greet = 90.0 + (tick % 60) as f32;
                     greetings.push((i, GREETINGS[(tick as usize / 7 + i) % GREETINGS.len()]));
                     break;
