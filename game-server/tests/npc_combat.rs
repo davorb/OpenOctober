@@ -68,19 +68,19 @@ async fn visible_npcs_hunt_mobs_and_mobs_hit_back() {
 async fn an_npc_killed_by_a_mob_leaves_a_corpse_and_gets_up_at_home() {
     let dir = std::env::temp_dir();
     let (pois, caps, spawns, weapons) = (dir.join("df_nd_pois.json"), dir.join("df_nd_caps.json"), dir.join("df_nd_spawns.json"), dir.join("df_nd_weapons.json"));
-    // a boss 12 m from the village centre: it kills whoever wanders within its reach
+    // three bosses 12 m from the village centre: they kill whoever is within reach (NPCs on the move outrun them)
     std::fs::write(&pois, r#"[{"name":"Town","type":"Village","x":100,"z":200}]"#).unwrap();
     std::fs::write(&caps, r#"[{"name":"Shoal","race":"Alfar","x":100,"y":0,"z":200}]"#).unwrap();
-    std::fs::write(&spawns, r#"[{"id":1,"x":112,"z":200,"mobs":[{"id":9,"name":"Boss","qty":1,"difficulty":"Boss"}]}]"#).unwrap();
+    std::fs::write(&spawns, r#"[{"id":1,"x":112,"z":200,"mobs":[{"id":9,"name":"Boss","qty":3,"difficulty":"Boss"}]}]"#).unwrap();
     std::fs::write(&weapons, WEAPONS).unwrap();
     let s = |p: &std::path::PathBuf| Some(p.to_string_lossy().to_string());
-    let cfg = Config { radius: 900.0, max_players: 8, tick_hz: 60, spawns: s(&spawns), weapons: s(&weapons), pvp: false, npcs: 40, pois: s(&pois), capitals: s(&caps), npc_seed: 3, db: None, nav: None, npc_time_scale: 1.0 };
+    let cfg = Config { radius: 900.0, max_players: 8, tick_hz: 60, spawns: s(&spawns), weapons: s(&weapons), pvp: false, npcs: 150, pois: s(&pois), capitals: s(&caps), npc_seed: 3, db: None, nav: None, npc_time_scale: 1.0 };
     let (cmds, rx) = mpsc::channel(256);
     tokio::spawn(world::run(cfg, rx));
     let mut watcher = join(&cmds, (100.0, -200.0)).await;
 
     let (mut died, mut corpses, mut got_up) = (HashSet::new(), 0, HashSet::new());
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(75);
     while tokio::time::Instant::now() < deadline && !died.iter().any(|d| got_up.contains(d)) {
         tokio::time::sleep(Duration::from_millis(200)).await;
         while let Ok(m) = watcher.try_recv() {

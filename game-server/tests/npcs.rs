@@ -95,7 +95,7 @@ fn one_long_step_finishes_whole_legs() {
     }
     for n in &w.npcs {
         assert!(n.fatigue >= 0.0 && n.fatigue <= 1.0);
-        assert!(n.pos.x > -200.0 && n.pos.x < 10_200.0 && n.pos.z.abs() < 200.0, "npc left the world: {:?}", n.pos);
+        assert!(n.pos.x > -2_000.0 && n.pos.x < 12_000.0 && n.pos.z.abs() < 2_500.0, "npc left the world: {:?}", n.pos); // explorers go up to 1.6 km off the line of towns
     }
     assert!(w.npcs.iter().any(|n| n.at != n.home), "somebody should have changed town");
 }
@@ -225,4 +225,53 @@ fn unarmed_npcs_do_not_hunt() {
         w.step(5.0, &[(-50_000.0, 0.0)], 900.0);
         assert!(w.npcs.iter().all(|n| !matches!(n.goal, Goal::Hunt { .. })));
     }
+}
+
+#[test]
+fn npcs_explore_and_come_home_and_curious_ones_go_further() {
+    let mut places = places();
+    // a dungeon entrance a kilometre off the line of towns
+    places.push(Place { name: "Crypt".into(), x: 3000.0, z: 1000.0, town: false });
+    let mut w = Npcs::build(places, &[(0, (0.0, 0.0))], 60, 13);
+    let (mut explorers, mut max_away) = (std::collections::HashSet::new(), vec![0.0f32; 60]);
+    // per npc: has it been far out (> 300 m), and did it come back (< 150 m) afterwards?
+    let (mut left, mut returned) = (vec![false; 60], vec![false; 60]);
+    let (mut was_exploring, mut trips) = (vec![false; 60], vec![0u32; 60]);
+    let mut seen_crypt = false;
+    for _ in 0..(12 * 90) {
+        w.step(5.0, &[(-50_000.0, 0.0)], 900.0);
+        for (i, n) in w.npcs.iter().enumerate() {
+            let p = &w.places[n.at];
+            let d = dist(&n.pos, (p.x, p.z));
+            max_away[i] = max_away[i].max(d);
+            left[i] |= d > 300.0;
+            returned[i] |= left[i] && d < 150.0;
+            let exploring = matches!(n.goal, Goal::Explore { .. });
+            if exploring && !was_exploring[i] {
+                trips[i] += 1;
+            }
+            was_exploring[i] = exploring;
+            if let Goal::Explore { to, .. } = n.goal {
+                explorers.insert(n.id);
+                seen_crypt |= (to.0 - 3000.0).abs() < 1.0 && (to.1 - 1000.0).abs() < 1.0;
+            }
+        }
+    }
+    assert!(explorers.len() >= 10, "many npcs explore: {}", explorers.len());
+    assert!(seen_crypt, "somebody went to look at the dungeon");
+    let gone = left.iter().filter(|&&l| l).count();
+    assert!(gone >= 10, "explorers go a good way out: {gone}");
+    let back = returned.iter().filter(|&&r| r).count();
+    assert!(back * 10 >= gone * 8, "and they come home again: {back} of {gone} came back");
+    // curiosity is fixed per npc and varies between them
+    let c: Vec<f32> = w.npcs.iter().map(|n| n.curiosity()).collect();
+    assert!(c.iter().all(|v| (0.0..1.0).contains(v)) && c.iter().cloned().fold(0.0, f32::max) - c.iter().cloned().fold(1.0, f32::min) > 0.5);
+    let mean = |sel: &dyn Fn(f32) -> bool| {
+        let v: Vec<f32> = w.npcs.iter().enumerate().filter(|(_, n)| sel(n.curiosity())).map(|(i, _)| trips[i] as f32).collect();
+        v.iter().sum::<f32>() / v.len().max(1) as f32
+    };
+    let (curious, timid) = (mean(&|c| c > 0.66), mean(&|c| c < 0.33));
+    assert!(curious > timid * 1.3, "curious npcs explore more often: {curious:.1} trips vs {timid:.1}");
+    // what they looked at is remembered, within limits
+    assert!(w.npcs.iter().any(|n| !n.explored_cells().is_empty()) && w.npcs.iter().all(|n| n.explored_cells().len() <= 48));
 }

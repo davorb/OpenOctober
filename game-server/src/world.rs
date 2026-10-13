@@ -989,8 +989,8 @@ impl World {
         let goals = self.npcs.goal_counts();
         let avg = if s.ticks > 0 { s.tick_us_sum / s.ticks as u128 } else { 0 };
         println!(
-            "[stats] {} online | npcs {} active/{} near/{} far, {} rest/{} wander/{} travel/{} to hunt/{} fight | tick avg {} µs max {} µs | out {:.1} KB/s ({:.0} snapshots/s) | dropped {}",
-            self.online, s.lod.active, s.lod.near, s.lod.far, goals[0], goals[1], goals[2], goals[3], goals[4], avg, s.tick_us_max, s.bytes_out as f64 / 5.0 / 1024.0, s.snapshots_out as f64 / 5.0, s.dropped
+            "[stats] {} online | npcs {} active/{} near/{} far, {} rest/{} wander/{} travel/{} to hunt/{} fight/{} explore | tick avg {} µs max {} µs | out {:.1} KB/s ({:.0} snapshots/s) | dropped {}",
+            self.online, s.lod.active, s.lod.near, s.lod.far, goals[0], goals[1], goals[2], goals[3], goals[4], goals[5], avg, s.tick_us_max, s.bytes_out as f64 / 5.0 / 1024.0, s.snapshots_out as f64 / 5.0, s.dropped
         );
     }
 }

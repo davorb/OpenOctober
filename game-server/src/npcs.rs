@@ -49,11 +49,19 @@ pub enum Goal {
     /// Hunt mobs at the spawn point `ground` for this many more seconds: first walk there, then fight (`fighting`). Far from any player the fight is
     /// only time and experience; an active NPC really fights the mobs (the world drives that, see `world.rs`).
     Hunt { ground: usize, left: f32, fighting: bool },
+    /// Go and look at `to` (a dungeon entrance, an unvisited stretch of wilderness): walk there, then linger for `left` more seconds.
+    Explore { to: (f32, f32), left: f32, arrived: bool },
 }
 
 const WANDER_R: f32 = 45.0;
 /// Ground an NPC can use is a connected region of at least this many 2 m cells (a house is a few hundred).
 const OPEN_REGION: usize = 1500;
+/// Explorers walk at this speed, look at places 400 m to this far away, and remember the areas they have seen in cells of EXPLORE_CELL metres.
+const EXPLORE_SPEED: f32 = 2.4;
+const EXPLORE_RANGE: (f32, f32) = (400.0, 1600.0);
+const EXPLORE_CELL: f32 = 600.0;
+/// Beyond this far from the place it is at, an NPC mostly heads back before choosing anything else.
+const HOME_RADIUS: f32 = 150.0;
 /// An NPC hunts at spawn points this close to the place it is at, and no tougher than `hunt_cap(level)`.
 const HUNT_RADIUS: f32 = 2500.0;
 const GROUND_CELL: f32 = 2000.0;
@@ -133,6 +141,8 @@ pub struct Npc {
     good: (f32, f32),
     /// Destinations (kind 0 place, 1 hunting ground) it found no route to; it does not pick them again for a while.
     avoid: Vec<(u8, usize)>,
+    /// Areas (EXPLORE_CELL squares) it has been to, oldest first.
+    explored: Vec<(i32, i32)>,
 }
 
 /// The persisted part of an NPC (see `store.rs`).
@@ -244,6 +254,16 @@ fn race_code(name: &str) -> Option<usize> {
 }
 
 impl Npc {
+    /// 0..1, fixed per NPC: how much it likes to go and look at things.
+    pub fn curiosity(&self) -> f32 {
+        ((self.id as u32).wrapping_mul(2654435761) >> 16) as f32 % 100.0 / 100.0
+    }
+
+    /// Areas (600 m squares) this NPC has explored.
+    pub fn explored_cells(&self) -> &[(i32, i32)] {
+        &self.explored
+    }
+
     pub fn skill(&self, name: &str) -> f32 {
         self.skills.get(name).copied().unwrap_or(0.0)
     }
@@ -332,6 +352,7 @@ impl Npcs {
                 path_goal: None,
                 good: (x, z),
                 avoid: Vec::new(),
+                explored: Vec::new(),
             };
             npc.max_hp = npc_hp(npc.skill("Health"));
             npc.hp = npc.max_hp;
@@ -353,9 +374,18 @@ impl Npcs {
         let wander = 0.25 + frac(&mut n.rng) * 0.2;
         let travel = if links.is_empty() { 0.0 } else { 0.3 + frac(&mut n.rng) * 0.6 };
         let in_town = self.places[n.at].town;
+        // far from the place it is at (after exploring or hunting): usually walk back first
+        let p = &self.places[n.at];
+        if dist((n.pos.x, n.pos.z), (p.x, p.z)) > HOME_RADIUS && frac(&mut n.rng) < 0.85 && !n.avoid.contains(&(0, n.at)) {
+            n.goal = Goal::Travel { dest: n.at };
+            return;
+        }
+        let explore = if n.fatigue > 0.7 { None } else { self.exploration(n).map(|g| (g, 0.15 + 0.75 * n.curiosity() * (1.0 - n.fatigue) * (0.5 + frac(&mut n.rng)))) };
         let hunt = if n.group.is_empty() || n.fatigue > 0.6 || n.hp < n.max_hp * 0.5 { None } else { self.hunting_ground(n).map(|g| (g, 0.35 + frac(&mut n.rng) * 0.55)) };
         n.goal = if let Some((ground, _)) = hunt.filter(|h| h.1 >= wander.max(travel) && h.1 > rest) {
             Goal::Hunt { ground, left: 60.0 + frac(&mut n.rng) * 120.0, fighting: false }
+        } else if let Some((to, score)) = explore.filter(|e| e.1 >= wander.max(travel) && e.1 > rest) {
+            Goal::Explore { to, left: 10.0 + score * 40.0, arrived: false }
         } else if rest > wander.max(travel) && in_town {
             Goal::Rest { left: 15.0 + n.fatigue * 90.0 * (0.5 + frac(&mut n.rng)) }
         } else if travel >= wander {
@@ -371,6 +401,31 @@ impl Npcs {
         } else {
             Goal::Wander { left: 10.0 + frac(&mut n.rng) * 30.0, to: None }
         };
+    }
+
+    /// Somewhere to go and look at, from the place `n` is at: a dungeon within reach, or a spot of wilderness in an area it has not seen yet.
+    fn exploration(&self, n: &mut Npc) -> Option<(f32, f32)> {
+        let p = &self.places[n.at];
+        let seen = |x: f32, z: f32, n: &Npc| n.explored.contains(&((x / EXPLORE_CELL).floor() as i32, (z / EXPLORE_CELL).floor() as i32));
+        // dungeons first (a third of the time): the entrance of one it has not looked at yet
+        if frac(&mut n.rng) < 0.33 {
+            let places: Vec<&Place> = self.places.iter().filter(|q| !q.town && dist((p.x, p.z), (q.x, q.z)) < 3000.0 && !seen(q.x, q.z, n)).collect();
+            if !places.is_empty() {
+                let q = places[xorshift(&mut n.rng) as usize % places.len()];
+                return Some((q.x, q.z));
+            }
+        }
+        let mut fallback = None;
+        for _ in 0..6 {
+            let a = frac(&mut n.rng) * std::f32::consts::TAU;
+            let r = EXPLORE_RANGE.0 + frac(&mut n.rng) * (EXPLORE_RANGE.1 - EXPLORE_RANGE.0);
+            let t = (p.x + a.cos() * r, p.z + a.sin() * r);
+            if !seen(t.0, t.1, n) {
+                return Some(t);
+            }
+            fallback = Some(t);
+        }
+        fallback
     }
 
     /// A random hunting ground near the place `n` is at that is not too tough for it.
@@ -653,6 +708,39 @@ impl Npcs {
                         }
                     }
                 }
+                Goal::Explore { to, left, arrived } => {
+                    if !arrived {
+                        let target = self.standable(to, active);
+                        let before = (n.pos.x, n.pos.z);
+                        let Some((used, reached)) = self.walk(n, target, EXPLORE_SPEED, dt, active) else {
+                            self.give_up(n);
+                            continue;
+                        };
+                        n.fatigue = (n.fatigue + dist(before, (n.pos.x, n.pos.z)) / 12000.0).min(1.0);
+                        dt -= used;
+                        if reached {
+                            n.goal = Goal::Explore { to, left, arrived: true };
+                        }
+                    } else {
+                        // looking around: standing still, turning slowly
+                        let used = dt.min(left);
+                        n.pos.speed = 0;
+                        n.pos.yaw += used * 0.6;
+                        dt -= used;
+                        if left - used <= 1e-3 {
+                            let cell = ((n.pos.x / EXPLORE_CELL).floor() as i32, (n.pos.z / EXPLORE_CELL).floor() as i32);
+                            if !n.explored.contains(&cell) {
+                                n.explored.push(cell);
+                                if n.explored.len() > 48 {
+                                    n.explored.remove(0);
+                                }
+                            }
+                            self.think(n);
+                        } else {
+                            n.goal = Goal::Explore { to, left: left - used, arrived: true };
+                        }
+                    }
+                }
                 Goal::Rest { left } => {
                     let used = left.min(dt);
                     n.fatigue = (n.fatigue - used / 120.0).max(0.0);
@@ -837,9 +925,9 @@ impl Npcs {
         counts
     }
 
-    /// How many NPCs are resting / wandering / travelling / walking to a hunt / fighting (for the stats line).
-    pub fn goal_counts(&self) -> [u32; 5] {
-        let mut c = [0u32; 5];
+    /// How many NPCs are resting / wandering / travelling / walking to a hunt / fighting / exploring (for the stats line).
+    pub fn goal_counts(&self) -> [u32; 6] {
+        let mut c = [0u32; 6];
         for n in &self.npcs {
             c[match n.goal {
                 Goal::Rest { .. } => 0,
@@ -847,6 +935,7 @@ impl Npcs {
                 Goal::Travel { .. } => 2,
                 Goal::Hunt { fighting: false, .. } => 3,
                 Goal::Hunt { fighting: true, .. } => 4,
+                Goal::Explore { .. } => 5,
             }] += 1;
         }
         c
@@ -867,6 +956,7 @@ impl Npcs {
                     Goal::Wander { left, .. } => (1, left, -1),
                     Goal::Travel { dest } => (2, 0.0, dest as i64),
                     Goal::Hunt { ground, left, .. } => (3, left, ground as i64),
+                    Goal::Explore { .. } => (0, 1.0, -1), // an exploration in progress is not saved: it rests a moment and chooses again
                 };
                 NpcState { idx: (n.id - NPC_ID_BASE) as u32, name: n.info.name.clone(), race: n.info.race.clone(), gender: n.info.gender.clone(), gear: n.info.gear.clone(), skills: serde_json::to_string(&n.skills).unwrap_or_default(), weapon: n.info.weapon.clone(), home: n.home, at: n.at, goal_kind: kind, goal_a: a, goal_dest: dest, fatigue: n.fatigue, x: n.pos.x, z: n.pos.z, yaw: n.pos.yaw, rng: n.rng }
             })
