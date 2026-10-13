@@ -8,10 +8,11 @@
 //! A step moves the NPC along its current goal by the accumulated time, so a far NPC covers (and may finish) whole legs in one go, and an NPC that
 //! gets close is caught up to "now" first, so it never appears to jump. Travel is a hop along a graph that joins every place to its nearest neighbours
 //! (a stand-in for a road network). Positions use the wire convention (viewer three.js space: game z negated); height is left to the clients (`FLAG_SNAP`).
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::Deserialize;
 
+use crate::combat::{is_melee, mob_skill, npc_hp, skill_damage, weapon_skill, Weapons};
 use crate::nav::Nav;
 use crate::proto::{PlayerInfo, PosUpdate, FLAG_NPC, FLAG_SNAP, GENDERS, RACES};
 
@@ -44,9 +45,29 @@ pub enum Goal {
     Wander { left: f32, to: Option<(f32, f32)> },
     /// Walk to place `dest`.
     Travel { dest: usize },
+    /// Hunt mobs at the spawn point `ground` for this many more seconds: first walk there, then fight (`fighting`). Far from any player the fight is
+    /// only time and experience; an active NPC really fights the mobs (the world drives that, see `world.rs`).
+    Hunt { ground: usize, left: f32, fighting: bool },
 }
 
 const WANDER_R: f32 = 45.0;
+/// An NPC hunts at spawn points this close to the place it is at, and no tougher than `hunt_cap(level)`.
+const HUNT_RADIUS: f32 = 2500.0;
+const GROUND_CELL: f32 = 2000.0;
+/// Seconds a dead NPC lies there before it is back at its home place.
+pub const DOWN_SECS: f32 = 6.0;
+
+/// The toughest mob rank (see `combat::difficulty_rank`) an NPC with this weapon skill dares to hunt.
+pub fn hunt_cap(skill: f32) -> u8 {
+    (skill / 20.0).floor().clamp(0.0, 4.0) as u8
+}
+
+/// Skill gained from one use (a blow landed, or one taken: `per` is the gain at skill 0) against a mob of `rank`: the more the skill is past
+/// what the mob is a fair fight for, the less it teaches, and training slows towards 100.
+pub fn skill_gain(skill: f32, rank: u8, per: f32) -> f32 {
+    per * (1.0 - (skill - mob_skill(rank)).max(0.0) / 30.0).max(0.0) * (1.0 - skill / 130.0).max(0.0)
+}
+
 /// An active NPC plans its route this far ahead at a time, searching at most this many cells.
 const ROUTE_LEG: f32 = 250.0;
 const ROUTE_EXPAND: usize = 60000;
@@ -67,7 +88,22 @@ pub struct Npc {
     pub info: PlayerInfo,
     pub pos: PosUpdate,
     pub lod: Lod,
-    pub level: u16,
+    /// Skills (0..100) by their name in the game's skill list ('Swords', 'Health', ...). Skills are raised by use, there are no levels.
+    pub skills: BTreeMap<String, f32>,
+    pub hp: f32,
+    pub max_hp: f32,
+    /// Weapon class of `info.weapon` ("" = unarmed: such an NPC does not hunt).
+    pub group: String,
+    /// Seconds left lying dead (0 = alive), until the next blow may be struck.
+    pub down: f32,
+    pub next_attack: f32,
+    /// Mob being fought, the point to walk to for it, how close to get, and seconds without a target (the world sets these each tick).
+    pub target: Option<u16>,
+    pub chase: Option<(f32, f32)>,
+    pub stop: f32,
+    pub no_target: f32,
+    /// The weapon skill the NPC starts with in whatever class it is armed with (`equip_all`).
+    start_melee: f32,
     /// Place the NPC lives in / last arrived at.
     pub home: usize,
     pub at: usize,
@@ -92,10 +128,12 @@ pub struct NpcState {
     pub race: String,
     pub gender: String,
     pub gear: String,
-    pub level: u16,
+    /// The skills as JSON ({"Swords": 12.3, ...}).
+    pub skills: String,
+    pub weapon: String,
     pub home: usize,
     pub at: usize,
-    /// 0 rest, 1 wander, 2 travel; `goal_a` is the time left, `goal_dest` the place travelled to (-1 otherwise).
+    /// 0 rest, 1 wander, 2 travel, 3 hunt; `goal_a` is the time left, `goal_dest` the place travelled to / the hunting ground (-1 otherwise).
     pub goal_kind: u8,
     pub goal_a: f32,
     pub goal_dest: i64,
@@ -131,6 +169,12 @@ pub struct Npcs {
     /// Race that rules the capital nearest to each place.
     race_of: Vec<usize>,
     tick: u32,
+    /// Hunting grounds (mob spawn points: x, z, rank of the toughest mob) and a coarse index of them.
+    pub grounds: Vec<(f32, f32, u8)>,
+    ground_grid: HashMap<(i32, i32), Vec<usize>>,
+    /// Ids that became visible / came back to life in the last `step` (the world announces them).
+    pub promoted: Vec<u16>,
+    pub revived: Vec<u16>,
     /// Walkability of the world: active NPCs path-find on it and stand at its terrain height.
     pub nav: Option<Nav>,
 }
@@ -180,6 +224,22 @@ fn race_code(name: &str) -> Option<usize> {
     RACES.iter().position(|r| *r == code)
 }
 
+impl Npc {
+    pub fn skill(&self, name: &str) -> f32 {
+        self.skills.get(name).copied().unwrap_or(0.0)
+    }
+
+    /// The skill of the weapon class it is armed with.
+    pub fn melee_skill(&self) -> f32 {
+        self.skill(weapon_skill(&self.group))
+    }
+
+    /// The toughest mob rank it dares to hunt.
+    pub fn hunt_cap(&self) -> u8 {
+        hunt_cap(self.melee_skill())
+    }
+}
+
 impl Npcs {
     pub fn empty() -> Self {
         Npcs::default()
@@ -212,7 +272,7 @@ impl Npcs {
             .collect();
         let race_of: Vec<usize> = places.iter().map(|p| capitals.iter().min_by(|a, b| dist((p.x, p.z), a.1).total_cmp(&dist((p.x, p.z), b.1))).map_or(0, |c| c.0)).collect();
         let towns: Vec<usize> = (0..places.len()).filter(|&i| places[i].town).collect();
-        let mut me = Npcs { npcs: Vec::new(), places, links, race_of, tick: 0, nav: None };
+        let mut me = Npcs { npcs: Vec::new(), places, links, race_of, tick: 0, grounds: Vec::new(), ground_grid: HashMap::new(), promoted: Vec::new(), revived: Vec::new(), nav: None };
         if towns.is_empty() {
             return me;
         }
@@ -229,7 +289,17 @@ impl Npcs {
                 info: PlayerInfo { id: NPC_ID_BASE + i as u16, name, race: RACES[race].to_string(), gender: GENDERS[gender].to_string(), gear, weapon: String::new(), drawn: false, npc: true },
                 pos: PosUpdate { x, y: 0.0, z, yaw: frac(&mut rng) * 6.28, speed: 0, flags: FLAG_SNAP | FLAG_NPC },
                 lod: Lod::Far,
-                level: 1 + (xorshift(&mut rng) % 20) as u16,
+                skills: BTreeMap::from([("Health".to_string(), 10.0 + frac(&mut rng) * 50.0)]),
+                hp: 0.0,
+                max_hp: 0.0,
+                group: String::new(),
+                down: 0.0,
+                next_attack: 0.0,
+                target: None,
+                chase: None,
+                stop: 2.0,
+                no_target: 0.0,
+                start_melee: 5.0 + frac(&mut rng) * frac(&mut rng) * 65.0,
                 home,
                 at: home,
                 goal: Goal::Rest { left: frac(&mut rng) * 30.0 },
@@ -240,6 +310,8 @@ impl Npcs {
                 path_goal: None,
                 good: (x, z),
             };
+            npc.max_hp = npc_hp(npc.skill("Health"));
+            npc.hp = npc.max_hp;
             me.think(&mut npc);
             me.npcs.push(npc);
         }
@@ -258,7 +330,10 @@ impl Npcs {
         let wander = 0.25 + frac(&mut n.rng) * 0.2;
         let travel = if links.is_empty() { 0.0 } else { 0.3 + frac(&mut n.rng) * 0.6 };
         let in_town = self.places[n.at].town;
-        n.goal = if rest > wander.max(travel) && in_town {
+        let hunt = if n.group.is_empty() || n.fatigue > 0.6 || n.hp < n.max_hp * 0.5 { None } else { self.hunting_ground(n).map(|g| (g, 0.35 + frac(&mut n.rng) * 0.55)) };
+        n.goal = if let Some((ground, _)) = hunt.filter(|h| h.1 >= wander.max(travel) && h.1 > rest) {
+            Goal::Hunt { ground, left: 60.0 + frac(&mut n.rng) * 120.0, fighting: false }
+        } else if rest > wander.max(travel) && in_town {
             Goal::Rest { left: 15.0 + n.fatigue * 90.0 * (0.5 + frac(&mut n.rng)) }
         } else if travel >= wander {
             // a dungeon is a place to look at, not to live in: towns are the more likely stop
@@ -268,6 +343,133 @@ impl Npcs {
         } else {
             Goal::Wander { left: 10.0 + frac(&mut n.rng) * 30.0, to: None }
         };
+    }
+
+    /// A random hunting ground near the place `n` is at that is not too tough for it.
+    fn hunting_ground(&self, n: &mut Npc) -> Option<usize> {
+        let p = &self.places[n.at];
+        let (cx, cz) = ((p.x / GROUND_CELL).floor() as i32, (p.z / GROUND_CELL).floor() as i32);
+        let cap = n.hunt_cap();
+        let mut pool: Vec<usize> = Vec::new();
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                for &g in self.ground_grid.get(&(cx + dx, cz + dz)).into_iter().flatten() {
+                    let gr = self.grounds[g];
+                    if gr.2 <= cap && dist((p.x, p.z), (gr.0, gr.1)) <= HUNT_RADIUS {
+                        pool.push(g);
+                    }
+                }
+            }
+        }
+        (!pool.is_empty()).then(|| pool[xorshift(&mut n.rng) as usize % pool.len()])
+    }
+
+    /// Give the NPCs somewhere to hunt (`mobs.grounds()`), and think again: a fresh population picks its first goals knowing about them.
+    pub fn set_grounds(&mut self, grounds: Vec<(f32, f32, u8)>) {
+        self.ground_grid.clear();
+        for (i, g) in grounds.iter().enumerate() {
+            self.ground_grid.entry(((g.0 / GROUND_CELL).floor() as i32, (g.1 / GROUND_CELL).floor() as i32)).or_default().push(i);
+        }
+        self.grounds = grounds;
+        let mut npcs = std::mem::take(&mut self.npcs);
+        for n in npcs.iter_mut() {
+            self.think(n);
+        }
+        self.npcs = npcs;
+    }
+
+    /// Arm every NPC with a melee weapon from the table that suits its level (a rank-10 weapon at level 1, a rank-80 one at level 20).
+    pub fn equip_all(&mut self, weapons: &Weapons) {
+        let mut ids: Vec<(&String, &crate::combat::WeaponDef)> = weapons.defs.iter().filter(|(_, d)| d.rank.is_some() && d.group.as_deref().map_or(false, |g| is_melee(g) && g != "shield")).collect();
+        ids.sort_by(|a, b| a.0.cmp(b.0));
+        if ids.is_empty() {
+            return;
+        }
+        for n in self.npcs.iter_mut() {
+            let max_rank = 10.0 + n.start_melee * 0.7;
+            let fit: Vec<_> = ids.iter().filter(|(_, d)| d.rank.unwrap_or(99.0) <= max_rank).collect();
+            let pool: Vec<_> = if fit.is_empty() { ids.iter().collect() } else { fit };
+            let (id, def) = pool[xorshift(&mut n.rng) as usize % pool.len()];
+            n.info.weapon = (*id).clone();
+            n.group = def.group.clone().unwrap_or_default();
+            let start = n.start_melee;
+            n.skills.entry(weapon_skill(&n.group).to_string()).or_insert(start);
+        }
+    }
+
+    /// Raise a skill of `n` by `amount` (capped at 100); Health also raises the hit points.
+    fn train(&self, n: &mut Npc, skill: &str, amount: f32) {
+        let v = n.skills.entry(skill.to_string()).or_insert(0.0);
+        *v = (*v + amount).min(100.0);
+        if skill == "Health" {
+            let max = npc_hp(*v);
+            n.hp += max - n.max_hp;
+            n.max_hp = max;
+        }
+    }
+
+    /// An NPC landed a blow on a mob of this rank: its weapon skill trains.
+    pub fn train_hit(&mut self, id: u16, rank: u8) {
+        let Some(i) = id.checked_sub(NPC_ID_BASE) else { return };
+        let mut npcs = std::mem::take(&mut self.npcs);
+        if let Some(n) = npcs.get_mut(i as usize) {
+            let skill = weapon_skill(&n.group);
+            let gain = skill_gain(n.skill(skill), rank, 0.12);
+            self.train(n, skill, gain);
+        }
+        self.npcs = npcs;
+    }
+
+    /// An NPC took a blow: its Health trains (a little less the tougher it already is).
+    pub fn train_hurt(&mut self, id: u16) {
+        let Some(i) = id.checked_sub(NPC_ID_BASE) else { return };
+        let mut npcs = std::mem::take(&mut self.npcs);
+        if let Some(n) = npcs.get_mut(i as usize) {
+            let gain = skill_gain(n.skill("Health"), 2, 0.06);
+            self.train(n, "Health", gain);
+        }
+        self.npcs = npcs;
+    }
+
+    /// Multiplier on the damage of an NPC's blows from its weapon skill.
+    pub fn damage_factor(&self, id: u16) -> f32 {
+        self.by_id(id).map_or(1.0, |n| skill_damage(n.melee_skill()))
+    }
+
+    /// Stop hunting (hurt, or nothing left to fight): choose something else to do.
+    pub fn end_hunt(&mut self, idx: usize) {
+        let mut npcs = std::mem::take(&mut self.npcs);
+        if let Some(n) = npcs.get_mut(idx) {
+            self.finish_hunt(n);
+        }
+        self.npcs = npcs;
+    }
+
+    fn finish_hunt(&self, n: &mut Npc) {
+        n.chase = None;
+        n.target = None;
+        n.no_target = 0.0;
+        n.pos.speed = 0;
+        n.fatigue = (n.fatigue + 0.15).min(1.0);
+        self.think(n);
+    }
+
+    /// Back to life at the home place.
+    fn revive(&self, n: &mut Npc) {
+        n.down = 0.0;
+        n.hp = n.max_hp;
+        n.target = None;
+        n.chase = None;
+        n.path.clear();
+        n.path_goal = None;
+        n.at = n.home;
+        let p = &self.places[n.home];
+        n.pos.x = p.x;
+        n.pos.z = p.z;
+        n.pos.speed = 0;
+        n.good = (p.x, p.z);
+        n.goal = Goal::Rest { left: 5.0 };
+        n.lod = Lod::Far;
     }
 
     /// Walk `n` towards `target` for up to `dt` seconds at `speed`. An active NPC follows a route over the nav grid (planned a leg of `ROUTE_LEG`
@@ -295,7 +497,7 @@ impl Npcs {
         let d = dist((n.pos.x, n.pos.z), point);
         let can = speed * dt;
         if d > 1e-4 {
-            n.pos.yaw = (point.0 - n.pos.x).atan2(point.1 - n.pos.z);
+            n.pos.yaw = (n.pos.x - point.0).atan2(n.pos.z - point.1); // the players' convention: forward = (-sin yaw, -cos yaw)
         }
         if d <= can {
             n.pos.x = point.0;
@@ -335,10 +537,60 @@ impl Npcs {
 
     /// Move `n` along its goal by `dt` seconds (any amount: legs finish and new goals start inside the loop).
     fn advance(&self, n: &mut Npc, mut dt: f32, active: bool) {
+        if n.hp < n.max_hp && !matches!(n.goal, Goal::Hunt { fighting: true, .. }) {
+            n.hp = (n.hp + n.max_hp * 0.02 * dt).min(n.max_hp);
+        }
         let mut guard = 0;
         while dt > 1e-4 && guard < 64 {
             guard += 1;
             match n.goal {
+                Goal::Hunt { ground, left, fighting } => {
+                    let (gx, gz, rank) = self.grounds.get(ground).copied().unwrap_or((n.pos.x, n.pos.z, 0));
+                    if !fighting {
+                        let target = self.standable((gx, gz), active);
+                        let before = (n.pos.x, n.pos.z);
+                        let Some((used, arrived)) = self.walk(n, target, TRAVEL_SPEED, dt, active) else {
+                            self.give_up(n);
+                            continue;
+                        };
+                        n.fatigue = (n.fatigue + dist(before, (n.pos.x, n.pos.z)) / 9000.0).min(1.0);
+                        dt -= used;
+                        if arrived {
+                            n.no_target = 0.0;
+                            n.goal = Goal::Hunt { ground, left, fighting: true };
+                        }
+                    } else {
+                        let used = dt.min(left);
+                        if active {
+                            // the world picks the mob (`chase`); here the NPC walks up to it
+                            match n.chase {
+                                Some(c) if dist((n.pos.x, n.pos.z), c) > n.stop => {
+                                    let _ = self.walk(n, c, TRAVEL_SPEED, used, false);
+                                }
+                                Some(c) => {
+                                    n.pos.speed = 0;
+                                    n.pos.yaw = (n.pos.x - c.0).atan2(n.pos.z - c.1);
+                                }
+                                None => n.pos.speed = 0,
+                            }
+                        } else {
+                            n.pos.speed = 0;
+                            // fighting at a distance from everybody: about one landed blow every two seconds, and a blow taken every ten
+                            let (skill, hit) = (weapon_skill(&n.group), 0.5 * used);
+                            let g = skill_gain(n.skill(skill), rank, 0.12) * hit;
+                            self.train(n, skill, g);
+                            let g = skill_gain(n.skill("Health"), rank, 0.06) * 0.1 * used;
+                            self.train(n, "Health", g);
+                            n.fatigue = (n.fatigue + used / 400.0).min(1.0);
+                        }
+                        dt -= used;
+                        if left - used <= 1e-3 {
+                            self.finish_hunt(n);
+                        } else {
+                            n.goal = Goal::Hunt { ground, left: left - used, fighting: true };
+                        }
+                    }
+                }
                 Goal::Rest { left } => {
                     let used = left.min(dt);
                     n.fatigue = (n.fatigue - used / 120.0).max(0.0);
@@ -440,6 +692,8 @@ impl Npcs {
     /// `radius` is the players' interest radius (Active). Returns how many NPCs are at each level.
     pub fn step(&mut self, dt: f32, players: &[(f32, f32)], radius: f32) -> LodCounts {
         self.tick = self.tick.wrapping_add(1);
+        self.promoted.clear();
+        self.revived.clear();
         let cell = NEAR_RADIUS;
         let mut grid: HashMap<(i32, i32), Vec<(f32, f32)>> = HashMap::new();
         for &(x, z) in players {
@@ -448,6 +702,16 @@ impl Npcs {
         let mut counts = LodCounts::default();
         let mut npcs = std::mem::take(&mut self.npcs);
         for (i, n) in npcs.iter_mut().enumerate() {
+            if n.down > 0.0 {
+                // lying dead (killed while somebody watched): nothing else happens until it is back at home
+                n.down -= dt;
+                if n.down <= 0.0 {
+                    self.revive(n);
+                    self.revived.push(n.id);
+                }
+                counts.active += 1;
+                continue;
+            }
             // a far NPC re-checks its distance only now and then; one that is already close checks every tick
             if n.lod == Lod::Far && (i as u32 + self.tick) % 15 != 0 {
                 n.acc += dt;
@@ -484,6 +748,9 @@ impl Npcs {
                         lod = Lod::Near;
                     }
                 }
+            }
+            if lod == Lod::Active && n.lod != Lod::Active {
+                self.promoted.push(n.id);
             }
             n.lod = lod;
             let every = match lod {
@@ -522,8 +789,9 @@ impl Npcs {
                     Goal::Rest { left } => (0, left, -1),
                     Goal::Wander { left, .. } => (1, left, -1),
                     Goal::Travel { dest } => (2, 0.0, dest as i64),
+                    Goal::Hunt { ground, left, .. } => (3, left, ground as i64),
                 };
-                NpcState { idx: (n.id - NPC_ID_BASE) as u32, name: n.info.name.clone(), race: n.info.race.clone(), gender: n.info.gender.clone(), gear: n.info.gear.clone(), level: n.level, home: n.home, at: n.at, goal_kind: kind, goal_a: a, goal_dest: dest, fatigue: n.fatigue, x: n.pos.x, z: n.pos.z, yaw: n.pos.yaw, rng: n.rng }
+                NpcState { idx: (n.id - NPC_ID_BASE) as u32, name: n.info.name.clone(), race: n.info.race.clone(), gender: n.info.gender.clone(), gear: n.info.gear.clone(), skills: serde_json::to_string(&n.skills).unwrap_or_default(), weapon: n.info.weapon.clone(), home: n.home, at: n.at, goal_kind: kind, goal_a: a, goal_dest: dest, fatigue: n.fatigue, x: n.pos.x, z: n.pos.z, yaw: n.pos.yaw, rng: n.rng }
             })
             .collect()
     }
@@ -538,6 +806,7 @@ impl Npcs {
                 0 => Goal::Rest { left: st.goal_a },
                 1 => Goal::Wander { left: st.goal_a, to: None },
                 2 if st.goal_dest >= 0 && (st.goal_dest as usize) < places => Goal::Travel { dest: st.goal_dest as usize },
+                3 if st.goal_dest >= 0 && (st.goal_dest as usize) < self.grounds.len() => Goal::Hunt { ground: st.goal_dest as usize, left: st.goal_a, fighting: false },
                 _ => continue,
             };
             if st.home >= places || st.at >= places || !st.x.is_finite() || !st.z.is_finite() {
@@ -547,7 +816,14 @@ impl Npcs {
             n.info.race = st.race.clone();
             n.info.gender = st.gender.clone();
             n.info.gear = st.gear.clone();
-            n.level = st.level;
+            if let Ok(skills) = serde_json::from_str::<BTreeMap<String, f32>>(&st.skills) {
+                n.skills = skills;
+            }
+            n.max_hp = npc_hp(n.skill("Health"));
+            n.hp = n.max_hp;
+            if !st.weapon.is_empty() {
+                n.info.weapon = st.weapon.clone();
+            }
             n.home = st.home;
             n.at = st.at;
             n.goal = goal;

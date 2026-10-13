@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use crate::combat::{mob_damage, mob_hp, WORLD_SCALE};
+use crate::combat::{difficulty_rank, mob_damage, mob_hp, WORLD_SCALE};
 use crate::proto::{MobType, PosUpdate, FLAG_DEAD, FLAG_FIGHT, FLAG_SNAP};
 
 /// Mobs wander at most this far (metres) from their spawn point.
@@ -48,6 +48,8 @@ pub struct Mob {
     pub hp: f32,
     pub max_hp: f32,
     pub alive: bool,
+    /// `combat::difficulty_rank` of the spawn's difficulty.
+    pub rank: u8,
     dmg: f32,
     aggressive: bool,
     /// Player being fought, and seconds until the next blow / until the respawn.
@@ -220,6 +222,7 @@ impl Mobs {
                         hp: mob_hp(&m.difficulty),
                         max_hp: mob_hp(&m.difficulty),
                         alive: true,
+                        rank: difficulty_rank(&m.difficulty),
                         dmg: mob_damage(&m.difficulty),
                         aggressive: m.difficulty != "Very Easy",
                         aggro: None,
@@ -276,6 +279,18 @@ impl Mobs {
             return Some((0.0, true));
         }
         Some((m.hp, false))
+    }
+
+    /// One hunting ground per spawn point: (x, z, rank of its toughest mob).
+    pub fn grounds(&self) -> Vec<(f32, f32, u8)> {
+        let mut by_home: HashMap<(i32, i32), (f32, f32, u8)> = HashMap::new();
+        for m in &self.mobs {
+            let e = by_home.entry((m.home.0.round() as i32, m.home.1.round() as i32)).or_insert((m.home.0, m.home.1, 0));
+            e.2 = e.2.max(m.rank);
+        }
+        let mut v: Vec<_> = by_home.into_values().collect();
+        v.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        v
     }
 
     /// Indices of mobs that may be within the interest radius of (x, z); the caller does the exact distance test.

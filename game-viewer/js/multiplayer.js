@@ -168,7 +168,7 @@ export class Multiplayer {
       return true;
     }
     if (m.t === 'respawn') {
-      if (m.id === this.me) { W.respawned(); W.setHp(m.hp, m.max); this.onRespawn?.(); } else { const q = this.players.get(m.id); if (q?.av?.anim) q.av.anim.dead = false; }
+      if (m.id === this.me) { W.respawned(); W.setHp(m.hp, m.max); this.onRespawn?.(); } else { const q = this.players.get(m.id); if (q) q.dead = false; if (q?.av?.anim) q.av.anim.dead = false; }
       return true;
     }
     return false;

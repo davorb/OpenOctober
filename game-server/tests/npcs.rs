@@ -153,3 +153,76 @@ async fn npcs_show_up_in_snapshots_of_nearby_players_only() {
         }
     }
 }
+
+#[test]
+fn npcs_face_the_way_they_walk() {
+    // the players' convention: a body with yaw y looks along (-sin y, -cos y)
+    let mut w = Npcs::build(places(), &[(0, (0.0, 0.0))], 40, 21);
+    let mut checked = 0;
+    for _ in 0..(15 * 60) {
+        let before: Vec<(f32, f32)> = w.npcs.iter().map(|n| (n.pos.x, n.pos.z)).collect();
+        w.step(1.0 / 15.0, &[(0.0, 0.0)], 900.0); // everybody near the first town is active, so they are stepped every tick
+        for (n, b) in w.npcs.iter().zip(&before) {
+            let (dx, dz) = (n.pos.x - b.0, n.pos.z - b.1);
+            let d = dx.hypot(dz);
+            if n.lod == Lod::Active && n.pos.speed > 0 && d > 0.02 {
+                let (fx, fz) = (-n.pos.yaw.sin(), -n.pos.yaw.cos());
+                assert!((dx * fx + dz * fz) / d > 0.95, "{} walks ({dx:.3},{dz:.3}) but faces ({fx:.2},{fz:.2})", n.info.name);
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 50, "enough walking to check: {checked}");
+}
+
+#[test]
+fn far_hunting_trains_skills_and_skill_decides_what_to_hunt() {
+    let mut w = Npcs::build(places(), &[(0, (0.0, 0.0))], 20, 5);
+    for n in w.npcs.iter_mut() {
+        n.group = "sword".into();
+        n.skills.insert("Swords".into(), 2.0);
+    }
+    w.set_grounds(vec![(1000.0, 300.0, 0), (5000.0, -300.0, 0), (9000.0, 200.0, 1)]);
+    let total = |w: &Npcs, s: &str| w.npcs.iter().map(|n| n.skill(s)).sum::<f32>();
+    let (sw, hp) = (total(&w, "Swords"), total(&w, "Health"));
+    let mut hunted = false;
+    for _ in 0..(12 * 60) {
+        w.step(5.0, &[(-50_000.0, 0.0)], 900.0);
+        hunted |= w.npcs.iter().any(|n| matches!(n.goal, Goal::Hunt { .. }));
+        // a rank-1 ground is too tough for a swordsman below 20
+        for n in &w.npcs {
+            if let Goal::Hunt { ground, .. } = n.goal {
+                assert!(w.grounds[ground].2 <= n.hunt_cap(), "{} (Swords {:.1}) hunts rank {}", n.info.name, n.melee_skill(), w.grounds[ground].2);
+            }
+        }
+    }
+    assert!(hunted, "somebody went hunting");
+    assert!(total(&w, "Swords") > sw + 20.0, "swords trained by use: {sw} -> {}", total(&w, "Swords"));
+    assert!(total(&w, "Health") > hp, "health trained by being hurt");
+    for n in &w.npcs {
+        assert!(n.skills.values().all(|v| (0.0..=100.0).contains(v)));
+        assert!(n.max_hp >= 80.0 && n.hp <= n.max_hp + 0.01);
+    }
+}
+
+#[test]
+fn skill_gain_dries_up_past_the_mob() {
+    use game_server::npcs::skill_gain;
+    assert!(skill_gain(5.0, 0, 0.12) > 0.1);
+    assert!(skill_gain(5.0, 3, 0.12) > skill_gain(5.0, 0, 0.12) * 0.9, "a harder mob teaches at least as much");
+    assert!(skill_gain(60.0, 0, 0.12) == 0.0, "nothing to learn from a rat at 60");
+    assert!(skill_gain(95.0, 4, 0.12) < skill_gain(30.0, 4, 0.12), "training slows towards 100");
+    assert_eq!(hunt_cap(10.0), 0);
+    assert_eq!(hunt_cap(45.0), 2);
+    assert_eq!(hunt_cap(100.0), 4);
+}
+
+#[test]
+fn unarmed_npcs_do_not_hunt() {
+    let mut w = Npcs::build(places(), &[(0, (0.0, 0.0))], 20, 5);
+    w.set_grounds(vec![(1000.0, 300.0, 0)]);
+    for _ in 0..(12 * 30) {
+        w.step(5.0, &[(-50_000.0, 0.0)], 900.0);
+        assert!(w.npcs.iter().all(|n| !matches!(n.goal, Goal::Hunt { .. })));
+    }
+}

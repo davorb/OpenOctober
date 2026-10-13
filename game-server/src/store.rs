@@ -1,4 +1,4 @@
-//! SQLite persistence of the living NPCs: identity, level, home, needs, goal and last position. The whole population is written in one
+//! SQLite persistence of the living NPCs: identity, skills, home, needs, goal and last position. The whole population is written in one
 //! transaction every few seconds and on shutdown; the place count is stored as a guard, so a save made against a different place list is ignored.
 use rusqlite::{params, Connection};
 
@@ -11,14 +11,21 @@ pub struct Store {
 impl Store {
     pub fn open(path: &str) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
+        // an older save has a `level` column instead of `skills`: those NPCs are regenerated, their levels mean nothing in a skill-based world
+        let old: bool = conn.prepare("SELECT 1 FROM pragma_table_info('npcs') WHERE name = 'level'")?.exists([])?;
+        if old {
+            conn.execute_batch("DROP TABLE npcs; DELETE FROM meta;")?;
+        }
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS npcs (
                 idx INTEGER PRIMARY KEY, name TEXT NOT NULL, race TEXT NOT NULL, gender TEXT NOT NULL, gear TEXT NOT NULL,
-                level INTEGER NOT NULL, home INTEGER NOT NULL, at_place INTEGER NOT NULL,
+                skills TEXT NOT NULL DEFAULT '{}', home INTEGER NOT NULL, at_place INTEGER NOT NULL,
                 goal_kind INTEGER NOT NULL, goal_a REAL NOT NULL, goal_dest INTEGER NOT NULL,
                 fatigue REAL NOT NULL, x REAL NOT NULL, z REAL NOT NULL, yaw REAL NOT NULL, rng INTEGER NOT NULL);",
         )?;
+        // saves from before NPCs carried weapons: add the column (it already exists in newer files, which is the error we ignore)
+        let _ = conn.execute("ALTER TABLE npcs ADD COLUMN weapon TEXT NOT NULL DEFAULT ''", []);
         Ok(Store { conn })
     }
 
@@ -28,7 +35,7 @@ impl Store {
         if saved != Some(places as i64) {
             return Ok(Vec::new());
         }
-        let mut q = self.conn.prepare("SELECT idx, name, race, gender, gear, level, home, at_place, goal_kind, goal_a, goal_dest, fatigue, x, z, yaw, rng FROM npcs ORDER BY idx")?;
+        let mut q = self.conn.prepare("SELECT idx, name, race, gender, gear, skills, home, at_place, goal_kind, goal_a, goal_dest, fatigue, x, z, yaw, rng, weapon FROM npcs ORDER BY idx")?;
         let rows = q.query_map([], |r| {
             Ok(NpcState {
                 idx: r.get(0)?,
@@ -36,7 +43,7 @@ impl Store {
                 race: r.get(2)?,
                 gender: r.get(3)?,
                 gear: r.get(4)?,
-                level: r.get(5)?,
+                skills: r.get(5)?,
                 home: r.get::<_, i64>(6)? as usize,
                 at: r.get::<_, i64>(7)? as usize,
                 goal_kind: r.get(8)?,
@@ -47,6 +54,7 @@ impl Store {
                 z: r.get(13)?,
                 yaw: r.get(14)?,
                 rng: r.get(15)?,
+                weapon: r.get(16)?,
             })
         })?;
         rows.collect()
@@ -57,9 +65,9 @@ impl Store {
         tx.execute("INSERT OR REPLACE INTO meta (k, v) VALUES ('places', ?1)", params![places as i64])?;
         tx.execute("DELETE FROM npcs", [])?;
         {
-            let mut ins = tx.prepare("INSERT INTO npcs VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)")?;
+            let mut ins = tx.prepare("INSERT INTO npcs (idx, name, race, gender, gear, skills, home, at_place, goal_kind, goal_a, goal_dest, fatigue, x, z, yaw, rng, weapon) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)")?;
             for s in states {
-                ins.execute(params![s.idx, s.name, s.race, s.gender, s.gear, s.level, s.home as i64, s.at as i64, s.goal_kind, s.goal_a, s.goal_dest, s.fatigue, s.x, s.z, s.yaw, s.rng])?;
+                ins.execute(params![s.idx, s.name, s.race, s.gender, s.gear, s.skills, s.home as i64, s.at as i64, s.goal_kind, s.goal_a, s.goal_dest, s.fatigue, s.x, s.z, s.yaw, s.rng, s.weapon])?;
             }
         }
         tx.commit()

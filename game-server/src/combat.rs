@@ -131,6 +131,50 @@ pub fn mob_hp(difficulty: &str) -> f32 {
     }
 }
 
+/// 0 (Very Easy) .. 6 (Boss): how dangerous a mob is, for NPCs choosing what to hunt.
+pub fn difficulty_rank(difficulty: &str) -> u8 {
+    match difficulty {
+        "Very Easy" => 0,
+        "Easy" => 1,
+        "Medium" => 2,
+        "Hard" => 3,
+        "Very Hard" => 4,
+        "Champion" => 5,
+        "Boss" => 6,
+        _ => 2,
+    }
+}
+
+/// The game's skill (from its skill list) that a weapon class trains and is limited by.
+pub fn weapon_skill(group: &str) -> &'static str {
+    match group {
+        "axe" => "Axes",
+        "club" => "Clubs and Maces",
+        "greatsword" => "Greatswords",
+        "greataxe" => "Greataxes",
+        "greatclub" => "Greatclubs",
+        "knife" => "Knives",
+        "polearm" => "Polearms",
+        "bow" => "Archery",
+        _ => "Swords",
+    }
+}
+
+/// INVENTED: an NPC's hit points from its Health skill (0..100); a player has `PLAYER_HP`.
+pub fn npc_hp(health: f32) -> f32 {
+    80.0 + 1.2 * health
+}
+
+/// INVENTED: how a weapon skill (0..100) scales the damage of a blow (0.6x unskilled, 1.4x grandmaster).
+pub fn skill_damage(skill: f32) -> f32 {
+    0.6 + 0.008 * skill.clamp(0.0, 100.0)
+}
+
+/// INVENTED: the weapon skill a mob of this rank is a fair fight for. Training from it dries up once the skill is well past it.
+pub fn mob_skill(rank: u8) -> f32 {
+    [10.0, 25.0, 45.0, 65.0, 85.0, 100.0, 100.0][rank.min(6) as usize]
+}
+
 /// INVENTED damage of one mob blow.
 pub fn mob_damage(difficulty: &str) -> f32 {
     match difficulty {

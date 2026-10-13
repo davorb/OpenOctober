@@ -28,7 +28,7 @@ fn saved_npcs_come_back_as_they_were() {
     let rows = Store::open(&path).unwrap().load(b.places.len()).unwrap();
     assert_eq!(b.restore(&rows), 25);
     for (x, y) in a.npcs.iter().zip(&b.npcs) {
-        assert_eq!((x.id, &x.info.name, &x.info.race, &x.info.gear, x.level, x.home, x.at), (y.id, &y.info.name, &y.info.race, &y.info.gear, y.level, y.home, y.at));
+        assert_eq!((x.id, &x.info.name, &x.info.race, &x.info.gear, &x.skills, x.home, x.at), (y.id, &y.info.name, &y.info.race, &y.info.gear, &y.skills, y.home, y.at));
         assert_eq!((x.pos.x, x.pos.z, x.fatigue), (y.pos.x, y.pos.z, y.fatigue));
     }
     // the second save is identical apart from the movement flag we reset on restore
