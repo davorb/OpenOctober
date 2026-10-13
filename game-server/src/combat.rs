@@ -92,9 +92,19 @@ impl Weapons {
         self.defs.iter().filter(|(_, d)| d.group.as_deref() == Some(group) && d.obtainable()).min_by(|a, b| a.1.rank.unwrap().total_cmp(&b.1.rank.unwrap()).then(a.0.cmp(b.0))).map(|(k, _)| k.as_str())
     }
 
-    /// The worst melee weapon of the game (lowest rank, then by name): what a character starts with, and gets again every time he gets up.
+    /// Every melee weapon that ties for the worst the game has (lowest positive rank, not a monster's natural attack), by name: what a character
+    /// starts with, and gets again every time he gets up, one of them drawn at random.
+    pub fn worst_melee_set(&self) -> Vec<&str> {
+        let melee = |d: &&WeaponDef| d.obtainable() && d.group.as_deref().map_or(false, |g| is_melee(g) && g != "shield");
+        let Some(worst) = self.defs.values().filter(melee).map(|d| d.rank.unwrap()).min_by(|a, b| a.total_cmp(b)) else { return Vec::new() };
+        let mut set: Vec<&str> = self.defs.iter().filter(|(_, d)| melee(d) && d.rank == Some(worst)).map(|(k, _)| k.as_str()).collect();
+        set.sort_unstable();
+        set
+    }
+
+    /// The first of `worst_melee_set` by name (a stable stand-in where nothing is drawn at random).
     pub fn worst_melee(&self) -> Option<&str> {
-        self.defs.iter().filter(|(_, d)| d.obtainable() && d.group.as_deref().map_or(false, |g| is_melee(g) && g != "shield")).min_by(|a, b| a.1.rank.unwrap().total_cmp(&b.1.rank.unwrap()).then(a.0.cmp(b.0))).map(|(k, _)| k.as_str())
+        self.worst_melee_set().first().copied()
     }
 
     /// Length (seconds) of a clip; `or` if the data doesn't have it.

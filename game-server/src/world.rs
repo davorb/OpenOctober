@@ -184,6 +184,8 @@ struct World {
     shots: Vec<Projectile>,
     corpses: Vec<Corpse>,
     next_corpse: u32,
+    /// For the random starting weapon (seeded from the clock: every run draws differently).
+    rng: u32,
 }
 
 pub async fn run(cfg: Config, mut rx: mpsc::Receiver<Cmd>) {
@@ -247,7 +249,7 @@ pub async fn run(cfg: Config, mut rx: mpsc::Receiver<Cmd>) {
         },
         _ => None,
     };
-    let mut world = World { players: (0..cfg.max_players.min(NPC_ID_BASE as usize)).map(|_| None).collect(), cfg: cfg.clone(), online: 0, cursor: 0, tick: 0, mobs, npcs, store, stats: Stats::default(), weapons, pending: Vec::new(), shots: Vec::new(), corpses: Vec::new(), next_corpse: 1 };
+    let mut world = World { players: (0..cfg.max_players.min(NPC_ID_BASE as usize)).map(|_| None).collect(), cfg: cfg.clone(), online: 0, cursor: 0, tick: 0, mobs, npcs, store, stats: Stats::default(), weapons, pending: Vec::new(), shots: Vec::new(), corpses: Vec::new(), next_corpse: 1, rng: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.subsec_nanos() ^ (d.as_secs() as u32)) | 1 };
     let mut ticker = interval(Duration::from_secs_f64(1.0 / cfg.tick_hz as f64));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut report = interval(Duration::from_secs(5));
@@ -434,7 +436,15 @@ impl World {
         if !self.owns_weapons() {
             return;
         }
-        let Some(worst) = self.weapons.worst_melee().map(str::to_string) else { return };
+        // one of the weapons that tie for the worst, at random: a new start, or a getting up, is a new draw
+        let set: Vec<String> = self.weapons.worst_melee_set().into_iter().map(str::to_string).collect();
+        if set.is_empty() {
+            return;
+        }
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 17;
+        self.rng ^= self.rng << 5;
+        let worst = set[self.rng as usize % set.len()].clone();
         let Some(group) = self.weapons.get(&worst).and_then(|d| d.group.clone()) else { return };
         let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
         if !p.weapon.is_empty() {

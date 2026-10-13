@@ -278,3 +278,36 @@ async fn he_gets_up_again_with_the_worst_weapon_after_losing_everything() {
     assert_eq!(st["gold"], 0.0);
     assert!(st["items"].as_object().unwrap().is_empty(), "{st}");
 }
+
+#[tokio::test]
+async fn the_starting_weapon_is_a_random_one_of_the_worst() {
+    use game_server::combat::Weapons;
+    // the real worst set: all at the lowest rank, melee, obtainable
+    let real = Weapons::load(concat!(env!("CARGO_MANIFEST_DIR"), "/../game-viewer/data/weapons.json")).unwrap();
+    let set = real.worst_melee_set();
+    assert!(set.len() > 5, "many weapons tie for worst: {}", set.len());
+    let worst_rank = real.get(set[0]).unwrap().rank.unwrap();
+    assert!(set.iter().all(|k| real.get(k).unwrap().rank == Some(worst_rank) && real.get(k).unwrap().obtainable()));
+    assert!(set.windows(2).all(|w| w[0] < w[1]), "sorted by name");
+
+    // a fixture with three weapons tied for worst and one better: every spawn takes one of the three, and over many spawns all three come up
+    let dir = std::env::temp_dir();
+    let f = |n: &str| dir.join(format!("df_ptrade_rand_{n}.json"));
+    std::fs::write(f("pois"), r#"[{"name":"Town","type":"Village","x":100,"z":200}]"#).unwrap();
+    std::fs::write(f("caps"), r#"[{"name":"Capital","race":"Human","x":100,"y":0,"z":200}]"#).unwrap();
+    std::fs::write(f("weapons"), r#"{"weapons":{"r_A":{"group":"sword","kind":"melee","rank":10},"r_B":{"group":"axe","kind":"melee","rank":10},"r_C":{"group":"club","kind":"melee","rank":10},"r_Better":{"group":"sword","kind":"melee","rank":11},"r_Monster":{"group":"sword","kind":"melee","rank":0},"r_Claws":{"group":"sword","kind":"melee","rank":10,"natural":1}},"clipDur":{}}"#).unwrap();
+    let s = |n: &str| Some(f(n).to_string_lossy().to_string());
+    let cfg = Config { radius: 900.0, max_players: 40, tick_hz: 30, spawns: None, weapons: s("weapons"), pvp: false, npcs: 0, pois: s("pois"), capitals: s("caps"), npc_seed: 2, db: None, nav: None, npc_time_scale: 1.0, own_weapons: true, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: None, vendors: None };
+    let (cmds, rx) = mpsc::channel(256);
+    tokio::spawn(world::run(cfg, rx));
+    let mut got = std::collections::BTreeSet::new();
+    for _ in 0..30 {
+        let mut me = join(&cmds, (100.0, -200.0), true).await;
+        me.pump().await;
+        let w = me.all("equip").into_iter().find(|v| v["id"].as_u64() == Some(me.id as u64)).map(|v| v["w"].as_str().unwrap().to_string()).expect("a starting weapon");
+        got.insert(w);
+        cmds.send(Cmd::Leave(me.id)).await.unwrap();
+    }
+    assert!(got.iter().all(|w| ["r_A", "r_B", "r_C"].contains(&w.as_str())), "only the tied worst, never the better one, a monster's weapon or a natural attack: {got:?}");
+    assert_eq!(got.len(), 3, "30 spawns drew all three: {got:?}");
+}
