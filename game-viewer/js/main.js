@@ -283,7 +283,7 @@ const mp = new Multiplayer({ scene, camera, world, $, toast,
   getSelf: () => ({ x: body.x, y: body.y, z: body.z, yaw: camera.rotation.y, swim: mode === 'walk' && player.swim, air: mode === 'fly' || !player.onGround, fly: mode === 'fly' }) });
 window.dbg.mp = mp;
 const sfx = new Sfx(), fx = new CombatFx({ scene, world, sfx, factory: mp.factory, data: await J('/data/combatfx.json') });
-weapons = new Weapons({ camera, post, world, factory: mp.factory, sfx, fx, net: mp.combat, toast, $, light: { sun: sunL, hemi } });
+weapons = new Weapons({ camera, post, world, factory: mp.factory, sfx, fx, net: mp.combat, toast, $, light: { sun: sunL, hemi }, stamina });
 const selfAv = new SelfAvatar({ scene, factory: mp.factory, profile: () => mp.profile }); weapons.self = selfAv;
 await weapons.init(); mp.bindCombat(weapons, fx, sfx); mp.onRespawn = () => { stamina.reset(); pickSpawn(curSpawn); toast('You got up again'); }; weapons.resize(camera.aspect); Object.assign(window.dbg, { weapons, fx, sfx });
 let ready = false, started = false;

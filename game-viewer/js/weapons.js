@@ -2,6 +2,7 @@
 // (js/sfx.js, se_weaponswing_*: the whoosh plays 0.18 s into the swing like the skills' SFOffsetStart) and effects (js/effects.js), and the armory panel.
 //
 //   Left mouse   attack (melee: slash / backhand / chop / stab in a combo; bow: hold to draw, release to shoot; staff: cast; thrown: throw)
+//                a melee swing and a loosed arrow spend stamina (a staff does not); without enough, the swing or the shot does not happen
 //   Right mouse  hold to guard (melee)      R  draw / sheathe      1-9, 0  hotbar (one weapon per type)      I  armory: every weapon in the game data
 //
 // Durations are the lengths of the game's own animation clips (weapons.json `clipDur`).  Combat itself is the server's (game-server/src/combat.rs): this class sends what
@@ -9,6 +10,7 @@
 import * as THREE from 'three';
 import { ViewModel } from './viewmodel.js';
 import { STANCE } from './playeranim.js';
+import { attackStamina } from './stamina.js';
 
 const HOTBAR = ['sword', 'axe', 'club', 'greatsword', 'greataxe', 'greatclub', 'polearm', 'knife', 'bow', 'staff'];
 const COMBO = { sword: ['slash', 'backhand', 'chop'], axe: ['chop', 'slash', 'backhand'], club: ['chop', 'slash', 'backhand'], knife: ['stab', 'slash', 'backhand'], sithra: ['slash', 'backhand', 'stab'],
@@ -30,8 +32,8 @@ export function attackClip(group, kind) {
 export const parryClip = group => `${STANCE[group]?.[1] || 'singlehand'}_parrying`;
 
 export class Weapons {
-  constructor({ camera, post, world, factory, sfx, fx, net, toast, $, profile, light }) {
-    Object.assign(this, { camera, post, world, factory, sfx, fx, net, toast, $, profile, lightSrc: light });
+  constructor({ camera, post, world, factory, sfx, fx, net, toast, $, profile, light, stamina }) {
+    Object.assign(this, { camera, post, world, factory, sfx, fx, net, toast, $, profile, lightSrc: light, stamina });
     this.data = null; this.id = null; this.drawn = false; this.combo = 0; this.vm = new ViewModel(factory); this.vm.onhit = () => this.landed();
     this.post.overlay = this.vm; this.down = { 0: false, 2: false }; this.draw = null; this.hp = { hp: 100, max: 100 }; this.dead = false; this.hotbar = []; this.owned = null; this.canFight = true; this.self = null; this.eye = null;
   }
@@ -86,29 +88,39 @@ export class Weapons {
     if (g === 'bow') return this.startDraw();
     if (g === 'staff') return this.attack('cast', 'magic_fire_01', 0.8);
     if (g === 'thrown') return this.attack('throw', 'attack_throw', 0.8);
-    const list = COMBO[g] || COMBO.sword, kind = list[this.combo++ % list.length], clip = attackClip(g, kind); this.attack(kind, clip, this.dur(clip, 1));
+    const list = COMBO[g] || COMBO.sword, kind = list[this.combo % list.length], clip = attackClip(g, kind);
+    if (this.attack(kind, clip, this.dur(clip, 1))) this.combo++;
   }
+  /** enough stamina for this weapon (a staff or a throw is free). false: the player is told, and the action must not start */
+  canPay(group) {
+    const cost = attackStamina(group);
+    if (!cost || !this.stamina || this.stamina.canAfford(cost)) return true;
+    this.toast('Not enough stamina'); return false;
+  }
+  pay(group) { const cost = attackStamina(group); if (cost) this.stamina?.spend(cost); }
   attack(kind, clip, dur) {
-    const w = this.w, g = w.group; if (!this.vm.swing(kind, dur)) return;
+    const w = this.w, g = w.group; if (!this.canPay(g) || !this.vm.swing(kind, dur)) return false; this.pay(g);
     const grp = this.data.groups[g], at = this.camera.position;
     if (grp?.sounds) setTimeout(() => this.sfx.play(this.sfx.pick(grp.sounds), { vol: 0.9, at: null, rate: 0.95 + Math.random() * 0.1 }), SWING_AT * 1000);
     this.net?.attack({ kind, clip, dur, group: g }); this.self?.play(clip);
     if (g === 'staff') setTimeout(() => this.cast(), dur * 0.45 * 1000);
     if (g === 'thrown') setTimeout(() => this.cast(), dur * 0.45 * 1000);
+    return true;
   }
   /** the blow lands (45% into the swing): the server decides who it hits, the whoosh and the animation are ours */
   landed() {}
 
   // ---- bow: hold to draw, release to shoot
   startDraw() {
-    if (this.draw) return; this.draw = { t: 0 }; this.vm.setHold('draw'); this.net?.bow('load'); this.self?.play('bow_load');
+    if (this.draw || !this.canPay('bow')) return; this.draw = { t: 0 }; this.vm.setHold('draw'); this.net?.bow('load'); this.self?.play('bow_load');
     this.sfx.play(ARCHERY + 'load_arrow.wav', { vol: 0.5 }); this.sfx.play(ARCHERY + 'bow&arrow_pullback.wav', { vol: 0.55 });
   }
   cancelDraw() { this.draw = null; this.vm.setHold(null); }
   releaseBow() {
     const t = this.draw.t, full = Math.min(1, t / this.dur('bow_load', 1.667)); this.draw = null; this.vm.setHold(null);
-    if (full < 0.2) return;   // a tap: let down the string
-    this.vm.swing('shoot', 0.45); this.self?.play('bow_fire'); this.sfx.play(ARCHERY + 'bow&arrow_shot.wav', { vol: 0.8 }); this.sfx.play(ARCHERY + 'fire_bow.wav', { vol: 0.4 });
+    if (full < 0.2) return;   // a tap: let down the string, and it costs nothing
+    if (!this.canPay('bow') || !this.vm.swing('shoot', 0.45)) return;   // not enough left, or already swinging: the string comes down without a shot
+    this.pay('bow'); this.self?.play('bow_fire'); this.sfx.play(ARCHERY + 'bow&arrow_shot.wav', { vol: 0.8 }); this.sfx.play(ARCHERY + 'fire_bow.wav', { vol: 0.4 });
     const d = new THREE.Vector3(); this.camera.getWorldDirection(d);
     const from = this.origin().clone().addScaledVector(d, 1.2).add(new THREE.Vector3(0.25, -0.3, 0).applyQuaternion(this.camera.quaternion));
     const m = this.data.missiles.m_Archery_Arrow_01, speed = (m.v0 || 100) * (0.45 + 0.55 * full), range = m.range || 300;
