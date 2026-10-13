@@ -9,33 +9,43 @@ use tokio_tungstenite::tungstenite::Message;
 use game_server::proto::*;
 use game_server::world::{self, Cmd, Config, JoinReq};
 
-const USAGE: &str = "usage: game-server [--port 1338] [--radius 900] [--max-players 256] [--tick-hz 15] [--spawns ../game-viewer/data/mobspawns.json | --spawns none] [--weapons ../game-viewer/data/weapons.json | --weapons none] [--pvp on|off]";
+const USAGE: &str = "usage: game-server [--port 1338] [--radius 900] [--max-players 256] [--tick-hz 15] [--spawns ../game-viewer/data/mobspawns.json | --spawns none] [--weapons ../game-viewer/data/weapons.json | --weapons none] [--pvp on|off] [--npcs 500] [--pois ../game-viewer/data/pois.json] [--capitals ../game-viewer/data/spawns.json] [--npc-seed 1] [--db npcs.db | --db none]";
 
 #[tokio::main]
 async fn main() {
-    let (mut port, mut cfg) = (1338u16, Config { radius: 900.0, max_players: 256, tick_hz: 15, spawns: Some("../game-viewer/data/mobspawns.json".into()), weapons: Some("../game-viewer/data/weapons.json".into()), pvp: true });
+    let (mut port, mut cfg) = (1338u16, Config { radius: 900.0, max_players: 256, tick_hz: 15, spawns: Some("../game-viewer/data/mobspawns.json".into()), weapons: Some("../game-viewer/data/weapons.json".into()), pvp: true, npcs: 0, pois: Some("../game-viewer/data/pois.json".into()), capitals: Some("../game-viewer/data/spawns.json".into()), npc_seed: 1, db: Some("npcs.db".into()) });
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let v = args.next().unwrap_or_default();
         match a.as_str() {
             "--port" => port = v.parse().expect(USAGE),
             "--radius" => cfg.radius = v.parse().expect(USAGE),
-            "--max-players" => cfg.max_players = v.parse::<usize>().expect(USAGE).clamp(1, 60000),
+            "--max-players" => cfg.max_players = v.parse::<usize>().expect(USAGE).clamp(1, 49151),
             "--tick-hz" => cfg.tick_hz = v.parse::<u32>().expect(USAGE).clamp(1, 120),
             "--spawns" => cfg.spawns = (v != "none").then_some(v),
             "--weapons" => cfg.weapons = (v != "none").then_some(v),
             "--pvp" => cfg.pvp = v != "off",
+            "--npcs" => cfg.npcs = v.parse().expect(USAGE),
+            "--pois" => cfg.pois = (v != "none").then_some(v),
+            "--capitals" => cfg.capitals = (v != "none").then_some(v),
+            "--npc-seed" => cfg.npc_seed = v.parse().expect(USAGE),
+            "--db" => cfg.db = (v != "none").then_some(v),
             _ => panic!("{USAGE}"),
         }
     }
     let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(8192);
-    tokio::spawn(world::run(cfg.clone(), cmd_rx));
+    let mut world = tokio::spawn(world::run(cfg.clone(), cmd_rx));
     let listener = TcpListener::bind(("0.0.0.0", port)).await.expect("bind");
     println!("Darkfall game-server on ws://0.0.0.0:{port}  (radius {} m, {} Hz, max {} players)", cfg.radius, cfg.tick_hz, cfg.max_players);
     loop {
-        let Ok((stream, _)) = listener.accept().await else { continue };
-        let _ = stream.set_nodelay(true);
-        tokio::spawn(connection(stream, cmd_tx.clone()));
+        tokio::select! {
+            _ = &mut world => break, // the world task ended (Ctrl-C): it has saved the NPCs
+            accepted = listener.accept() => {
+                let Ok((stream, _)) = accepted else { continue };
+                let _ = stream.set_nodelay(true);
+                tokio::spawn(connection(stream, cmd_tx.clone()));
+            }
+        }
     }
 }
 

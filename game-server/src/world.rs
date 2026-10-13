@@ -9,7 +9,9 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::combat::*;
 use crate::mobs::{MobAttack, Mobs};
+use crate::npcs::{LodCounts, Npcs, NPC_ID_BASE};
 use crate::proto::*;
+use crate::store::Store;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -23,7 +25,18 @@ pub struct Config {
     pub weapons: Option<String>,
     /// Players can hurt each other.
     pub pvp: bool,
+    /// Number of living NPCs (0 = none) and the data they live from: `game-viewer/data/pois.json` and `spawns.json` (the racial capitals).
+    pub npcs: usize,
+    pub pois: Option<String>,
+    pub capitals: Option<String>,
+    /// Seed of the NPC population.
+    pub npc_seed: u32,
+    /// SQLite file the NPCs are saved to and restored from; `None` = they start fresh every time.
+    pub db: Option<String>,
 }
+
+/// Seconds between autosaves of the NPC population.
+const SAVE_EVERY: u64 = 30;
 
 /// Mob positions are sent every this many ticks (they walk at ~1 m/s, so clients interpolate).
 const MOB_EVERY: u32 = 3;
@@ -97,6 +110,7 @@ struct Stats {
     bytes_out: u64,
     snapshots_out: u64,
     dropped: u64,
+    lod: LodCounts,
 }
 
 struct World {
@@ -106,6 +120,8 @@ struct World {
     cursor: usize,
     tick: u32,
     mobs: Mobs,
+    npcs: Npcs,
+    store: Option<Store>,
     stats: Stats,
     weapons: Weapons,
     pending: Vec<Pending>,
@@ -131,14 +147,42 @@ pub async fn run(cfg: Config, mut rx: mpsc::Receiver<Cmd>) {
         None => Weapons::default(),
     };
     println!("{} weapons", weapons.defs.len());
-    let mut world = World { players: (0..cfg.max_players).map(|_| None).collect(), cfg: cfg.clone(), online: 0, cursor: 0, tick: 0, mobs, stats: Stats::default(), weapons, pending: Vec::new(), shots: Vec::new(), corpses: Vec::new(), next_corpse: 1 };
+    let npcs = match (cfg.npcs, &cfg.pois, &cfg.capitals) {
+        (n, Some(pois), Some(caps)) if n > 0 => Npcs::load(pois, caps, n, cfg.npc_seed).unwrap_or_else(|e| {
+            eprintln!("no npcs: {e}");
+            Npcs::empty()
+        }),
+        _ => Npcs::empty(),
+    };
+    println!("{} npcs in {} places", npcs.npcs.len(), npcs.places.len());
+    let mut npcs = npcs;
+    let store = match (&cfg.db, npcs.npcs.is_empty()) {
+        (Some(path), false) => match Store::open(path).and_then(|s| s.load(npcs.places.len()).map(|rows| (s, rows))) {
+            Ok((s, rows)) => {
+                println!("{path}: restored {} of {} saved npcs", npcs.restore(&rows), rows.len());
+                Some(s)
+            }
+            Err(e) => {
+                eprintln!("{path}: {e} (npcs will not be saved)");
+                None
+            }
+        },
+        _ => None,
+    };
+    let mut world = World { players: (0..cfg.max_players.min(NPC_ID_BASE as usize)).map(|_| None).collect(), cfg: cfg.clone(), online: 0, cursor: 0, tick: 0, mobs, npcs, store, stats: Stats::default(), weapons, pending: Vec::new(), shots: Vec::new(), corpses: Vec::new(), next_corpse: 1 };
     let mut ticker = interval(Duration::from_secs_f64(1.0 / cfg.tick_hz as f64));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut report = interval(Duration::from_secs(5));
     report.tick().await;
+    let mut autosave = interval(Duration::from_secs(SAVE_EVERY));
+    autosave.tick().await;
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
     loop {
         tokio::select! {
             cmd = rx.recv() => match cmd { Some(c) => world.handle(c), None => break },
+            _ = autosave.tick() => world.save(),
+            _ = &mut ctrl_c => break,
             _ = ticker.tick() => {
                 let t0 = Instant::now();
                 world.step();
@@ -150,6 +194,7 @@ pub async fn run(cfg: Config, mut rx: mpsc::Receiver<Cmd>) {
             _ = report.tick() => world.report(),
         }
     }
+    world.save();
 }
 
 impl World {
@@ -192,13 +237,13 @@ impl World {
         if name.is_empty() {
             name = format!("Player{id}");
         }
-        let info = PlayerInfo { id: id as u16, name, race: req.race, gender: req.gender, gear: clean(&req.gear, MAX_GEAR), weapon: String::new(), drawn: false };
+        let info = PlayerInfo { id: id as u16, name, race: req.race, gender: req.gender, gear: clean(&req.gear, MAX_GEAR), weapon: String::new(), drawn: false, npc: false };
         self.players[id] = Some(Player { info, pos: PosUpdate::default(), has_pos: false, tx: req.tx, last_chat: Instant::now() - Duration::from_secs(10), last_sent: 0, last_mobs: 0, dead: false, weapon: String::new(), group: String::new(), drawn: false, blocking: false, hp: PLAYER_HP, down_until: None, next_attack: Instant::now() });
         self.online += 1;
         let _ = req.reply.send(Ok(id as u16));
 
         let me = self.players[id].as_ref().unwrap();
-        let all: Vec<&PlayerInfo> = self.players.iter().flatten().map(|p| &p.info).collect();
+        let all: Vec<&PlayerInfo> = self.players.iter().flatten().map(|p| &p.info).chain(self.npcs.infos()).collect();
         let welcome = serde_json::to_string(&ServerMsg::Welcome { id: id as u16, radius: self.cfg.radius, tick_hz: self.cfg.tick_hz, players: all }).unwrap();
         if me.tx.try_send(Message::Text(welcome)).is_err() {
             self.players[id].as_mut().unwrap().dead = true;
@@ -536,9 +581,11 @@ impl World {
     fn step(&mut self) {
         self.tick = self.tick.wrapping_add(1);
         self.combat(1.0 / self.cfg.tick_hz as f32);
+        let watchers: Vec<(f32, f32)> = self.players.iter().flatten().filter(|p| p.has_pos).map(|p| (p.pos.x, p.pos.z)).collect();
+        self.stats.lod = self.npcs.step(1.0 / self.cfg.tick_hz as f32, &watchers, self.cfg.radius);
         let cell = self.cfg.radius.max(1.0);
         let r2 = self.cfg.radius * self.cfg.radius;
-        let ents: Vec<(u16, PosUpdate)> = self.players.iter().flatten().filter(|p| p.has_pos).map(|p| (p.info.id, p.pos)).collect();
+        let ents: Vec<(u16, PosUpdate)> = self.players.iter().flatten().filter(|p| p.has_pos).map(|p| (p.info.id, p.pos)).chain(self.npcs.active().map(|n| (n.id, n.pos))).collect();
         let key = |x: f32, z: f32| ((x / cell).floor() as i32, (z / cell).floor() as i32);
         let mut grid: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
         for (i, (_, p)) in ents.iter().enumerate() {
@@ -618,12 +665,20 @@ impl World {
         self.reap();
     }
 
+    /// Write the NPC population to the database (when there is one).
+    fn save(&mut self) {
+        let Some(store) = self.store.as_mut() else { return };
+        if let Err(e) = store.save(self.npcs.places.len(), &self.npcs.states()) {
+            eprintln!("npc save failed: {e}");
+        }
+    }
+
     fn report(&mut self) {
         let s = std::mem::take(&mut self.stats);
         let avg = if s.ticks > 0 { s.tick_us_sum / s.ticks as u128 } else { 0 };
         println!(
-            "[stats] {} online | tick avg {} µs max {} µs | out {:.1} KB/s ({:.0} snapshots/s) | dropped {}",
-            self.online, avg, s.tick_us_max, s.bytes_out as f64 / 5.0 / 1024.0, s.snapshots_out as f64 / 5.0, s.dropped
+            "[stats] {} online | npcs {} active/{} near/{} far | tick avg {} µs max {} µs | out {:.1} KB/s ({:.0} snapshots/s) | dropped {}",
+            self.online, s.lod.active, s.lod.near, s.lod.far, avg, s.tick_us_max, s.bytes_out as f64 / 5.0 / 1024.0, s.snapshots_out as f64 / 5.0, s.dropped
         );
     }
 }

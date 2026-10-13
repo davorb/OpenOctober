@@ -25,6 +25,8 @@ pub const FLAG_FLY: u8 = 32;
 pub const FLAG_DEAD: u8 = 8;
 /// Mobs only: the mob is in combat (chasing / fighting a player).
 pub const FLAG_FIGHT: u8 = 16;
+/// Players only: the avatar is a server-run NPC (its `PlayerInfo::npc` is set too).
+pub const FLAG_NPC: u8 = 64;
 
 pub const RACES: [&str; 6] = ["hum", "alf", "dwf", "ork", "mir", "mhm"];
 pub const GENDERS: [&str; 2] = ["m", "f"];
@@ -92,6 +94,8 @@ pub struct PlayerInfo {
     /// Wielded weapon id from `data/weapons.json` ("r_Talon Axe"; "" = none) and whether it is drawn.
     pub weapon: String,
     pub drawn: bool,
+    /// A server-run NPC, not a connected player: clients label it.
+    pub npc: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

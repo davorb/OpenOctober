@@ -28,9 +28,13 @@ The server owns them; they idle and wander within a 14 m leash of their spawn po
 `{"t":"mobtypes","types":[{id,name,difficulty}]}` after `welcome`, then `OP_MOBS` binary frames at tick-rate / 3 with the mobs inside the interest radius
 (format in `src/proto.rs`; y is 0 with the snap flag, so the viewer drops them onto the terrain). A missing spawns file just logs a warning and runs without mobs.
 
+## Living NPCs
+`--npcs 500` adds server-run, labeled NPCs (`PlayerInfo::npc`, `FLAG_NPC`; ids from `0xC000`). They live in towns from `pois.json` / `spawns.json`, hop between neighbouring places, rest and wander (`src/npcs.rs`). Cost stays flat through simulation level of detail by distance to the nearest player: **active** (inside the interest radius: stepped every tick, sent in the snapshots), **near** (within 3 km: every 0.5 s) and **far** (every 5 s, travel is just progress along a leg). An NPC that gets close is caught up to "now" first, so it never jumps. NPC state (identity, level, home, needs, goal, position) is saved to SQLite (`--db npcs.db`, `--db none` to disable) every 30 s and on Ctrl-C, and restored at start.
+With 500 NPCs and 128 clustered bots the tick average is unchanged (about 1.7 ms) - roughly 10 NPCs active, 30 near, 460 far. Not yet: NPC combat (mobs ignore them, they are invulnerable), hunting, chat, collision/navmesh (they walk straight lines and the clients snap them to the terrain).
+
 ## Measured (release build, Apple silicon, 128 bots all inside each other's radius)
 ~0.5 ms average / ~1.9 ms max per 66 ms tick, ~37 KB/s down per client (4.7 MB/s total out), no dropped snapshots. Cost grows with players x neighbours, so
 the interest radius is what keeps it flat when players spread out.
 
 ## Not done (on purpose)
-No persistence, no accounts, no server-side movement validation, no delta/quantised snapshots (20 bytes per entity is plenty at this scale), no TLS (put a proxy in front for `wss://`).
+No player persistence (only NPCs are saved), no accounts, no server-side movement validation, no delta/quantised snapshots (20 bytes per entity is plenty at this scale), no TLS (put a proxy in front for `wss://`).

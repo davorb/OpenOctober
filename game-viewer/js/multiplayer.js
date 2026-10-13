@@ -21,10 +21,10 @@ function textSprite(draw, w, h, order) {
   const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthWrite: false, fog: false }));
   s.renderOrder = order; s.userData.aspect = w / h; return s;
 }
-function nameSprite(name) {
+function nameSprite(name, npc = false) {
   const f = '600 30px Palatino, Georgia, serif', m = document.createElement('canvas').getContext('2d'); m.font = f;
   const w = Math.ceil(m.measureText(name).width) + 24;
-  return textSprite((x, w, h) => { x.font = f; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillStyle = '#0007'; x.beginPath(); x.roundRect(0, 6, w, h - 12, 12); x.fill(); x.fillStyle = '#f1dfae'; x.fillText(name, w / 2, h / 2 + 1); }, w, 56, 20);
+  return textSprite((x, w, h) => { x.font = f; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillStyle = '#0007'; x.beginPath(); x.roundRect(0, 6, w, h - 12, 12); x.fill(); x.fillStyle = npc ? '#a6d9cb' : '#f1dfae'; x.fillText(name, w / 2, h / 2 + 1); }, w, 56, 20);
 }
 function bubbleSprite(text) {
   const f = '26px Palatino, Georgia, serif', m = document.createElement('canvas').getContext('2d'); m.font = f;
@@ -116,14 +116,16 @@ export class Multiplayer {
     ws.onclose = () => { if (this.ws !== ws) return; this.ws = null; this.dropAll(); if (this.fatal) return; this.status('Offline — retrying…'); this.retry = setTimeout(() => this.open(), 3000); };
     ws.onerror = () => {};
   }
-  status(s) { this.online = s === 'online'; const e = this.$('mpnet'); e.textContent = this.online ? `● ${this.players.size + 1} online` : `○ ${s}`; e.classList.toggle('up', this.online); }
+  /** Connected players (the server's NPCs share the player roster but are not counted). */
+  humans() { let n = 0; for (const p of this.players.values()) if (!p.info.npc) n++; return n; }
+  status(s) { this.online = s === 'online'; const e = this.$('mpnet'); e.textContent = this.online ? `● ${this.humans() + 1} online` : `○ ${s}`; e.classList.toggle('up', this.online); }
   dropAll() { for (const c of this.corpses.values()) this.scene.remove(c.root); this.corpses.clear(); for (const p of this.players.values()) this.removeAvatar(p); this.players.clear(); this.me = null; this.mobs.clear(); }
 
   onJson(m) {
     if (m.t === 'welcome') {
       this.dropAll(); this.me = m.id; this.radius = m.radius;
       for (const p of m.players) if (p.id !== m.id) this.players.set(p.id, { info: p, states: [], av: null, seen: 0 });
-      this.last = null; this.status('online'); if (this.weapons) { this.weapons.setHp(120, 120); this.weapons.selfId = this.me; if (this.weapons.id) this.combat.equip(this.weapons.id, this.weapons.drawn); } this.log(`Connected as <b>${esc(m.players.find(p => p.id === m.id)?.name || '')}</b> — ${m.players.length} online. Enter to chat, Tab for the player list.`, 'sys');
+      this.last = null; this.status('online'); if (this.weapons) { this.weapons.setHp(120, 120); this.weapons.selfId = this.me; if (this.weapons.id) this.combat.equip(this.weapons.id, this.weapons.drawn); } this.log(`Connected as <b>${esc(m.players.find(p => p.id === m.id)?.name || '')}</b> — ${m.players.filter(p => !p.npc).length} online. Enter to chat, Tab for the player list.`, 'sys');
     } else if (m.t === 'joined') {
       if (m.player.id !== this.me) { this.players.set(m.player.id, { info: m.player, states: [], av: null, seen: 0 }); this.status('online'); this.log(`${esc(m.player.name)} joined`, 'sys'); }
     } else if (m.t === 'left') {
@@ -235,7 +237,7 @@ export class Multiplayer {
     try {
       const av = await this.factory.build(p.info.race, p.info.gender, p.info.gear);
       if (!this.players.has(p.info.id)) return;
-      av.tag = nameSprite(p.info.name); av.dot = dotSprite(); av.pos = new THREE.Vector3(); av.cast = null;
+      av.tag = nameSprite(p.info.name, p.info.npc); av.dot = dotSprite(); av.pos = new THREE.Vector3(); av.cast = null;
       p.av = av; av.attached = false;
       av.anim = await PlayerAnim.create(av).catch(() => null); if (p.info.weapon) await this.wield(p);
     } catch (e) { console.warn('avatar', p.info, e); p.failed = true; } finally { p.building = false; }
@@ -313,7 +315,7 @@ export class Multiplayer {
       const s = p.states[p.states.length - 1]; if (!s || now - p.seen > 1.5 || p.dead) continue;
       const dx = s.x - cam.position.x, dz = s.z - cam.position.z, rx = dx * cs - dz * sn, rz = dx * sn + dz * cs;   // into the camera's frame (up = forward)
       const k = 66 / R, px = 70 + rx * k, py = 70 + rz * k; if (Math.hypot(px - 70, py - 70) > 66) continue;
-      c.fillStyle = '#ffd98a'; c.beginPath(); c.arc(px, py, 2.5, 0, 7); c.fill();
+      c.fillStyle = p.info.npc ? '#8fd4c0' : '#ffd98a'; c.beginPath(); c.arc(px, py, p.info.npc ? 2 : 2.5, 0, 7); c.fill();
     }
     c.fillStyle = '#d0584a'; this.mobs.each((x, z) => {
       const dx = x - cam.position.x, dz = z - cam.position.z, k = 66 / R, px = 70 + (dx * cs - dz * sn) * k, py = 70 + (dx * sn + dz * cs) * k;
@@ -324,6 +326,7 @@ export class Multiplayer {
   renderList() {
     const cam = this.camera.position, now = performance.now() / 1000, rows = [];
     for (const p of this.players.values()) {
+      if (p.info.npc) continue;
       const s = p.states[p.states.length - 1], vis = s && now - p.seen < 1.5, d = vis ? Math.hypot(s.x - cam.x, s.z - cam.z) : Infinity;
       let dir = ''; if (vis) { const a = Math.atan2(s.x - cam.x, -(s.z - cam.z)); dir = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(((a + 2 * Math.PI) % (2 * Math.PI)) / (Math.PI / 4)) % 8]; }
       rows.push([d, `<div class="r"><span>${esc(p.info.name)}</span><small>${RACES.find(r => r.id === p.info.race)?.name} ${p.info.gender === 'f' ? '♀' : '♂'}</small><i>${vis ? `${dir} ${d < 1000 ? Math.round(d) + ' m' : (d / 1000).toFixed(1) + ' km'}` : 'out of range'}</i></div>`]);
