@@ -9,6 +9,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::combat::*;
 use crate::mobs::{MobAttack, Mobs};
+use crate::nav::Nav;
 use crate::npcs::{LodCounts, Npcs, NPC_ID_BASE};
 use crate::proto::*;
 use crate::store::Store;
@@ -31,6 +32,8 @@ pub struct Config {
     pub capitals: Option<String>,
     /// Seed of the NPC population.
     pub npc_seed: u32,
+    /// Directory of baked nav tiles (`game-viewer/tools/build_nav.js` writes `game-server/data/nav`); `None` = NPCs ignore terrain and walk straight lines.
+    pub nav: Option<String>,
     /// SQLite file the NPCs are saved to and restored from; `None` = they start fresh every time.
     pub db: Option<String>,
 }
@@ -156,6 +159,15 @@ pub async fn run(cfg: Config, mut rx: mpsc::Receiver<Cmd>) {
     };
     println!("{} npcs in {} places", npcs.npcs.len(), npcs.places.len());
     let mut npcs = npcs;
+    if let (Some(dir), false) = (&cfg.nav, npcs.npcs.is_empty()) {
+        match Nav::open(dir) {
+            Ok(nav) => {
+                println!("nav: {} tiles", nav.tile_count());
+                npcs.nav = Some(nav);
+            }
+            Err(e) => eprintln!("no nav (npcs walk straight lines): {e}"),
+        }
+    }
     let store = match (&cfg.db, npcs.npcs.is_empty()) {
         (Some(path), false) => match Store::open(path).and_then(|s| s.load(npcs.places.len()).map(|rows| (s, rows))) {
             Ok((s, rows)) => {

@@ -12,6 +12,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
+use crate::nav::Nav;
 use crate::proto::{PlayerInfo, PosUpdate, FLAG_NPC, FLAG_SNAP, GENDERS, RACES};
 
 /// NPC ids live above every player slot (`world::MAX_PLAYERS`).
@@ -46,6 +47,9 @@ pub enum Goal {
 }
 
 const WANDER_R: f32 = 45.0;
+/// An active NPC plans its route this far ahead at a time, searching at most this many cells.
+const ROUTE_LEG: f32 = 250.0;
+const ROUTE_EXPAND: usize = 60000;
 
 #[derive(Clone, Debug)]
 pub struct Place {
@@ -73,6 +77,11 @@ pub struct Npc {
     /// Seconds since the last step.
     acc: f32,
     rng: u32,
+    /// Waypoints still to walk (active NPCs only) and the goal point they lead to.
+    path: Vec<(f32, f32)>,
+    path_goal: Option<(f32, f32)>,
+    /// Last position (active NPCs) known to be walkable.
+    good: (f32, f32),
 }
 
 /// The persisted part of an NPC (see `store.rs`).
@@ -122,6 +131,8 @@ pub struct Npcs {
     /// Race that rules the capital nearest to each place.
     race_of: Vec<usize>,
     tick: u32,
+    /// Walkability of the world: active NPCs path-find on it and stand at its terrain height.
+    pub nav: Option<Nav>,
 }
 
 /// What the LOD pass did in one tick (for the stats line).
@@ -201,7 +212,7 @@ impl Npcs {
             .collect();
         let race_of: Vec<usize> = places.iter().map(|p| capitals.iter().min_by(|a, b| dist((p.x, p.z), a.1).total_cmp(&dist((p.x, p.z), b.1))).map_or(0, |c| c.0)).collect();
         let towns: Vec<usize> = (0..places.len()).filter(|&i| places[i].town).collect();
-        let mut me = Npcs { npcs: Vec::new(), places, links, race_of, tick: 0 };
+        let mut me = Npcs { npcs: Vec::new(), places, links, race_of, tick: 0, nav: None };
         if towns.is_empty() {
             return me;
         }
@@ -225,6 +236,9 @@ impl Npcs {
                 fatigue: frac(&mut rng) * 0.5,
                 acc: frac(&mut rng) * FAR_EVERY,
                 rng: xorshift(&mut rng) | 1,
+                path: Vec::new(),
+                path_goal: None,
+                good: (x, z),
             };
             me.think(&mut npc);
             me.npcs.push(npc);
@@ -256,8 +270,71 @@ impl Npcs {
         };
     }
 
+    /// Walk `n` towards `target` for up to `dt` seconds at `speed`. An active NPC follows a route over the nav grid (planned a leg of `ROUTE_LEG`
+    /// metres at a time, re-planned when it runs out); anyone else just walks the straight line. Returns (seconds used, arrived at `target`).
+    /// `None` = no route: the caller gives up on the goal.
+    fn walk(&self, n: &mut Npc, target: (f32, f32), speed: f32, dt: f32, active: bool) -> Option<(f32, bool)> {
+        let mut point = target;
+        if let (true, Some(nav)) = (active, &self.nav) {
+            let here = (n.pos.x, n.pos.z);
+            if n.path_goal != Some(target) || n.path.is_empty() {
+                let d = dist(here, target);
+                if d < 1.0 {
+                    n.path.clear();
+                } else {
+                    let leg = if d > ROUTE_LEG { (here.0 + (target.0 - here.0) / d * ROUTE_LEG, here.1 + (target.1 - here.1) / d * ROUTE_LEG) } else { target };
+                    n.path = nav.find_path(here, leg, ROUTE_EXPAND)?;
+                    n.path_goal = Some(target);
+                }
+            }
+            while n.path.first().map_or(false, |&w| dist(here, w) < 0.5) {
+                n.path.remove(0);
+            }
+            point = n.path.first().copied().unwrap_or(target);
+        }
+        let d = dist((n.pos.x, n.pos.z), point);
+        let can = speed * dt;
+        if d > 1e-4 {
+            n.pos.yaw = (point.0 - n.pos.x).atan2(point.1 - n.pos.z);
+        }
+        if d <= can {
+            n.pos.x = point.0;
+            n.pos.z = point.1;
+            if !n.path.is_empty() {
+                n.path.remove(0);
+            }
+            let arrived = point == target && n.path.is_empty();
+            n.pos.speed = if arrived { 0 } else { (speed * 10.0) as u8 };
+            if arrived {
+                n.path_goal = None;
+            }
+            Some((d / speed, arrived))
+        } else {
+            n.pos.x += (point.0 - n.pos.x) / d * can;
+            n.pos.z += (point.1 - n.pos.z) / d * can;
+            n.pos.speed = (speed * 10.0) as u8;
+            Some((dt, false))
+        }
+    }
+
+    /// Where an active NPC actually goes to for `target`: the nearest free cell (a town's centre may be inside a building).
+    fn standable(&self, target: (f32, f32), active: bool) -> (f32, f32) {
+        match (&self.nav, active) {
+            (Some(nav), true) => nav.snap(target, 12).unwrap_or(target),
+            _ => target,
+        }
+    }
+
+    /// The goal can't be reached (no route): wait a moment, then think again.
+    fn give_up(&self, n: &mut Npc) {
+        n.path.clear();
+        n.path_goal = None;
+        n.pos.speed = 0;
+        n.goal = Goal::Rest { left: 3.0 + frac(&mut n.rng) * 4.0 };
+    }
+
     /// Move `n` along its goal by `dt` seconds (any amount: legs finish and new goals start inside the loop).
-    fn advance(&self, n: &mut Npc, mut dt: f32) {
+    fn advance(&self, n: &mut Npc, mut dt: f32, active: bool) {
         let mut guard = 0;
         while dt > 1e-4 && guard < 64 {
             guard += 1;
@@ -276,27 +353,28 @@ impl Npcs {
                 Goal::Wander { left, to } => {
                     let p = &self.places[n.at];
                     let target = to.unwrap_or_else(|| {
-                        let a = frac(&mut n.rng) * 6.283;
-                        let r = frac(&mut n.rng) * WANDER_R;
-                        (p.x + a.cos() * r, p.z + a.sin() * r)
+                        let mut t = (p.x, p.z);
+                        for _ in 0..6 {
+                            let a = frac(&mut n.rng) * 6.283;
+                            let r = frac(&mut n.rng) * WANDER_R;
+                            t = (p.x + a.cos() * r, p.z + a.sin() * r);
+                            if self.nav.as_ref().map_or(true, |nav| !active || nav.walkable(t.0, t.1)) {
+                                break;
+                            }
+                        }
+                        t
                     });
-                    let d = dist((n.pos.x, n.pos.z), target);
                     let can = dt.min(left);
-                    let arrived = d <= WALK_SPEED * can;
-                    let used = if arrived { d / WALK_SPEED } else { can };
-                    if arrived {
-                        n.pos.x = target.0;
-                        n.pos.z = target.1;
-                        n.pos.speed = 0;
-                    } else {
-                        n.pos.yaw = (target.0 - n.pos.x).atan2(target.1 - n.pos.z);
-                        n.pos.x += (target.0 - n.pos.x) / d * WALK_SPEED * used;
-                        n.pos.z += (target.1 - n.pos.z) / d * WALK_SPEED * used;
-                        n.pos.speed = (WALK_SPEED * 10.0) as u8;
-                    }
+                    let target = self.standable(target, active);
+                    let Some((used, arrived)) = self.walk(n, target, WALK_SPEED, can, active) else {
+                        self.give_up(n);
+                        continue;
+                    };
                     dt -= used;
                     if left - used <= 1e-3 {
                         n.pos.speed = 0;
+                        n.path.clear();
+                        n.path_goal = None;
                         self.think(n);
                     } else {
                         n.goal = Goal::Wander { left: left - used, to: if arrived { None } else { Some(target) } };
@@ -304,27 +382,57 @@ impl Npcs {
                 }
                 Goal::Travel { dest } => {
                     let p = &self.places[dest];
-                    let target = (p.x, p.z);
-                    let d = dist((n.pos.x, n.pos.z), target);
-                    let reach = TRAVEL_SPEED * dt;
-                    if d <= reach {
-                        n.fatigue = (n.fatigue + d / 9000.0).min(1.0);
-                        dt -= d / TRAVEL_SPEED;
-                        n.pos.x = target.0;
-                        n.pos.z = target.1;
-                        n.pos.speed = 0;
+                    let target = self.standable((p.x, p.z), active);
+                    let before = (n.pos.x, n.pos.z);
+                    let Some((used, arrived)) = self.walk(n, target, TRAVEL_SPEED, dt, active) else {
+                        self.give_up(n);
+                        continue;
+                    };
+                    n.fatigue = (n.fatigue + dist(before, (n.pos.x, n.pos.z)) / 9000.0).min(1.0);
+                    dt -= used;
+                    if arrived {
                         n.at = dest;
                         self.think(n);
-                    } else {
-                        n.pos.yaw = (target.0 - n.pos.x).atan2(target.1 - n.pos.z);
-                        n.pos.x += (target.0 - n.pos.x) / d * reach;
-                        n.pos.z += (target.1 - n.pos.z) / d * reach;
-                        n.pos.speed = (TRAVEL_SPEED * 10.0) as u8;
-                        n.fatigue = (n.fatigue + reach / 9000.0).min(1.0);
-                        dt = 0.0;
                     }
                 }
             }
+        }
+    }
+
+    /// An NPC that becomes visible stands on walkable ground: if the abstract walk left it in water or inside a wall, move it to the nearest free cell.
+    /// Returns false (and leaves it alone) when there is no free cell within 80 m.
+    fn land(&self, n: &mut Npc) -> bool {
+        n.path.clear();
+        n.path_goal = None;
+        let Some(nav) = &self.nav else { return true };
+        match nav.snap((n.pos.x, n.pos.z), 40) {
+            Some((x, z)) => {
+                n.pos.x = x;
+                n.pos.z = z;
+                n.good = (x, z);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Put an active NPC at the terrain's height and tell the clients so (they stop snapping it to their own ground).
+    fn stand(&self, n: &mut Npc) {
+        if let Some(nav) = &self.nav {
+            // never end a tick in a wall or in water (a leg may graze a corner): step back to where it last stood and plan again
+            if nav.walkable(n.pos.x, n.pos.z) {
+                n.good = (n.pos.x, n.pos.z);
+            } else {
+                n.pos.x = n.good.0;
+                n.pos.z = n.good.1;
+                n.pos.speed = 0;
+                n.path.clear();
+                n.path_goal = None;
+            }
+        }
+        if let Some(h) = self.nav.as_ref().and_then(|nav| nav.height(n.pos.x, n.pos.z)) {
+            n.pos.y = h;
+            n.pos.flags &= !FLAG_SNAP;
         }
     }
 
@@ -345,7 +453,7 @@ impl Npcs {
                 n.acc += dt;
                 if n.acc >= FAR_EVERY {
                     let a = std::mem::take(&mut n.acc);
-                    self.advance(n, a);
+                    self.advance(n, a, false);
                 }
                 counts.far += 1;
                 continue;
@@ -361,12 +469,21 @@ impl Npcs {
                     }
                 }
             }
-            let lod = if best <= radius { Lod::Active } else if best <= NEAR_RADIUS { Lod::Near } else { Lod::Far };
+            let mut lod = if best <= radius { Lod::Active } else if best <= NEAR_RADIUS { Lod::Near } else { Lod::Far };
             n.acc += dt;
             if lod == Lod::Active && n.lod != Lod::Active {
-                // catch up to "now" before anybody sees it
-                let a = std::mem::take(&mut n.acc);
-                self.advance(n, a);
+                // Becoming visible: tried twice a second at most, and only from ground an avatar can stand on (the abstract walk of a near
+                // or far NPC ignores lakes and mountains). Until then it stays near, unseen, and walks on.
+                if (i as u32 + self.tick) % 8 != 0 {
+                    lod = Lod::Near;
+                } else {
+                    // catch up to "now" before anybody sees it
+                    let a = std::mem::take(&mut n.acc);
+                    self.advance(n, a, false);
+                    if !self.land(n) {
+                        lod = Lod::Near;
+                    }
+                }
             }
             n.lod = lod;
             let every = match lod {
@@ -376,7 +493,10 @@ impl Npcs {
             };
             if n.acc >= every {
                 let a = std::mem::take(&mut n.acc);
-                self.advance(n, a);
+                self.advance(n, a, lod == Lod::Active);
+            }
+            if lod == Lod::Active {
+                self.stand(n);
             }
             match lod {
                 Lod::Active => counts.active += 1,

@@ -32,7 +32,11 @@
         "--npcs",
         "500",
         "--port",
-        "1399"
+        "1399",
+        "--nav",
+        "game-server/data/nav",
+        "--db",
+        "none"
       ],
       "port": 1399
     }
