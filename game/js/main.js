@@ -124,7 +124,6 @@ addEventListener('keydown', e => {
   if (hit('KeyV')) toast('Atmosphere: ' + env.cycleConfig());
   if (hit('KeyM')) { toast(music.toggle() ? 'Music on' : 'Music muted'); sfx.setMuted(music.muted); }
   if (hit('KeyG')) toggleMode();
-  if (hit('KeyB')) { post.enabled = S.post = !post.enabled; try { localStorage.setItem('dfSettings2', JSON.stringify(S)); } catch {} toast(post.enabled ? 'Post-processing on (bloom, god rays, vignette)' : 'Post-processing off'); }
   if (hit('KeyK')) { post.ssao = S.ssao = !post.ssao; try { localStorage.setItem('dfSettings2', JSON.stringify(S)); } catch {} toast(post.ssao ? 'SSAO on' : 'SSAO off'); }
   if (hit('KeyJ')) { veg.enabled = !veg.enabled; toast(veg.enabled ? 'Vegetation on' : 'Vegetation off'); }
   if (hit('KeyN')) { noclip = !noclip; toast(noclip ? 'No clipping' : 'Ground clamp'); }
@@ -289,7 +288,7 @@ function hud(t, gh) {
   $('stats').textContent = `${fps} fps   ${world.stats.terrain} terrain · ${world.stats.objects} object tiles${world.stats.loading ? '   loading ' + world.stats.loading : ''}\n` +
     `x ${p.x.toFixed(0)}  y ${p.y.toFixed(0)}  z ${(-p.z).toFixed(0)}   ${Math.round(baseSpeed)} m/s\n${renderer.info.render.calls} calls · ${(renderer.info.render.triangles / 1e6).toFixed(2)}M tris`;
 }
-$('help').innerHTML = `<b>WASD</b> fly · <b>Shift</b> fast · <b>Ctrl</b> slow · <b>Space/E</b> up · <b>C/Q</b> down · <b>Wheel</b> base speed · <b>G</b> walk with collision (Space jumps, Shift sprints, Ctrl slow walk, C crouches)<br><b>T</b> pause/resume time · <b>[ ]</b> ±30 min (Shift ±2 h) · <b>V</b> atmosphere · <b>M</b> music · <b>B</b> post-processing · <b>K</b> SSAO · <b>J</b> vegetation · <b>N</b> noclip · <b>H</b> hide this`;
+$('help').innerHTML = `<b>WASD</b> fly · <b>Shift</b> fast · <b>Ctrl</b> slow · <b>Space/E</b> up · <b>C/Q</b> down · <b>Wheel</b> base speed · <b>G</b> walk with collision (Space jumps, Shift sprints, Ctrl slow walk, C crouches)<br><b>T</b> pause/resume time · <b>[ ]</b> ±30 min (Shift ±2 h) · <b>V</b> atmosphere · <b>M</b> music · <b>K</b> SSAO · <b>J</b> vegetation · <b>N</b> noclip · <b>H</b> hide this`;
 setTimeout(setModeLabel, 0);
 
 // ---- boot: preload around the start, then wait for the click (also unlocks audio)
@@ -390,6 +389,7 @@ function buildPanel() {
   c.innerHTML = `<b>PERFORMANCE</b><label><span>Preset</span><select id="preset">${Object.keys(PRESETS).map(p => `<option${p === S.preset ? ' selected' : ''}>${p}</option>`).join('')}<option${S.preset === 'Custom' ? ' selected' : ''}>Custom</option></select></label>` +
     row('view', 'View distance', 1200, 9000, 100, v => (v / 1000).toFixed(1) + ' km') + row('obj', 'Object distance', 300, 3000, 100, v => (v / 1000).toFixed(1) + ' km') + row('grass', 'Grass distance', 40, 160, 10, v => Math.round(v) + ' m') + row('scale', 'Render scale', 0.5, 2, 0.05, v => v.toFixed(2) + '×') +
     `<label><span>Shadows</span><select id="sel_shadow">${Object.keys(SHADOWS).map(k => `<option${k === S.shadow ? ' selected' : ''}>${k}</option>`).join('')}</select></label><label><span>Dynamic lights</span><select id="sel_lights">${[0, 4, 8, 16].map(k => `<option${k === S.lights ? ' selected' : ''}>${k}</option>`).join('')}</select></label>` +
+    `<label><span>Post-processing</span><input type="checkbox" id="chk_post"${post.enabled ? ' checked' : ''}></label>` +
     '<div style="opacity:.55;margin-top:8px">Lower view, object, or grass distance if the frame rate drops. Settings are remembered.</div>';
   const fmt = { view: v => (v / 1000).toFixed(1) + ' km', obj: v => (v / 1000).toFixed(1) + ' km', grass: v => Math.round(v) + ' m', scale: v => v.toFixed(2) + '×' };
   const sync = () => { for (const k of ['view', 'obj', 'grass', 'scale']) { $('r_' + k).value = S[k]; $('v_' + k).textContent = fmt[k](S[k]); } $('preset').value = S.preset; $('sel_shadow').value = S.shadow; $('sel_lights').value = String(S.lights); };
@@ -397,6 +397,7 @@ function buildPanel() {
   $('sel_shadow').addEventListener('change', e => { S.shadow = e.target.value; S.preset = 'Custom'; sync(); applySettings(); });
   $('sel_lights').addEventListener('change', e => { S.lights = +e.target.value; S.preset = 'Custom'; sync(); applySettings(); });
   $('preset').addEventListener('change', e => { const p = PRESETS[e.target.value]; if (p) { Object.assign(S, p, { preset: e.target.value }); sync(); applySettings(); } else S.preset = 'Custom'; });
+  $('chk_post').addEventListener('change', e => { post.enabled = S.post = e.target.checked; try { localStorage.setItem('dfSettings2', JSON.stringify(S)); } catch {} });
   $('cfgbtn').addEventListener('click', () => { c.classList.toggle('on'); if (document.pointerLockElement) document.exitPointerLock(); });
 }
 buildPanel();
