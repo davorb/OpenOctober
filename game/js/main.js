@@ -114,7 +114,7 @@ const keys = new Set(); let baseSpeed = 70, vel = new THREE.Vector3(), locked = 
 const KEYHELP = [
   ['Move', [['Move', 'W A S D'], ['Sprint', 'Shift'], ['Jump / fly up', 'Space'], ['Walk slowly', 'Ctrl'], ['Crouch / fly down', 'C'], ['Look', 'Mouse'], ['Fly speed', 'Wheel'], ['Walk / fly mode', 'G'], ['Noclip', 'N']]],
   ['Play', [['Chat', 'Enter'], ['Players', 'Tab'], ['Loot / interact', 'E'], ['Shop', 'B'], ['Armory', 'I'], ['Draw / holster', 'R'], ['Equip hotbar', '1–9, 0']]],
-  ['View', [['Music', 'M'], ['Time pause', 'T'], ['Time ∓30 min', '[ ]'], ['Atmosphere', 'V'], ['SSAO', 'K'], ['Vegetation', 'J'], ['Landmarks', 'L'], ['Performance', 'O'], ['Help overlay', 'H']]],
+  ['View', [['Music', 'M'], ['Performance & view panel', 'O'], ['Help overlay', 'H']]],
 ];
 $('keyhelp').innerHTML = '<h2>KEYBOARD SHORTCUTS</h2>' + KEYHELP.map(([t, rows]) => `<h3>${t}</h3>` + rows.map(([a, k]) => `<div class="r"><span>${a}</span><span>${k.split(' ').map(x => `<kbd>${x}</kbd>`).join('')}</span></div>`).join('')).join('') + '<div class="f">Press ? or Esc to close</div>';
 addEventListener('keydown', e => {
@@ -127,17 +127,10 @@ addEventListener('keydown', e => {
   if (document.body.classList.contains('playing') && weapons?.key(e.code)) { e.preventDefault(); return; }
   const hit = c => e.code === c;
   if (hit('KeyP')) { env.u.uParallax.value = env.u.uParallax.value ? 0 : parallaxOn; toast(env.u.uParallax.value ? 'Parallax on' : 'Parallax off'); }
-  if (hit('KeyT')) env.auto = !env.auto;
-  if (hit('BracketRight')) env.time = (env.time + (e.shiftKey ? 120 : 30)) % 1440;
-  if (hit('BracketLeft')) env.time = (env.time - (e.shiftKey ? 120 : 30) + 1440) % 1440;
-  if (hit('KeyV')) toast('Atmosphere: ' + env.cycleConfig());
   if (hit('KeyM')) { toast(music.toggle() ? 'Music on' : 'Music muted'); sfx.setMuted(music.muted); }
   if (hit('KeyG')) toggleMode();
-  if (hit('KeyK')) { post.ssao = S.ssao = !post.ssao; try { localStorage.setItem('dfSettings2', JSON.stringify(S)); } catch {} toast(post.ssao ? 'SSAO on' : 'SSAO off'); }
-  if (hit('KeyJ')) { veg.enabled = !veg.enabled; toast(veg.enabled ? 'Vegetation on' : 'Vegetation off'); }
   if (hit('KeyN')) { noclip = !noclip; toast(noclip ? 'No clipping' : 'Ground clamp'); }
   if (hit('KeyO')) $('cfg').classList.toggle('on');
-  if (hit('KeyL')) { pois.setEnabled(!pois.enabled); toast(pois.enabled ? 'Landmarks on' : 'Landmarks off'); }
   if (hit('KeyH')) $('help').classList.toggle('on');
   if (hit('KeyP')) console.log(JSON.stringify({ x: camera.position.x, y: camera.position.y, z: -camera.position.z, yaw, pitch }));
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
@@ -399,6 +392,9 @@ function buildPanel() {
     row('view', 'View distance', 1200, 9000, 100, v => (v / 1000).toFixed(1) + ' km') + row('obj', 'Object distance', 300, 3000, 100, v => (v / 1000).toFixed(1) + ' km') + row('grass', 'Grass distance', 40, 160, 10, v => Math.round(v) + ' m') + row('scale', 'Render scale', 0.5, 2, 0.05, v => v.toFixed(2) + '×') +
     `<label><span>Shadows</span><select id="sel_shadow">${Object.keys(SHADOWS).map(k => `<option${k === S.shadow ? ' selected' : ''}>${k}</option>`).join('')}</select></label><label><span>Dynamic lights</span><select id="sel_lights">${[0, 4, 8, 16].map(k => `<option${k === S.lights ? ' selected' : ''}>${k}</option>`).join('')}</select></label>` +
     `<label><span>Post-processing</span><input type="checkbox" id="chk_post"${post.enabled ? ' checked' : ''}></label>` +
+    `<label><span>SSAO</span><input type="checkbox" id="chk_ssao"${post.ssao ? ' checked' : ''}></label><label><span>Vegetation</span><input type="checkbox" id="chk_veg"${veg.enabled ? ' checked' : ''}></label><label><span>Landmarks</span><input type="checkbox" id="chk_pois"${pois.enabled ? ' checked' : ''}></label>` +
+    `<label><span>Atmosphere</span><select id="sel_atmo">${env.names.map(k => `<option${k === env.config ? ' selected' : ''}>${k}</option>`).join('')}</select></label>` +
+    `<label><span>Time <span id="v_time"></span></span><span><button id="btn_tm">−30m</button> <button id="btn_tp">+30m</button></span></label><label><span>Time passes</span><input type="checkbox" id="chk_auto"${env.auto ? ' checked' : ''}></label>` +
     '<div style="opacity:.55;margin-top:8px">Lower view, object, or grass distance if the frame rate drops. Settings are remembered.</div>';
   const fmt = { view: v => (v / 1000).toFixed(1) + ' km', obj: v => (v / 1000).toFixed(1) + ' km', grass: v => Math.round(v) + ' m', scale: v => v.toFixed(2) + '×' };
   const sync = () => { for (const k of ['view', 'obj', 'grass', 'scale']) { $('r_' + k).value = S[k]; $('v_' + k).textContent = fmt[k](S[k]); } $('preset').value = S.preset; $('sel_shadow').value = S.shadow; $('sel_lights').value = String(S.lights); };
@@ -407,6 +403,15 @@ function buildPanel() {
   $('sel_lights').addEventListener('change', e => { S.lights = +e.target.value; S.preset = 'Custom'; sync(); applySettings(); });
   $('preset').addEventListener('change', e => { const p = PRESETS[e.target.value]; if (p) { Object.assign(S, p, { preset: e.target.value }); sync(); applySettings(); } else S.preset = 'Custom'; });
   $('chk_post').addEventListener('change', e => { post.enabled = S.post = e.target.checked; try { localStorage.setItem('dfSettings2', JSON.stringify(S)); } catch {} });
+  const save = () => { try { localStorage.setItem('dfSettings2', JSON.stringify(S)); } catch {} };
+  $('chk_ssao').addEventListener('change', e => { post.ssao = S.ssao = e.target.checked; save(); });
+  $('chk_veg').addEventListener('change', e => { veg.enabled = e.target.checked; });
+  $('chk_pois').addEventListener('change', e => { pois.setEnabled(e.target.checked); });
+  $('sel_atmo').addEventListener('change', e => { env.setConfig(e.target.value); });
+  $('chk_auto').addEventListener('change', e => { env.auto = e.target.checked; });
+  $('btn_tm').addEventListener('click', () => { env.time = (env.time - 30 + 1440) % 1440; });
+  $('btn_tp').addEventListener('click', () => { env.time = (env.time + 30) % 1440; });
+  setInterval(() => { if (c.classList.contains('on')) $('v_time').textContent = env.hhmm(); }, 500);
   $('cfgbtn').addEventListener('click', () => { c.classList.toggle('on'); if (document.pointerLockElement) document.exitPointerLock(); });
 }
 buildPanel();
