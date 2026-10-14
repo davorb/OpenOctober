@@ -1,0 +1,25 @@
+# docker compose up -d --build
+# Serves http://127.0.0.1:1337/df/ (point the reverse proxy for https://matrix.davor.se/df/ there; websocket upgrade on /df/ws must pass through).
+# This folder (source + assets) is mounted at /app: keep it up to date with `git pull --rebase` on the host before 06:00.
+services:
+  df:
+    build: ./docker
+    init: true
+    restart: always
+    stop_grace_period: 30s
+    ports:
+      - "${DF_BIND:-127.0.0.1}:1337:1337"
+    environment:
+      TZ: Europe/Stockholm
+      PUBLIC_ORIGIN: https://matrix.davor.se
+      BASE_PATH: /df
+      # RESTART_AT: "06:00"
+      # NPCS: 500
+    volumes:
+      - .:/app
+      - ./state:/state          # accounts.db, npcs.db
+      - cargo-target:/cache/target
+      - cargo-registry:/usr/local/cargo/registry
+volumes:
+  cargo-target:
+  cargo-registry:
