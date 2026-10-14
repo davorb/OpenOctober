@@ -4,3 +4,7 @@ converted/
 export/
 uw-files/
 
+state/
+.gamedata
+export_log.txt
+web-viewer/catalog.json

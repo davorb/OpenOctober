@@ -20,10 +20,22 @@ With [`../game-server`](../game-server) running (`cargo run --release`, port 133
 * **Mob animation uses the game's own clips.** `export/mesh/sfa/*.sfas` (a memory dump of C++ objects: per bone, 7 channels of constants, samples or piecewise polynomials in *global* time; the layout is documented at the top of `tools/build_mobanims.js`) is decoded into `data/mobanims/` (`node tools/build_mobanims.js`; 207 of the 210 monster models, shared animation sets share a file, `index.json` maps model -> file). `js/mobanim.js` evaluates the `idle` and `walk` clips on the GLB's bones (game space is left-handed: z is negated and rotations become `(-qx,-qy,qz,qw)`), `js/mobs.js` picks the clip from the mob's ground speed, crossfades 0.25 s and plays the walk at the rate that keeps the feet from sliding (stride measured on the posed skeleton). `neutral_run_forward` etc. are in the same files if something needs them (add to `PICK`). The three flying / swimming models (fire dragon, sea serpent, shark) have no such clips and keep the old procedural `gait()` swing (legs, arms, spine, tail about fixed model axes) or a body bob. `tools/mobtest.html?m=<model>&c=idle|walk` shows a clip at four phases (`&live=1` plays it, `&g=1` the procedural gait). Some GLB materials are alpha-masked on an empty alpha channel (the mesh would vanish), so the mask is dropped when the texture is >90% transparent.
 * Players further than the server's interest radius (900 m) aren't streamed; they stay in the online list as "out of range".
 
+## Setting up the data
+This repository contains no game data. `data/` is git-ignored and is generated on your machine from **your own, legally obtained copy of the game**:
+unpack and convert it with the exporter in `../darkfall-data-export` (it produces `../export` and `../converted`), then run
+
+```
+node tools/import.js            # builds data/ (about 15 s); --nav also bakes the server's navigation grids; --offline skips the downloads; --list shows the steps
+```
+
+Two files are not game data: `data/mobspawns.json` (monster spawn points) and `data/pois.json` (cities, villages, dungeons, ...) come from the community API of
+[darkfallcompanion.se](https://darkfallcompanion.se) (`tools/build_mobspawns.js`, `tools/build_pois.js`). They are downloaded to your machine, are that site's data,
+and are not redistributed here; please respect its terms of use.
+
 ## Where the data comes from
 Everything under `export/xml-files` (type 3 in the archive) and the shader sources are **encrypted with a per-class XOR keystream that
 depends only on byte position**. `tools/solve_keystream.js` recovers it statistically (many-time-pad over ~2,900 files, byte-trigram model,
-self-training) and `tools/decrypt_all.js` writes the plain files to `data/`. ~0.02% of bytes in the largest files are still wrong.
+self-training) and `tools/unpack_all.js` writes the plain files to `data/`. ~0.02% of bytes in the largest files are still wrong.
 
 | need | game file | how it's used |
 | --- | --- | --- |

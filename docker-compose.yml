@@ -1,20 +1,26 @@
-# docker compose up -d --build
-# Serves http://127.0.0.1:1337/df/ (point the reverse proxy for https://matrix.davor.se/df/ there; websocket upgrade on /df/ws must pass through).
-# This folder (source + assets) is mounted at /app: keep it up to date with `git pull --rebase` on the host before 06:00.
+# docker compose up --build        ->  http://localhost:1337/
+#
+# This folder (source, your own unpacked game in ./export and ./converted, and the generated game-viewer/data) is mounted at /app.
+# First start: builds the server, generates game-viewer/data with tools/import.js if it is missing, bakes the NPC navigation grids
+# (a few minutes, once), then runs the game server and the web server. Accounts and NPCs are kept in ./state.
+#
+# Optional settings (environment or a .env file next to this one):
+#   DF_PORT=1337          port on the host
+#   DF_BIND=127.0.0.1     address to listen on (0.0.0.0 to reach it from other machines)
+#   NPCS=500              number of server-run NPCs
+#   BASE_PATH=/df         serve under a path prefix behind a reverse proxy (websocket upgrade on <prefix>/ws must pass through)
+#   PUBLIC_ORIGIN=https://play.example.com    page origin(s) allowed to open the websocket, comma separated (localhost is always allowed)
 services:
   df:
     build: ./docker
     init: true
-    restart: always
     stop_grace_period: 30s
     ports:
-      - "${DF_BIND:-127.0.0.1}:1337:1337"
+      - "${DF_BIND:-127.0.0.1}:${DF_PORT:-1337}:1337"
     environment:
-      TZ: Europe/Stockholm
-      PUBLIC_ORIGIN: https://matrix.davor.se
-      BASE_PATH: /df
-      # RESTART_AT: "06:00"
-      # NPCS: 500
+      BASE_PATH: ${BASE_PATH:-}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-}
+      NPCS: ${NPCS:-500}
     volumes:
       - .:/app
       - ./state:/state          # accounts.db, npcs.db
