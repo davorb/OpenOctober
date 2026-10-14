@@ -9,17 +9,17 @@
 #   1. fetch the data exporter (a separate project) into ./darkfall-data-export
 #   2. unpack your game archive              -> ./export       (about 14 GB)
 #   3. convert models, textures, terrain     -> ./converted
-#   4. derive the unpacking keys and build the client's data -> ./game-viewer/data
+#   4. derive the unpacking keys and build the client's data -> ./game/data
 #   5. build the game server and bake NPC navigation grids
 #   6. start the game server (:1338) and the web server (:1337), and open the browser
 #
 # Settings (environment): DF_PORT=1337  DF_BIND=127.0.0.1  NPCS=500  PUBLIC_ORIGIN=https://play.example.com  NO_OPEN=1
-# Add --redo to throw away ./export ./converted ./game-viewer/data first and make them again.
+# Add --redo to throw away ./export ./converted ./game/data first and make them again.
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT=$PWD
-EXPORTER_URL=https://github.com/davorb/darkfall-data-export.git
-EXPORTER_REF=extract-more-files
+EXPORTER_URL=https://github.com/ddarbs/darkfall-data-export.git
+EXPORTER_REF=main
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 die() { printf '\n\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not installed. $2"; }
@@ -34,7 +34,7 @@ need cargo "Install Rust from https://rustup.rs (or use 'docker compose up --bui
 need git "Install git."
 [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 18 ] || die "Node.js 18 or newer is required."
 
-if [ "$REDO" = 1 ]; then rm -rf export converted game-viewer/data game-viewer/.cache game-server/data/nav; fi
+if [ "$REDO" = 1 ]; then rm -rf export converted game/data game/.cache server/data/nav; fi
 
 # 1 -------------------------------------------------------------------------------------------------------------------
 if [ ! -f darkfall-data-export/sfexport.py ]; then
@@ -59,31 +59,31 @@ if [ ! -d converted/maps ]; then
 fi
 
 # 4 -------------------------------------------------------------------------------------------------------------------
-if [ ! -f game-viewer/data/world.json ] || [ ! -f game-viewer/data/mobanims/index.json ]; then
+if [ ! -f game/data/world.json ] || [ ! -f game/data/mobanims/index.json ]; then
   say "building the client's data (about 2 minutes; fetches community spawn/place data from darkfallcompanion.se)"
-  node game-viewer/tools/import.js
+  node game/tools/import.js
 fi
 
 # 5 -------------------------------------------------------------------------------------------------------------------
 say "building the game server"
-(cd game-server && cargo build --release --bin game-server)
-if [ -z "$(ls game-server/data/nav 2>/dev/null)" ]; then
+(cd server && cargo build --release --bin server)
+if [ -z "$(ls server/data/nav 2>/dev/null)" ]; then
   say "baking NPC navigation grids (once, a few minutes, ~280 MB)"
-  node game-viewer/tools/build_nav.js || echo "nav bake failed, NPCs will run without it"
+  node game/tools/build_nav.js || echo "nav bake failed, NPCs will run without it"
 fi
-NAV=data/nav; [ -z "$(ls game-server/data/nav 2>/dev/null)" ] && NAV=none
+NAV=data/nav; [ -z "$(ls server/data/nav 2>/dev/null)" ] && NAV=none
 
 # 6 -------------------------------------------------------------------------------------------------------------------
 PORT=${DF_PORT:-1337}; BIND=${DF_BIND:-127.0.0.1}
 mkdir -p state
 ORIGINS=(); [ -n "${PUBLIC_ORIGIN:-}" ] && ORIGINS=(--origins "$PUBLIC_ORIGIN")
 say "starting: http://localhost:$PORT/   (Ctrl-C to stop)"
-(cd game-server && exec ./target/release/game-server --port 1338 --npcs "${NPCS:-500}" --nav "$NAV" \
+(cd server && exec ./target/release/server --port 1338 --npcs "${NPCS:-500}" --nav "$NAV" \
     --db "$ROOT/state/npcs.db" --accounts "$ROOT/state/accounts.db" ${ORIGINS[@]+"${ORIGINS[@]}"}) &
 GS=$!
-(cd game-viewer && exec env PORT="$PORT" BIND="$BIND" GAME_SERVER=127.0.0.1:1338 node serve.js) &
+(cd game && exec env PORT="$PORT" BIND="$BIND" GAME_SERVER=127.0.0.1:1338 node serve.js) &
 WEB=$!
-stop() { kill -INT "$GS" 2>/dev/null || true; kill "$WEB" 2>/dev/null || true; wait "$GS" 2>/dev/null || true; }   # SIGINT: the game-server saves the NPCs
+stop() { kill -INT "$GS" 2>/dev/null || true; kill "$WEB" 2>/dev/null || true; wait "$GS" 2>/dev/null || true; }   # SIGINT: the server saves the NPCs
 trap 'stop; exit 0' INT TERM
 if [ -z "${NO_OPEN:-}" ]; then
   sleep 2

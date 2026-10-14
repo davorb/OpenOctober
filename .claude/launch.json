@@ -2,55 +2,55 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "game-viewer",
+      "name": "game",
       "runtimeExecutable": "node",
       "runtimeArgs": [
-        "game-viewer/serve.js",
+        "game/serve.js",
         "1337"
       ],
       "port": 1337
     },
     {
-      "name": "game-server",
+      "name": "server",
       "runtimeExecutable": "cargo",
       "runtimeArgs": [
         "run",
         "--release",
         "--bin",
-        "game-server",
+        "server",
         "--manifest-path",
-        "game-server/Cargo.toml",
+        "server/Cargo.toml",
         "--",
         "--spawns",
-        "game-viewer/data/mobspawns.json",
+        "game/data/mobspawns.json",
         "--weapons",
-        "game-viewer/data/weapons.json",
+        "game/data/weapons.json",
         "--pois",
-        "game-viewer/data/pois.json",
+        "game/data/pois.json",
         "--capitals",
-        "game-viewer/data/spawns.json",
+        "game/data/spawns.json",
         "--npcs",
         "500",
         "--port",
         "1399",
         "--nav",
-        "game-server/data/nav",
+        "server/data/nav",
         "--db",
         "none",
         "--accounts",
-        "game-server/accounts.db",
+        "server/accounts.db",
         "--items",
-        "game-viewer/data/items.json",
+        "game/data/items.json",
         "--vendors",
-        "game-viewer/data/vendors.json"
+        "game/data/vendors.json"
       ],
       "port": 1399
     },
     {
-      "name": "game-viewer-npc",
+      "name": "game-npc",
       "runtimeExecutable": "node",
       "runtimeArgs": [
-        "game-viewer/serve.js",
+        "game/serve.js",
         "1340"
       ],
       "port": 1340

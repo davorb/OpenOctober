@@ -1,7 +1,7 @@
 # docker compose up --build        ->  http://localhost:1337/
 #
-# This folder (source, your own unpacked game in ./export and ./converted, and the generated game-viewer/data) is mounted at /app.
-# First start: builds the server, generates game-viewer/data with tools/import.js if it is missing, bakes the NPC navigation grids
+# This folder (source, your own unpacked game in ./export and ./converted, and the generated game/data) is mounted at /app.
+# First start: builds the server, generates game/data with tools/import.js if it is missing, bakes the NPC navigation grids
 # (a few minutes, once), then runs the game server and the web server. Accounts and NPCs are kept in ./state.
 #
 # Optional settings (environment or a .env file next to this one):
