@@ -53,7 +53,7 @@ The project relies on these provisions as follows:
 - Do not contribute material that was obtained in breach of a confidentiality obligation, or that was leaked or otherwise not publicly available.
 - Do not add original game assets or content derived from them to the repository. This includes graphics, audio, text, maps, data files, and test fixtures.
 - Do not link to or provide instructions for obtaining unlicensed copies of the original game or its data.
-- Do not circumvent technical protection measures.
+- Do not add tooling that circumvents online services or copy protection of running software, such as licence checks, anti-cheat, authentication of official servers, or access controls. Reading the data files of your own lawfully obtained copy, so that an independent program can work with them, is the interoperability this project exists for.
 - Do not use the original game's names, logos, or branding in ways that suggest affiliation with or endorsement by its rights holders.
 - Do not use information gained through analysis for purposes other than enabling interoperability.
 
