@@ -1,4 +1,4 @@
-// Build runtime JSON for the viewer from the decrypted game data in ../data
+// Build runtime JSON for the viewer from the unpacked game data in ../data
 //   music.json  - areas (tile lists) with per-time-of-day track lists, from zones/env_music_settings.xml
 //   tiles.json  - tile display names, from gamelogicinfo/tileinfomap.xml
 //   env.json    - time-of-day environment configs + keyframes (sun/moons, fog, atmosphere), from objectspace/environment

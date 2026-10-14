@@ -1,12 +1,12 @@
 // Extend keystream.bin past the 1.1 MB where solve_keystream.js ran out of ciphertexts: only the ~12 files longer than that
 // still overlap, so positions >= START are solved from those alone (greedy byte-trigram ML, self-training passes).
-// The language model is trained on the already-decrypted first 1.1 MB of the same files (same schemas) plus export/xml.
+// The language model is trained on the already-unpacked first 1.1 MB of the same files (same schemas) plus export/xml.
 // usage: node solve_tail.js <out.bin> [passes=3] [maxLen]
 const fs = require('fs'), path = require('path');
 const out = path.resolve(process.argv[2]), PASSES = +process.argv[3] || 3;
 const ROOT = path.resolve(__dirname, '../../export'), ENC = path.join(ROOT, 'xml-files');
 const walk = (d, o = []) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); e.isDirectory() ? walk(p, o) : o.push(p); } return o; };
-const base = fs.readFileSync(path.join(__dirname, 'keystream.bin')), START = base.length;
+const base = require('./keystreams').need('keystream.bin'), START = base.length;
 let files = walk(ENC).filter(p => !p.includes('/shaders/') && !p.endsWith('.DS_Store')).map(p => ({ p, d: fs.readFileSync(p) })).filter(f => f.d.length > START).sort((a, b) => b.d.length - a.d.length);
 const N = Math.min(+process.argv[4] || 1e9, files[0].d.length);
 console.log(files.map(f => path.relative(ENC, f.p) + ' ' + f.d.length).join('\n'));

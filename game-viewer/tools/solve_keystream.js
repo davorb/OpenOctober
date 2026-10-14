@@ -23,7 +23,8 @@ function bigram(bufs) {
 let corpus = []; { let n = 0; for (const f of walk(path.join(ROOT, opt('--train', 'xml')))) { if (n > 30e6) break; const b = fs.readFileSync(f); n += b.length; corpus.push(b); } }
 let LP = bigram(corpus);
 
-const files = walk(encDir).map(p => ({ p, d: fs.readFileSync(p) })).sort((a, b) => b.d.length - a.d.length);
+const EXCL = opt('--exclude');
+const files = walk(encDir).filter(p => !EXCL || !p.includes('/' + EXCL + '/')).map(p => ({ p, d: fs.readFileSync(p) })).sort((a, b) => b.d.length - a.d.length);
 const MAXF_DEEP = 48, N = Math.min(maxLen, files[0].d.length);
 function solve() {
   const ks = new Uint8Array(N), prev = new Uint8Array(files.length), prev2 = new Uint8Array(files.length), score = new Float64Array(256);

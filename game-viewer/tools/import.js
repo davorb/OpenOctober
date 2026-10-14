@@ -41,7 +41,8 @@ function fulltiles() {
 
 // name, needs network, what it does. Order matters: later steps read the files earlier ones wrote.
 const STEPS = [
-  ['decrypt', false, 'unpack the game archive\'s XML and shader files into data/', script('decrypt_all.js')],
+  ['keystreams', false, 'derive the unpacking keys from your game files (once, about 2 min)', script('make_keystreams.js')],
+  ['unpack', false, 'unpack the game archive\'s XML and shader files into data/', script('unpack_all.js')],
   ['world', false, 'tile grid and terrain kinds (world.json)', script('build_world.js')],
   ['data', false, 'music, tiles, day/night environment, terrain textures', script('build_data.js')],
   ['fulltiles', false, 'tiles with a _full model', fulltiles],
@@ -67,7 +68,7 @@ if (flag('--list')) { for (const [n, net, d] of STEPS) console.log(n.padEnd(12),
 const missing = ['export/xml-files', 'export/texture', 'converted/maps'].filter(p => !fs.existsSync(path.join(ROOT, p)));
 if (missing.length) {
   console.error(`Cannot find ${missing.map(p => '../' + p).join(', ')} (looked in ${ROOT}).\n` +
-    `Unpack and convert your own copy of the game first, with the exporter in ../darkfall-data-export (see its README):\n` +
+    `Unpack and convert your own copy of the game first. The easy way is  ./play.sh /path/to/game/data  in the repository root, or by hand with the exporter (https://github.com/davorb/darkfall-data-export, branch extract-more-files):\n` +
     `  python3 dfextract_3.py "<game>/data" export && python3 sfexport.py all export converted`);
   process.exit(1);
 }
