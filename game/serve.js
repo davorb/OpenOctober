@@ -2,6 +2,7 @@
 // OpenOctober game dev server (no dependencies).  usage: node serve.js [port]
 //   env BASE_PATH=/df     serve under a path prefix (behind a reverse proxy that keeps it or strips it): root-absolute URLs in .html/.js are rewritten on the fly
 //   env GAME_SERVER=host:port   where <prefix>/ws (the websocket) is proxied to (default 127.0.0.1:1338); X-Forwarded-For of the reverse proxy is passed on
+//   env DEV=1           live reload: watches js/ css/ and *.html, pushes changes to the page over SSE (CSS is swapped in place, anything else reloads)
 //   /            -> this folder          /data/       -> ./data  (unpacked game data + built json)
 //   /converted/  -> ../converted         /dds/        -> ../export/texture/dds
 //   /tex/        -> ../export/texture (colour-grade LUTs)     /audio/      -> ../export/audio
@@ -49,9 +50,33 @@ function rewritten(file, st) {
   }
   return out;
 }
+const DEV = !!process.env.DEV;
+const sseClients = new Set();
+const DEV_SNIPPET = `<script>new EventSource('${PREFIX}/__reload').onmessage = e => {
+  if (!e.data.endsWith('.css')) return location.reload();
+  for (const l of document.querySelectorAll('link[rel=stylesheet]')) { const u = new URL(l.href); u.searchParams.set('r', Date.now()); l.href = u; }
+};</script>`;
+if (DEV) {
+  const pending = new Set(); let timer;
+  const changed = (dir, f) => {
+    if (!f || !/\.(js|css|html)$/.test(f)) return;
+    pending.add(path.join(dir, f)); clearTimeout(timer);
+    timer = setTimeout(() => {
+      const list = [...pending]; pending.clear();
+      const msg = list.every(x => x.endsWith('.css')) ? list[0] : list.find(x => !x.endsWith('.css'));
+      for (const c of sseClients) c.write(`data: ${msg}\n\n`);
+      console.log('reload:', list.map(x => path.relative(HERE, x)).join(', '));
+    }, 60);
+  };
+  for (const d of [HERE, path.join(HERE, 'js'), path.join(HERE, 'css')]) fs.watch(d, (_, f) => changed(d, f));
+}
 const server = http.createServer((req, res) => {
   let p; try { p = decodeURIComponent(req.url.split('?')[0]); } catch { res.writeHead(400).end(); return; }
   if (PREFIX) { if (p === PREFIX) { res.writeHead(301, { Location: PREFIX + '/' }).end(); return; } if (!p.startsWith(PREFIX + '/')) { res.writeHead(404).end('not found'); return; } p = p.slice(PREFIX.length); }
+  if (DEV && p === '/__reload') {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' }); res.write(':\n\n');
+    sseClients.add(res); req.on('close', () => sseClients.delete(res)); return;
+  }
   if (p.endsWith('/')) p += 'index.html';
   const m = MOUNTS.find(([pre]) => p.startsWith(pre));
   let file = path.normalize(path.join(m[1], p.slice(m[0].length)));
@@ -60,6 +85,11 @@ const server = http.createServer((req, res) => {
     if (err || !st.isFile()) { res.writeHead(404).end('not found'); return; }
     const ext = path.extname(file).toLowerCase();
     if (PREFIX && (ext === '.html' || ext === '.js') && !file.startsWith(path.join(HERE, 'vendor') + path.sep)) { file = rewritten(file, st); st = fs.statSync(file); }
+    if (DEV && ext === '.html') {
+      const html = fs.readFileSync(file, 'utf8'), at = html.lastIndexOf('</body>');
+      res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-cache' }).end(at < 0 ? html + DEV_SNIPPET : html.slice(0, at) + DEV_SNIPPET + html.slice(at));
+      return;
+    }
     const etag = `"${st.size.toString(36)}-${Math.floor(st.mtimeMs).toString(36)}"`;
     const h = { 'Content-Type': TYPES[ext] || 'application/octet-stream', 'Accept-Ranges': 'bytes', 'ETag': etag, 'Vary': 'Accept-Encoding',
       'Cache-Control': IMMUTABLE.has(m[0]) ? 'public, max-age=2592000' : 'no-cache' };

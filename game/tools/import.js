@@ -54,6 +54,7 @@ const STEPS = [
   ['weapons', false, 'weapon table', script('build_weapons.js')],
   ['items', false, 'goods and weights', script('build_items.js')],
   ['vendors', false, 'shop placements', script('build_vendors.js')],
+  ['ui', false, 'loot / pack window art and item icons (needs ImageMagick)', script('build_ui.js')],
   ['combatfx', false, 'combat sounds and effects', script('build_combatfx.js')],
   ['playeranims', false, 'player animation clips', script('build_playeranims.js')],
   ['pois', true, 'places of interest   [darkfallcompanion.se]', script('build_pois.js')],

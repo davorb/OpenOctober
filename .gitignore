@@ -8,3 +8,5 @@ state/
 .gamedata
 export_log.txt
 model-explorer/catalog.json
+.aider*
+.claude/worktrees/

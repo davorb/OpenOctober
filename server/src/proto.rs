@@ -132,6 +132,11 @@ pub enum ClientMsg {
     Respawn,
     /// Take everything from a body's tombstone (`cid` of its `Corpse` message): you have to stand within a few metres of it.
     Loot { cid: u32 },
+    /// Look at what lies on the tombstone `cid` (within a few metres): answered by `Grave`.
+    OpenGrave { cid: u32 },
+    /// Take up to `qty` of `item` from the tombstone `cid` into your pack (`item` empty: its gold). Answered by `Grave` (what is left), `Stock`,
+    /// and `GraveErr` when refused.
+    Take { cid: u32, #[serde(default)] item: String, #[serde(default = "one")] qty: u32 },
     /// Open the shop of the vendor NPC `npc` (you have to be within a few metres): answered by `Shop`.
     Shop { npc: u16 },
     /// Buy / sell up to `qty` units of `item` at that vendor: answered by `Trade`, `Stock` and a fresh `Shop`.
@@ -165,7 +170,7 @@ pub enum ServerMsg<'a> {
     /// A player got up again (full health) - the client puts itself back at a spawn point.
     Respawn { id: u16, hp: f32, max: f32 },
     /// A player died here: his body stays on the ground (CORPSE_SECS) for everybody, joiners get the existing ones too. `snap`: the body has no height of its own (bots).
-    /// The body lies there for `Config::body_secs` (45 s); nothing can be taken from it. Then it is replaced by a `Tombstone` of the same `cid`
+    /// The body lies there for `Config::body_secs` (7 s); nothing can be taken from it. Then it is replaced by a `Tombstone` of the same `cid`
     /// (if it carried anything) or goes (`CorpseGone`).
     Corpse { cid: u32, name: &'a str, race: &'a str, gender: &'a str, gear: &'a str, x: f32, y: f32, z: f32, yaw: f32, snap: bool },
     /// The body of `cid` has turned into a tombstone (model `tombstone_player_characters_01`) with `gold` and `units` goods on it, for
@@ -178,6 +183,10 @@ pub enum ServerMsg<'a> {
     Looting { cid: u32, secs: f32 },
     /// The channel ended: `ok` = you got it; otherwise interrupted or somebody else was first.
     LootEnd { cid: u32, ok: bool },
+    /// What lies on the tombstone `cid` right now (answer to `OpenGrave` / `Take`): gold and goods by item id with their weight per unit.
+    Grave { cid: u32, name: &'a str, gold: f32, items: Vec<(String, u32, f32)> },
+    /// A `Take` / `OpenGrave` was refused: "too far", "too heavy", "empty", "gone", "down".
+    GraveErr { cid: u32, reason: &'a str },
     /// What you carry (sent after joining and whenever it changes): gold and goods by item id.
     /// `weight` includes the wielded weapon; `limit` is what you can carry.
     /// `own`: the server only lets you wield weapons that are in your pack (or already in your hand).

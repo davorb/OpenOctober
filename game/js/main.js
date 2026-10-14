@@ -111,7 +111,16 @@ let yaw = q.get('yaw') ? +q.get('yaw') : Math.PI * 0.85, pitch = q.get('pitch') 
 const keys = new Set(); let baseSpeed = 70, vel = new THREE.Vector3(), locked = false, noclip = false;
 
 // ---- input
+const KEYHELP = [
+  ['Move', [['Move', 'W A S D'], ['Sprint', 'Shift'], ['Jump / fly up', 'Space'], ['Walk slowly', 'Ctrl'], ['Crouch / fly down', 'C'], ['Look', 'Mouse'], ['Fly speed', 'Wheel'], ['Walk / fly mode', 'G'], ['Noclip', 'N']]],
+  ['Play', [['Chat', 'Enter'], ['Players', 'Tab'], ['Loot / interact', 'E'], ['Shop', 'B'], ['Armory', 'I'], ['Draw / holster', 'R'], ['Equip hotbar', '1–9, 0']]],
+  ['View', [['Music', 'M'], ['Time pause', 'T'], ['Time ∓30 min', '[ ]'], ['Atmosphere', 'V'], ['SSAO', 'K'], ['Vegetation', 'J'], ['Landmarks', 'L'], ['Performance', 'O'], ['Help overlay', 'H']]],
+];
+$('keyhelp').innerHTML = '<h2>KEYBOARD SHORTCUTS</h2>' + KEYHELP.map(([t, rows]) => `<h3>${t}</h3>` + rows.map(([a, k]) => `<div class="r"><span>${a}</span><span>${k.split(' ').map(x => `<kbd>${x}</kbd>`).join('')}</span></div>`).join('')).join('') + '<div class="f">Press ? or Esc to close</div>';
 addEventListener('keydown', e => {
+  const kh = $('keyhelp');
+  if (e.target.tagName !== 'INPUT' && e.key === '?') { e.preventDefault(); if (!e.repeat) kh.classList.toggle('on'); return; }
+  if (kh.classList.contains('on') && e.code === 'Escape') { kh.classList.remove('on'); return; }
   if (e.target.id === 'armq' && e.code === 'Escape') { weapons.toggleArmory(false); return; }
   if (e.repeat || e.target.tagName === 'INPUT') return;   // typing in the name / chat box
   keys.add(e.code);

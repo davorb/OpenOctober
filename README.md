@@ -155,7 +155,7 @@ Without the game server the client still works as an offline explorer.
 
 ```bash
 cd server
-cargo run --release -- --make-admin YOUR_USERNAME
+cargo run --release --bin server -- --make-admin YOUR_USERNAME
 ```
 
 Administrators can open `/admin.html`, a free-fly explorer with a spawn picker.

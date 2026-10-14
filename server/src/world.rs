@@ -103,6 +103,9 @@ pub enum Cmd {
     Respawn(u16),
     /// A player takes everything from the tombstone `cid`.
     Loot(u16, u32),
+    /// Look at / take from a tombstone one item at a time (`item` empty: gold).
+    OpenGrave(u16, u32),
+    Take(u16, u32, String, u32),
     /// Put `Stock` into a player's pack. Not reachable from the network (`main.rs` does not map any client message to it): for tests and, later, game masters.
     Give(u16, Stock),
     Shop(u16, u16),
@@ -391,6 +394,8 @@ impl World {
             Cmd::Shoot(id, from, dir, power, spell) if !self.logging_out(id) => self.shoot(id, from, dir, power, spell),
             Cmd::Respawn(id) => self.respawn(id, false),
             Cmd::Loot(id, cid) if !self.logging_out(id) => self.loot_grave(id, cid),
+            Cmd::OpenGrave(id, cid) if !self.logging_out(id) => self.open_grave(id, cid),
+            Cmd::Take(id, cid, item, qty) if !self.logging_out(id) => self.take_from_grave(id, cid, &item, qty),
             Cmd::Give(id, stock) => {
                 if let Some(Some(p)) = self.players.get_mut(id as usize) {
                     p.stock.gold += stock.gold;
@@ -404,7 +409,7 @@ impl World {
             Cmd::Buy(id, npc, item, qty) if !self.logging_out(id) => self.trade(id, npc, &item, qty, true),
             Cmd::Sell(id, npc, item, qty) if !self.logging_out(id) => self.trade(id, npc, &item, qty, false),
             // somebody who is logging out does nothing but wait (moving away cancels it)
-            Cmd::Equip(..) | Cmd::Attack(..) | Cmd::Block(..) | Cmd::Bow(..) | Cmd::Shoot(..) | Cmd::Loot(..) | Cmd::Shop(..) | Cmd::Buy(..) | Cmd::Sell(..) => {}
+            Cmd::Equip(..) | Cmd::Attack(..) | Cmd::Block(..) | Cmd::Bow(..) | Cmd::Shoot(..) | Cmd::Loot(..) | Cmd::OpenGrave(..) | Cmd::Take(..) | Cmd::Shop(..) | Cmd::Buy(..) | Cmd::Sell(..) => {}
         }
         self.reap();
     }
@@ -474,7 +479,7 @@ impl World {
         if !self.mobs.types.is_empty() {
             msgs.push(serde_json::to_string(&ServerMsg::Mobtypes { types: &self.mobs.types }).unwrap());
         }
-        msgs.extend(self.corpses.iter().map(|c| c.msg.clone()));
+        msgs.extend(self.corpses.iter().filter(|c| !c.msg.is_empty()).map(|c| c.msg.clone()));
         let now = Instant::now();
         for p in self.players.iter().flatten().filter(|p| p.info.id as usize != id) {
             if let Some(t) = p.logout_until {
@@ -851,6 +856,65 @@ impl World {
         }
     }
 
+    /// The tombstone `cid` if player `id` is up and within reach of it, else why not.
+    fn grave_in_reach(&self, id: u16, cid: u32) -> Result<crate::npcs::Grave, &'static str> {
+        let Some(Some(p)) = self.players.get(id as usize) else { return Err("gone") };
+        if p.down_until.is_some() || !p.has_pos {
+            return Err("down");
+        }
+        let g = self.npcs.grave(cid).ok_or("gone")?;
+        if (g.x - p.pos.x).powi(2) + (g.z - p.pos.z).powi(2) > LOOT_REACH * LOOT_REACH {
+            return Err("too far");
+        }
+        Ok(g)
+    }
+
+    fn send_grave(&mut self, id: u16, cid: u32) {
+        let msg = match self.npcs.grave(cid) {
+            Some(g) => {
+                let eco = self.npcs.economy();
+                let name = self.corpses.iter().find(|c| c.cid == cid).map_or("", |c| c.info.name.as_str()).to_string();
+                let items: Vec<(String, u32, f32)> = g.stock.items.iter().map(|(k, &q)| (k.clone(), q, item_weight(&eco.items, k))).collect();
+                serde_json::to_string(&ServerMsg::Grave { cid, name: &name, gold: g.stock.gold, items }).unwrap()
+            }
+            None => serde_json::to_string(&ServerMsg::GraveErr { cid, reason: "gone" }).unwrap(),
+        };
+        self.send_to(id, msg);
+    }
+
+    fn open_grave(&mut self, id: u16, cid: u32) {
+        match self.grave_in_reach(id, cid) {
+            Ok(_) => self.send_grave(id, cid),
+            Err(reason) => self.send_to(id, serde_json::to_string(&ServerMsg::GraveErr { cid, reason }).unwrap()),
+        }
+    }
+
+    /// Move up to `qty` of `item` (or the gold, when `item` is empty) from the tombstone into player `id`'s pack: what fits.
+    fn take_from_grave(&mut self, id: u16, cid: u32, item: &str, qty: u32) {
+        if let Err(reason) = self.grave_in_reach(id, cid) {
+            self.send_to(id, serde_json::to_string(&ServerMsg::GraveErr { cid, reason }).unwrap());
+            return;
+        }
+        let free = {
+            let eco = self.npcs.economy();
+            self.players.get(id as usize).and_then(|p| p.as_ref()).map_or(0.0, |p| (CARRY_LIMIT - p.stock.weight(&eco.items) - if p.weapon.is_empty() { 0.0 } else { item_weight(&eco.items, &p.weapon) }).max(0.0))
+        };
+        let taken = { let eco = self.npcs.economy(); self.npcs.take_grave_item(cid, item, qty.clamp(1, 1000), free, &eco.items) };
+        match taken {
+            Some(t) => {
+                if let Some(Some(p)) = self.players.get_mut(id as usize) {
+                    p.stock.gold += t.gold;
+                    for (k, q) in t.items {
+                        p.stock.add(&k, q);
+                    }
+                }
+                self.send_stock(id);
+                self.send_grave(id, cid);
+            }
+            None => self.send_to(id, serde_json::to_string(&ServerMsg::GraveErr { cid, reason: "too heavy" }).unwrap()),
+        }
+    }
+
     /// The channel of player `id` ends (interrupted, or `ok`).
     fn end_loot(&mut self, id: u16, cid: u32, ok: bool) {
         let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
@@ -987,36 +1051,29 @@ impl World {
         }
     }
 
-    /// A player killed a mob of `rank`: what it drops goes into his pack, as much as fits.
-    fn reward_player(&mut self, id: u16, rank: u8, mid: u16) {
-        let (gold, drops, free) = {
+    /// A killed mob leaves its loot on a tombstone (no body is shown: the mob itself lies there): it appears after `body_secs`.
+    fn mob_tombstone(&mut self, id: u16, rank: u8, mid: u16) {
+        let stock = {
             let eco = self.npcs.economy();
             let mut rng = (self.tick.wrapping_mul(2654435761) ^ (mid as u32).wrapping_mul(40503) ^ (id as u32 + 1)) | 1;
             let (gold, drops) = crate::economy::loot(&eco.items, rank, &mut rng);
-            let free = self.players.get(id as usize).and_then(|p| p.as_ref()).map_or(0.0, |p| (CARRY_LIMIT - p.stock.weight(&eco.items) - if p.weapon.is_empty() { 0.0 } else { item_weight(&eco.items, &p.weapon) }).max(0.0));
-            (gold, drops, free)
-        };
-        let mut free = free;
-        let mut got: Vec<(String, u32)> = Vec::new();
-        {
-            let eco = self.npcs.economy();
+            let mut stock = Stock { gold, ..Default::default() };
             for (k, q) in drops {
-                let w = item_weight(&eco.items, &k);
-                let n = if w <= 0.0 { q } else { q.min((free / w).floor() as u32) };
-                if n > 0 {
-                    free -= w * n as f32;
-                    got.push((k, n));
-                }
+                stock.add(&k, q);
             }
+            stock
+        };
+        if stock.gold <= 0.0 && stock.items.is_empty() {
+            return;
         }
-        let Some(Some(p)) = self.players.get_mut(id as usize) else { return };
-        p.stock.gold += gold;
-        for (k, n) in &got {
-            p.stock.add(k, *n);
-        }
-        let msg = serde_json::to_string(&ServerMsg::Drop { gold, items: got }).unwrap();
-        self.send_to(id, msg);
-        self.send_stock(id);
+        let m = &self.mobs.mobs[mid as usize];
+        let name = self.mobs.types.get(m.kind as usize).map_or(String::new(), |t| t.name.clone());
+        let pos = PosUpdate { x: m.pos.x, y: 0.0, z: m.pos.z, yaw: m.pos.yaw, flags: FLAG_SNAP, ..Default::default() };
+        let info = PlayerInfo { id: mid, name, race: String::new(), gender: String::new(), gear: String::new(), weapon: String::new(), drawn: false, npc: true, role: String::new() };
+        let cid = self.next_corpse;
+        self.next_corpse += 1;
+        let tomb_at = Instant::now() + Duration::from_secs_f32(self.cfg.body_secs);
+        self.corpses.push(Corpse { cid, tomb_at, expires: None, msg: String::new(), stock, owner: None, info, pos });
     }
 
     /// Everybody is told a tombstone has been emptied: it is gone.
@@ -1043,7 +1100,7 @@ impl World {
             }
         } else if hp <= 0.0 {
             let rank = self.mobs.mobs[mid as usize].rank;
-            self.reward_player(owner, rank, mid); // a player's kill drops straight into his pack
+            self.mob_tombstone(owner, rank, mid); // a player's kill leaves a tombstone with the loot
         }
         let m = &self.mobs.mobs[mid as usize];
         let (at, max) = ([m.pos.x, 0.0, m.pos.z], m.max_hp);

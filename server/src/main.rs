@@ -16,7 +16,7 @@ use server::accounts::{self, Accounts, Profile, SessionGuard, SignUp};
 use server::proto::*;
 use server::world::{self, Cmd, Config, JoinReq};
 
-const USAGE: &str = "usage: server [--port 1338] [--radius 900] [--max-players 256] [--tick-hz 15] [--spawns ../game/data/mobspawns.json | --spawns none] [--weapons ../game/data/weapons.json | --weapons none] [--pvp on|off] [--npcs 500] [--pois ../game/data/pois.json] [--capitals ../game/data/spawns.json] [--npc-seed 1] [--db npcs.db | --db none] [--nav data/nav | --nav none] [--npc-time-scale 1] [--own-weapons on|off] [--body-secs 45] [--tomb-secs 3600] [--loot-secs 3] [--items ../game/data/items.json] [--vendors ../game/data/vendors.json | --items none] [--max-per-ip 4] [--conns-per-min 30] [--origins https://play.example.com,... | --origins any] [--max-speed 20] [--max-fly-speed 400] [--ghost-secs 300] [--logout-secs 30] [--accounts accounts.db] [--make-admin USERNAME] [--set-password USERNAME:NEWPASSWORD]";
+const USAGE: &str = "usage: server [--port 1338] [--radius 900] [--max-players 256] [--tick-hz 15] [--spawns ../game/data/mobspawns.json | --spawns none] [--weapons ../game/data/weapons.json | --weapons none] [--pvp on|off] [--npcs 500] [--pois ../game/data/pois.json] [--capitals ../game/data/spawns.json] [--npc-seed 1] [--db npcs.db | --db none] [--nav data/nav | --nav none] [--npc-time-scale 1] [--own-weapons on|off] [--body-secs 7] [--tomb-secs 3600] [--loot-secs 3] [--items ../game/data/items.json] [--vendors ../game/data/vendors.json | --items none] [--max-per-ip 4] [--conns-per-min 30] [--origins https://play.example.com,... | --origins any] [--max-speed 20] [--max-fly-speed 400] [--ghost-secs 300] [--logout-secs 30] [--accounts accounts.db] [--make-admin USERNAME] [--set-password USERNAME:NEWPASSWORD]";
 
 // Abuse limits (see `Net`). Connections from the local machine (127.0.0.1, ::1) skip the per-IP limits and the movement limit.
 /// A client may send this many frames per second on average, with a burst of `MSG_BURST`; more are dropped, and a client that keeps on is kicked.
@@ -131,7 +131,7 @@ fn refuse(code: u16, why: &str) -> ErrorResponse {
 
 #[tokio::main]
 async fn main() {
-    let (mut port, mut cfg) = (1338u16, Config { radius: 900.0, max_players: 256, tick_hz: 15, spawns: Some("../game/data/mobspawns.json".into()), weapons: Some("../game/data/weapons.json".into()), pvp: true, npcs: 0, pois: Some("../game/data/pois.json".into()), capitals: Some("../game/data/spawns.json".into()), npc_seed: 1, db: Some("npcs.db".into()), nav: Some("data/nav".into()), npc_time_scale: 1.0, own_weapons: true, body_secs: 45.0, tomb_secs: 3600, loot_secs: 3.0, items: Some("../game/data/items.json".into()), vendors: Some("../game/data/vendors.json".into()), max_speed: 20.0, max_fly_speed: 400.0, ghost_secs: 300.0, logout_secs: 30.0 });
+    let (mut port, mut cfg) = (1338u16, Config { radius: 900.0, max_players: 256, tick_hz: 15, spawns: Some("../game/data/mobspawns.json".into()), weapons: Some("../game/data/weapons.json".into()), pvp: true, npcs: 0, pois: Some("../game/data/pois.json".into()), capitals: Some("../game/data/spawns.json".into()), npc_seed: 1, db: Some("npcs.db".into()), nav: Some("data/nav".into()), npc_time_scale: 1.0, own_weapons: true, body_secs: 7.0, tomb_secs: 3600, loot_secs: 3.0, items: Some("../game/data/items.json".into()), vendors: Some("../game/data/vendors.json".into()), max_speed: 20.0, max_fly_speed: 400.0, ghost_secs: 300.0, logout_secs: 30.0 });
     let mut net = Net { origins: Vec::new(), any_origin: false, max_per_ip: 4, conns_per_min: 30 };
     let (mut accounts_path, mut make_admin, mut set_password) = ("accounts.db".to_string(), None::<String>, None::<String>);
     let mut args = std::env::args().skip(1);
@@ -394,6 +394,8 @@ async fn connection(stream: TcpStream, peer: SocketAddr, cmds: mpsc::Sender<Cmd>
                         Ok(ClientMsg::Shoot { dir, from, power, spell }) => Some(Cmd::Shoot(id, from, dir, power, spell)),
                         Ok(ClientMsg::Respawn) => Some(Cmd::Respawn(id)),
                         Ok(ClientMsg::Loot { cid }) => Some(Cmd::Loot(id, cid)),
+                        Ok(ClientMsg::OpenGrave { cid }) => Some(Cmd::OpenGrave(id, cid)),
+                        Ok(ClientMsg::Take { cid, item, qty }) => Some(Cmd::Take(id, cid, item, qty)),
                         Ok(ClientMsg::Shop { npc }) => Some(Cmd::Shop(id, npc)),
                         Ok(ClientMsg::Buy { npc, item, qty }) => Some(Cmd::Buy(id, npc, item, qty)),
                         Ok(ClientMsg::Sell { npc, item, qty }) => Some(Cmd::Sell(id, npc, item, qty)),

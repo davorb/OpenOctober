@@ -376,3 +376,18 @@ fn a_tombstone_gives_only_what_fits_and_keeps_the_rest() {
     assert!(w.grave(7).is_none());
     assert_eq!(w.looted.borrow().as_slice(), &[7]);
 }
+
+#[test]
+fn single_items_and_gold_can_be_taken_one_at_a_time_and_the_tombstone_goes_when_empty() {
+    let mut w = world(0);
+    let items = Items::parse(ITEMS).unwrap();
+    w.add_grave(5, 0.0, 0.0, Stock { gold: 40.0, items: [("r_Apple".to_string(), 3), ("r_Iron".to_string(), 2)].into() }, None);
+    let t = w.take_grave_item(5, "r_Apple", 2, 1000.0, &items).unwrap();
+    assert_eq!(t.count("r_Apple"), 2);
+    assert_eq!(w.grave(5).unwrap().stock.count("r_Apple"), 1);
+    let g = w.take_grave_item(5, "", 1, 0.0, &items).unwrap();
+    assert_eq!(g.gold, 40.0);
+    w.take_grave_item(5, "r_Apple", 9, 1000.0, &items).unwrap();
+    w.take_grave_item(5, "r_Iron", 9, 1000.0, &items).unwrap();
+    assert!(w.grave(5).is_none() && w.looted.borrow().contains(&5));
+}

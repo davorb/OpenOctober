@@ -634,6 +634,25 @@ impl Npcs {
         (taken.gold > 0.0 || !taken.items.is_empty()).then_some(taken)
     }
 
+    /// Take up to `qty` of `item` (the gold when `item` is empty) from the tombstone `cid`, as many as weigh at most `free`. `None` if nothing came off.
+    pub fn take_grave_item(&self, cid: u32, item: &str, qty: u32, free: f32, items: &Items) -> Option<Stock> {
+        let mut graves = self.graves.borrow_mut();
+        let g = graves.iter_mut().find(|g| g.cid == cid && (g.stock.gold > 0.0 || !g.stock.items.is_empty()))?;
+        let mut taken = Stock::default();
+        if item.is_empty() {
+            taken.gold = std::mem::take(&mut g.stock.gold);
+        } else {
+            let w = economy::item_weight(items, item).max(0.0);
+            let n = if w <= 0.0 { qty } else { qty.min((free / w).floor() as u32) };
+            let n = g.stock.take(item, n);
+            taken.add(item, n);
+        }
+        if g.stock.gold <= 0.0 && g.stock.items.is_empty() {
+            self.looted.borrow_mut().push(cid);
+        }
+        (taken.gold > 0.0 || !taken.items.is_empty()).then_some(taken)
+    }
+
     /// An NPC (not a vendor) is killed: everything it carries, its weapon too, goes onto its tombstone. It gets up at home with a plain weapon of its type.
     pub fn drop_all(&mut self, id: u16) -> Stock {
         let Some(n) = id.checked_sub(NPC_ID_BASE).and_then(|i| self.npcs.get_mut(i as usize)) else { return Stock::default() };

@@ -2,6 +2,7 @@
 //   - takes over the socket the log-in screen (login.js) opened, asks the server to enter the world, and logs in again if the connection drops
 //   - sends our position at 15 Hz, renders everybody the server reports (interpolated, walk-cycle driven by their speed)
 //   - name tags + chat bubbles over heads, a chat log (Enter), a radar and an online list (Tab)
+import { LootUI } from './lootui.js';
 import * as THREE from 'three';
 import { RACES, AVATAR_HEIGHT, pose } from './avatars.js';
 import { serverUrl, factory } from './net.js';
@@ -113,6 +114,7 @@ export class Multiplayer {
   onCombat(m) {
     const W = this.weapons, now = performance.now() / 1000, p = this.players.get(m.id), at = a => new THREE.Vector3(a[0], a[1], a[2]);
     if (m.t === 'hp') { W.setHp(m.hp, m.max); return true; }
+    if (this.loot?.onMessage(m)) return true;
     if (m.t === 'corpse') { this.addCorpse(m); return true; }
     if (m.t === 'tombstone') { this.addTomb(m); return true; }
     if (m.t === 'looted') { const c = this.corpses.get(m.cid); if (c) { if (c.root) this.scene.remove(c.root); this.corpses.delete(m.cid); } return true; }
@@ -185,7 +187,7 @@ export class Multiplayer {
       av.root.rotation.y = m.yaw + Math.PI; c.root = av.root; c.av = av;
     } catch (e) { console.warn('corpse', e); }
   }
-  /** A body turned into its tombstone (the game's own model, tombstone_player_characters_01): what is still on it is lootable with F. */
+  /** A body turned into its tombstone (the game's own model, tombstone_player_characters_01): what is still on it is lootable with E (js/lootui.js). */
   async addTomb(m) {
     const old = this.corpses.get(m.cid); if (old?.root) this.scene.remove(old.root);   // the body goes
     const c = { root: null, x: m.x, y: m.y, z: m.z, yaw: m.yaw, snap: m.snap, shown: false, gyT: -9, gold: m.gold || 0, units: m.units || 0, tomb: true, name: m.name }; this.corpses.set(m.cid, c);
@@ -218,7 +220,7 @@ export class Multiplayer {
     this.ws.send(b.buffer);
   }
   sendJson(o) { if (this.online && this.ws?.readyState === 1) this.ws.send(JSON.stringify(o)); }
-  bindCombat(weapons, fx, sfx) { this.weapons = weapons; this.fx = fx; this.sfx = sfx; }
+  bindCombat(weapons, fx, sfx) { this.loot = new LootUI({ mp: this, $: this.$ }); this.weapons = weapons; this.fx = fx; this.sfx = sfx; }
   chat(text) { if (this.ws?.readyState === 1 && text.trim()) this.ws.send(JSON.stringify({ t: 'chat', text })); }
 
   // ---------------------------------------------------------------- chat UI
@@ -226,7 +228,7 @@ export class Multiplayer {
     const $ = this.$; this.logEl = $('chatlog'); this.input = $('chatin');
     addEventListener('keydown', e => {
       if (!document.body.classList.contains('playing')) return;
-      if (e.code === 'KeyF' && !e.repeat && !this.typing) { this.lootNearest(); return; }
+      if (e.code === 'KeyE' && !e.repeat && !this.typing && (this.loot?.isOpen || this.loot?.nearest() !== null)) { this.loot.toggle(); return; }
       if (e.code === 'KeyB' && !e.repeat && !this.typing) { this.openShop(); return; }
       if (e.code === 'Tab') { e.preventDefault(); if (!e.repeat) { $('plist').classList.toggle('on'); this.renderList(); } return; }
       if (!this.typing && (e.code === 'Enter' || e.code === 'NumpadEnter') && !e.repeat) { e.preventDefault(); this.openChat(); }
@@ -236,12 +238,6 @@ export class Multiplayer {
       if (e.code === 'Enter' || e.code === 'NumpadEnter') { this.chat(this.input.value); this.closeChat(); }
       else if (e.code === 'Escape') this.closeChat();
     });
-  }
-  /** F: take everything from the nearest body with something on it within reach (the server checks the distance too). */
-  lootNearest() {
-    const cam = this.camera.position; let best = null, bd = 6;
-    for (const [cid, c] of this.corpses) { if (!c.tomb || !(c.gold > 0 || c.units > 0)) continue; const d = Math.hypot(c.x - cam.x, c.z - cam.z); if (d < bd) { bd = d; best = cid; } }
-    if (best !== null) this.sendJson({ t: 'loot', cid: best });
   }
   /** The vendor NPC nearest to us within reach (the server decides in the end), for a trading window. */
   nearestVendor(reach = 8) {

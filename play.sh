@@ -15,7 +15,10 @@
 #
 # Settings (environment): DF_PORT=1337  DF_BIND=127.0.0.1  NPCS=500  PUBLIC_ORIGIN=https://play.example.com  NO_OPEN=1
 # Add --redo to throw away ./export ./converted ./game/data first and make them again.
+#   ./play.sh --make-admin USERNAME           make an account an admin (in ./state/accounts.db), then exit
+#   ./play.sh --set-password USERNAME:NEWPASS reset an account's password, then exit
 set -euo pipefail
+CALLER=$PWD
 cd "$(dirname "$0")"
 ROOT=$PWD
 EXPORTER_URL=https://github.com/ddarbs/darkfall-data-export.git
@@ -25,7 +28,14 @@ die() { printf '\n\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not installed. $2"; }
 
 REDO=0; GAME=${GAME_DATA:-}
-for a in "$@"; do case "$a" in --redo) REDO=1 ;; -h|--help) sed -n 2,17p "$0"; exit 0 ;; *) GAME=$a ;; esac; done
+ACCT=()
+while [ $# -gt 0 ]; do a=$1; shift; case "$a" in
+  --redo) REDO=1 ;;
+  -h|--help) sed -n 2,19p "$0"; exit 0 ;;
+  --make-admin|--set-password) [ $# -gt 0 ] || die "$a needs a value"; ACCT=("$a" "$1"); shift ;;
+  /*) GAME=$a ;;
+  *) GAME=$CALLER/$a ;;
+esac; done
 [ -z "$GAME" ] && [ -f .gamedata ] && GAME=$(cat .gamedata)
 
 need python3 "Install Python 3."
@@ -43,19 +53,21 @@ if [ ! -f darkfall-data-export/sfexport.py ]; then
 fi
 
 # 2 -------------------------------------------------------------------------------------------------------------------
-if [ ! -f export/file.lst ] && [ ! -d export/xml-files ]; then
+if [ ! -f export/.unpacked ]; then
   [ -n "$GAME" ] || die "Where is your copy of the game? Run:  ./play.sh /path/to/game/data
 (the folder that contains dfdata.sfai and dfdata_0000.sfad ...). This project does not include any game files."
   [ -f "$GAME/dfdata.sfai" ] || die "$GAME/dfdata.sfai not found. Point play.sh at the data folder of your own legally obtained copy of the game."
   say "unpacking your game archive into ./export (this takes a while)"
   (cd darkfall-data-export && python3 dfextract_3.py "$GAME" "$ROOT/export")
   printf '%s\n' "$GAME" > .gamedata
+  touch export/.unpacked
 fi
 
 # 3 -------------------------------------------------------------------------------------------------------------------
-if [ ! -d converted/maps ]; then
+if [ ! -f converted/.converted ]; then
   say "converting models, textures, terrain and maps into ./converted (this takes a while)"
   (cd darkfall-data-export && python3 sfexport.py all "$ROOT/export" "$ROOT/converted")
+  touch converted/.converted
 fi
 
 # 4 -------------------------------------------------------------------------------------------------------------------
@@ -72,6 +84,12 @@ if [ -z "$(ls server/data/nav 2>/dev/null)" ]; then
   node game/tools/build_nav.js || echo "nav bake failed, NPCs will run without it"
 fi
 NAV=data/nav; [ -z "$(ls server/data/nav 2>/dev/null)" ] && NAV=none
+
+if [ ${#ACCT[@]} -gt 0 ]; then
+  mkdir -p state
+  (cd server && exec ./target/release/server --accounts "$ROOT/state/accounts.db" --capitals none "${ACCT[@]}")
+  exit $?
+fi
 
 # 6 -------------------------------------------------------------------------------------------------------------------
 PORT=${DF_PORT:-1337}; BIND=${DF_BIND:-127.0.0.1}
