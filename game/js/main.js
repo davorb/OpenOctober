@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { Environment } from './env.js';
 import { Sky } from './sky.js';
-import { WaterFactory, SEA_LEVEL } from './water.js';
+import { WaterFactory, SEA_SURFACE } from './water.js';
 import { TerrainTextures } from './terrain.js';
 import { World } from './world.js';
 import { Music, Ambience } from './music.js';
@@ -82,6 +82,7 @@ const veg = new Vegetation({ scene, env, world, data: vegData, distance: S.grass
 // open ocean everywhere (terrain-only far tiles carry no water plane of their own)
 const ocean = new THREE.Mesh(new THREE.PlaneGeometry(2, 2).rotateX(-Math.PI / 2), water.material('water', { value: 1 }));
 ocean.frustumCulled = false; ocean.renderOrder = 1; ocean.scale.setScalar(VIEW * 1.1); scene.add(ocean);
+ocean.material.uniforms.tSea.value = world.sea.tex; ocean.material.uniforms.uSea.value.set(world.sea.x0, world.sea.z0, world.sea.n);
 
 const music = new Music(musicAreas, env, (title, area) => { const t = $('track'); t.textContent = `♪ ${title}`; t.classList.add('on'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('on'), 9000); });
 const ambience = new Ambience(env);
@@ -203,7 +204,7 @@ function frameInner() {
       const cy = camera.position.y, cx = camera.position.x, cz = camera.position.z, under = world.covered(cx, cy, cz);
       let fh = world.groundHeight(cx, cz, cy);                       // surface below the camera: the cavern floor inside Shoal, not its roof
       if (!(fh > -1e8)) fh = gh;
-      camera.position.y = Math.max(cy, (under ? fh : Math.max(fh, SEA_LEVEL)) + 1.8);
+      camera.position.y = Math.max(cy, (under ? fh : Math.max(fh, world.waterAt(cx, cz, cy))) + 1.8);
     }
   }
   // body and camera: with a weapon drawn (not a staff) the camera orbits behind the player and his own avatar is drawn; sheathed, it is the first-person eye
@@ -231,7 +232,7 @@ function frameInner() {
   updateShadow();
   dyn.count = S.lights; dyn.update(dt, camera);
   sky.update(camera);
-  ocean.position.set(Math.round(camera.position.x / 64) * 64, SEA_LEVEL - 5.0, Math.round(camera.position.z / 64) * 64);
+  ocean.position.set(Math.round(camera.position.x / 64) * 64, SEA_SURFACE, Math.round(camera.position.z / 64) * 64);
   ocean.visible = !world.covered(camera.position.x, camera.position.y, camera.position.z);   // underground (Shoal): the open-sea plane would flood the cavern
 
   world.update(Math.min(raw, 0.5), camera);
@@ -248,7 +249,7 @@ function frameInner() {
   const agl = gh != null ? camera.position.y - gh : 50;
   ambience.update(dt, { y: camera.position.y, agl: Math.max(0, agl), treeDensity: t ? Math.min(1, (t.info.trees || 0) / 450) : 0, riverDist: 1e9, muted: music.muted });
 
-  underAmt += ((ocean.visible && camera.position.y < SEA_LEVEL - 4 ? 1 : 0) - underAmt) * (1 - Math.exp(-dt * 8));
+  underAmt += ((camera.position.y < world.waterAt(camera.position.x, camera.position.z, camera.position.y) ? 1 : 0) - underAmt) * (1 - Math.exp(-dt * 8));
   renderer.info.reset();
   post.setGrade(env.moodMix(), env.todMix());  post.render(scene, camera, { sunDir: env.u.uSunDir.value, sunColor: env.u.uSunColor.value, daylight: env.state.daylight ?? 1, under: underAmt, time: env.u.uTime.value });
 
