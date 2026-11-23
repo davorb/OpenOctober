@@ -5,19 +5,21 @@
 //
 // Inputs (converted/maps): <tile>_empty.glb = terrain only, <tile>.glb / <tile>_full.glb = the placed objects of the tile (same choice as the viewer).
 // Output per tile (little endian):
-//   "DNAV" u32 version=1 | i32 x0 | i32 z0 (tile corner, wire space: the viewer's three.js x / z) | u16 G=256 | u16 N=512
+//   "DNAV" u32 version=2 | i32 x0 | i32 z0 (tile corner, wire space: the viewer's three.js x / z) | u16 G=256 | u16 N=512
 //   heights  (G+1)^2 u16, row-major by z then x, 4 m spacing, value = (h + 500) * 20 (so 5 cm steps)
-//   flags    N*N u8,      row-major by z then x, 2 m cells: 1 = too steep, 2 = water, 4 = wall of a solid object at body height
+//   hazards  after the flags: u32 count, then per cell u16 cell x, u16 cell z, u16 surface (same scale as heights), u16 kind (1 lava, 2 acid, 3 tar)
+//   flags    N*N u8,      row-major by z then x, 2 m cells: 1 = too steep, 2 = liquid too deep to wade (from the placed liquid meshes) or harmful, 4 = wall of a solid object at body height
 // Terrain heights are rasterised from the terrain triangles exactly like game/js/terrain-worker.js (4 m grid, topmost surface).
 // Walls are the near-vertical triangles of solid objects (same solid/alpha-tested decision as World._shaderIsSolid) whose vertical span
 // overlaps the band between 0.6 m and 3 m above the ground. Floors, roofs, trees (alpha-tested leaves) and tree trunks are not obstacles here.
 const fs = require('fs'), path = require('path');
+const { SEA_SURFACE, newGrid, addTriangle, isBlocked } = require('./liquids');
 
 const root = path.resolve(__dirname, '../..');
 const MAPS = path.join(root, 'converted', 'maps'), OUT = path.join(root, 'server', 'data', 'nav');
 const DATA = path.join(root, 'game', 'data');
 const G = 256, N = 512, CELL = 1024 / N, W = G + 1;
-const SEA_LEVEL = 215, MAX_SLOPE = 1.2, BODY_LO = 0.6, BODY_HI = 3.0;
+const MAX_SLOPE = 1.2, BODY_LO = 0.6, BODY_HI = 3.0;
 const F_STEEP = 1, F_WATER = 2, F_WALL = 4;
 
 const alpha = JSON.parse(fs.readFileSync(path.join(DATA, 'alphamode.json'), 'utf8'));
@@ -117,39 +119,43 @@ function rotate(q, v, out) {
 
 function bakeTile(name, tile, useFull) {
   const { hg } = terrainHeights(path.join(MAPS, name + '_empty.glb'));
-  let land = 0; for (const h of hg) if (h > SEA_LEVEL - 1) land++;
-  if (land < 4) return null; // open sea
+  const liquids = tile.liquids || {}, border = tile.zone === 'border', sea = border || Object.keys(liquids).some(n => /water_level_textured|waterplain_coast/.test(n));
+  let land = 0; for (const h of hg) if (h > SEA_SURFACE - 1) land++;
+  if (sea && land < 4) return null; // open sea
   const x0 = tile.x0, z0 = -tile.z1; // wire space: the viewer's z is the game's z negated
   const flags = new Uint8Array(N * N);
-  // terrain: too steep, too deep to wade
+  // terrain: too steep
   for (let cz = 0; cz < N; cz++) for (let cx = 0; cx < N; cx++) {
     const lx = (cx + 0.5) * CELL, lz = (cz + 0.5) * CELL, h = heightAt(hg, lx, lz);
     const dx = (heightAt(hg, lx + CELL, lz) - heightAt(hg, lx - CELL, lz)) / (2 * CELL), dz = (heightAt(hg, lx, lz + CELL) - heightAt(hg, lx, lz - CELL)) / (2 * CELL);
     let f = 0;
     if (Math.hypot(dx, dz) > MAX_SLOPE) f |= F_STEEP;
-    if (h < SEA_LEVEL - 1.0) f |= F_WATER;
     flags[cz * N + cx] = f;
   }
   // solid objects: wall triangles at body height
   const file = path.join(MAPS, name + (useFull ? '_full' : '') + '.glb');
   let walls = 0;
+  const liquid = newGrid(N, CELL, x0, z0);
+  if (border) liquid.water.fill(SEA_SURFACE);
   if (fs.existsSync(file)) {
     const { json, acc } = readGlb(file), meshes = new Map(), q = [0, 0, 0], v = [0, 0, 0];
-    const prims = mi => {
-      let r = meshes.get(mi); if (r) return r; r = [];
+    const prims = (mi, all) => {
+      const key = all ? 'L' + mi : mi;
+      let r = meshes.get(key); if (r) return r; r = [];
       for (const p of json.meshes[mi].primitives) {
         const m = json.materials?.[p.material], mode = m?.alphaMode;
-        if ((mode === 'MASK' || mode === 'BLEND') && !shaderIsSolid(m?.name)) continue; // foliage, banners, glass: not an obstacle
+        if (!all && (mode === 'MASK' || mode === 'BLEND') && !shaderIsSolid(m?.name)) continue; // foliage, banners, glass: not an obstacle
         if (p.mode !== undefined && p.mode !== 4) continue;
         r.push({ P: acc(p.attributes.POSITION), ix: p.indices !== undefined ? acc(p.indices) : null });
       }
-      meshes.set(mi, r); return r;
+      meshes.set(key, r); return r;
     };
     const tri = new Float64Array(9);
     for (const node of json.nodes) {
       if (node.mesh === undefined) continue;
       const t = node.translation || [0, 0, 0], r = node.rotation || [0, 0, 0, 1], sc = node.scale || [1, 1, 1];
-      for (const { P, ix } of prims(node.mesh)) {
+      const type = liquids[(node.name || '').split('.xml')[0]];
+      for (const { P, ix } of prims(node.mesh, !!type)) {
         const n = ix ? ix.length : P.length / 3;
         for (let k = 0; k < n; k += 3) {
           for (let c = 0; c < 3; c++) {
@@ -158,6 +164,7 @@ function bakeTile(name, tile, useFull) {
             rotate(r, v, q);
             tri[c * 3] = q[0] + t[0]; tri[c * 3 + 1] = q[1] + t[1]; tri[c * 3 + 2] = q[2] + t[2];
           }
+          if (type) { addTriangle(liquid, tri, type); continue; }
           const ux = tri[3] - tri[0], uy = tri[4] - tri[1], uz = tri[5] - tri[2], wx = tri[6] - tri[0], wy = tri[7] - tri[1], wz = tri[8] - tri[2];
           const nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx, len = Math.hypot(nx, ny, nz);
           if (len < 1e-9 || Math.abs(ny) / len > 0.6) continue; // floors, roofs and gentle slopes are walkable surfaces, not walls
@@ -166,11 +173,15 @@ function bakeTile(name, tile, useFull) {
       }
     }
   }
+  for (let k = 0; k < N * N; k++) if (isBlocked(liquid, k, heightAt(hg, (k % N + 0.5) * CELL, (Math.floor(k / N) + 0.5) * CELL))) flags[k] |= F_WATER;
+  const q16 = h => Math.max(0, Math.min(65535, Math.round((h + 500) * 20)));
+  const haz = Buffer.alloc(4 + liquid.hazard.size * 8); haz.writeUInt32LE(liquid.hazard.size, 0);
+  let o = 4; for (const [k, { y, kind }] of liquid.hazard) { for (const v of [k % N, Math.floor(k / N), q16(y), kind]) { haz.writeUInt16LE(v, o); o += 2; } }
   // file
-  const head = Buffer.alloc(20); head.write('DNAV', 0); head.writeUInt32LE(1, 4); head.writeInt32LE(x0, 8); head.writeInt32LE(z0, 12); head.writeUInt16LE(G, 16); head.writeUInt16LE(N, 18);
-  const hq = new Uint16Array(W * W); for (let i = 0; i < hq.length; i++) hq[i] = Math.max(0, Math.min(65535, Math.round((hg[i] + 500) * 20)));
+  const head = Buffer.alloc(20); head.write('DNAV', 0); head.writeUInt32LE(2, 4); head.writeInt32LE(x0, 8); head.writeInt32LE(z0, 12); head.writeUInt16LE(G, 16); head.writeUInt16LE(N, 18);
+  const hq = new Uint16Array(W * W); for (let i = 0; i < hq.length; i++) hq[i] = q16(hg[i]);
   const blocked = flags.reduce((a, f) => a + (f ? 1 : 0), 0);
-  return { buf: Buffer.concat([head, Buffer.from(hq.buffer), Buffer.from(flags.buffer)]), stats: { walls, blocked, cells: N * N } };
+  return { buf: Buffer.concat([head, Buffer.from(hq.buffer), Buffer.from(flags.buffer), haz]), stats: { walls, blocked, cells: N * N } };
 }
 
 const world = JSON.parse(fs.readFileSync(path.join(DATA, 'world.json'), 'utf8'));

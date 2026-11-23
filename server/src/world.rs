@@ -33,7 +33,7 @@ pub struct Config {
     pub capitals: Option<String>,
     /// Seed of the NPC population.
     pub npc_seed: u32,
-    /// Directory of baked nav tiles (`game/tools/build_nav.js` writes `server/data/nav`); `None` = NPCs ignore terrain and walk straight lines.
+    /// Directory of baked nav tiles (`game/tools/build_nav.js` writes `server/data/nav`); `None` = NPCs ignore terrain and walk straight lines, and harmful liquids do nothing.
     pub nav: Option<String>,
     /// `game/data/items.json` and `vendors.json`: the goods and the shopkeepers (from `tools/build_items.js` / `build_vendors.js`); without both there is no trade.
     pub items: Option<String>,
@@ -171,6 +171,8 @@ const LOGOUT_STILL_SPEED: f32 = 0.3;
 /// Seconds a dead player lies there before he gets up (a Respawn message may bring it forward after DOWN_MIN).
 const DOWN_SECS: f32 = 6.0;
 const DOWN_MIN: f32 = 2.5;
+/// Attacker id (as a mob) of hits nobody dealt.
+const NO_ATTACKER: u16 = u16::MAX;
 
 struct Player {
     info: PlayerInfo,
@@ -281,13 +283,13 @@ pub async fn run(cfg: Config, mut rx: mpsc::Receiver<Cmd>) {
     npcs.loot_secs = cfg.loot_secs;
     npcs.equip_all(&weapons); // armed first: only an armed NPC thinks of hunting
     npcs.set_grounds(mobs.grounds());
-    if let (Some(dir), false) = (&cfg.nav, npcs.npcs.is_empty()) {
+    if let Some(dir) = &cfg.nav {
         match Nav::open(dir) {
             Ok(nav) => {
                 println!("nav: {} tiles", nav.tile_count());
                 npcs.nav = Some(nav);
             }
-            Err(e) => eprintln!("no nav (npcs walk straight lines): {e}"),
+            Err(e) => eprintln!("no nav (npcs walk straight lines, lava and acid do not hurt): {e}"),
         }
     }
     let store = match (&cfg.db, npcs.npcs.is_empty()) {
@@ -662,17 +664,31 @@ impl World {
 
     /// Apply a blow to player `vid`: blocking, hit points, death. `from` is where it came from (for the block test), `by` the attacker (id, is a mob).
     fn hurt_player(&mut self, vid: u16, dmg: f32, by: (u16, bool), grp: &str, from: (f32, f32)) {
-        let now = Instant::now();
+        let Some(Some(p)) = self.players.get(vid as usize) else { return };
+        let blocked = p.blocking && blocks(p.pos.yaw, (p.pos.x, p.pos.z), from);
+        let dmg = if blocked { (dmg * BLOCK_FACTOR).round().max(1.0) } else { dmg };
+        self.wound_player(vid, dmg, by, grp, blocked);
+    }
+
+    /// Once a second: players standing or swimming in lava, acid or tar lose hit points.
+    fn burn_players(&mut self) {
+        let Some(nav) = &self.npcs.nav else { return };
+        let burning: Vec<(u16, crate::nav::Hazard)> = self.players.iter().flatten().filter(|p| p.has_pos && p.down_until.is_none() && p.pos.flags & (FLAG_FLY | FLAG_SNAP) == 0).filter_map(|p| Some((p.info.id, nav.hazard(p.pos.x, p.pos.y, p.pos.z)?))).collect();
+        for (id, h) in burning {
+            let (dmg, grp) = hazard_damage(h);
+            self.wound_player(id, dmg, (NO_ATTACKER, true), grp, false);
+        }
+    }
+
+    fn wound_player(&mut self, vid: u16, dmg: f32, by: (u16, bool), grp: &str, blocked: bool) {
         let Some(Some(p)) = self.players.get_mut(vid as usize) else { return };
         if p.down_until.is_some() {
             return;
         }
-        let blocked = p.blocking && blocks(p.pos.yaw, (p.pos.x, p.pos.z), from);
-        let dmg = if blocked { (dmg * BLOCK_FACTOR).round().max(1.0) } else { dmg };
         p.hp = (p.hp - dmg).max(0.0);
         let killed = p.hp <= 0.0;
         if killed {
-            p.down_until = Some(now + Duration::from_secs_f32(DOWN_SECS));
+            p.down_until = Some(Instant::now() + Duration::from_secs_f32(DOWN_SECS));
             p.blocking = false;
         }
         let interrupted = p.looting.map(|l| l.0);
@@ -1565,6 +1581,9 @@ impl World {
         self.tick = self.tick.wrapping_add(1);
         self.age_players(Instant::now());
         self.combat(1.0 / self.cfg.tick_hz as f32);
+        if self.tick % self.cfg.tick_hz == 0 {
+            self.burn_players();
+        }
         let watchers: Vec<(f32, f32)> = self.players.iter().flatten().filter(|p| p.has_pos).map(|p| (p.pos.x, p.pos.z)).collect();
         self.stats.lod = self.npcs.step(1.0 / self.cfg.tick_hz as f32, &watchers, self.cfg.radius);
         // NPCs that just came into view show what they hold; those that got up again are announced to everybody

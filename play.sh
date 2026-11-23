@@ -79,7 +79,8 @@ fi
 # 5 -------------------------------------------------------------------------------------------------------------------
 say "building the game server"
 (cd server && cargo build --release --bin server)
-if [ -z "$(ls server/data/nav 2>/dev/null)" ]; then
+# byte 4 of a baked tile is the format version (VERSION in server/src/nav.rs)
+if [ "$(cat server/data/nav/u19.nav 2>/dev/null | head -c 5 | tail -c 1 | od -An -tu1 | tr -d " ")" != 2 ]; then
   say "baking NPC navigation grids (once, a few minutes, ~280 MB)"
   node game/tools/build_nav.js || echo "nav bake failed, NPCs will run without it"
 fi
