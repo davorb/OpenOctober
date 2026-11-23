@@ -29,7 +29,9 @@ const MAXF_DEEP = 48, N = Math.min(maxLen, files[0].d.length);
 function solve() {
   const ks = new Uint8Array(N), prev = new Uint8Array(files.length), prev2 = new Uint8Array(files.length), score = new Float64Array(256);
   for (let i = 0; i < HEADER.length; i++) ks[i] = files[0].d[i] ^ HEADER[i];
-  prev.fill(HEADER.length ? HEADER[HEADER.length - 1] : 10); prev2.fill(HEADER.length > 1 ? HEADER[HEADER.length - 2] : 10);
+  // only files[0] is known to start with HEADER; every file's own context follows from the stream bytes that pins down
+  const H = HEADER.length;
+  files.forEach(({ d }, f) => { prev[f] = H > 0 && d.length >= H ? d[H - 1] ^ ks[H - 1] : 10; prev2[f] = H > 1 && d.length >= H ? d[H - 2] ^ ks[H - 2] : 10; });
   for (let i = HEADER.length; i < N; i++) {
     score.fill(0);
     const lim = 1e9; let n = 0;
