@@ -14,8 +14,9 @@ if (!fs.existsSync(path.join(EXPORT, 'xml-files')) || !fs.existsSync(path.join(E
   process.exit(1);
 }
 fs.mkdirSync(K.dir, { recursive: true });
-// nearly every file starts like this, which pins down the first bytes where there is too little text to go on
-const XML_HEAD = '<?xml version=\\"1.0\\" encoding=\\"UTF-8\\" standalone=\\"yes\\"?>\\r\\n';
+// the longest file starts like this, which pins down the first bytes where there is too little text to go on. It stops at the value of
+// standalone, which is "yes" or "no" depending on the copy of the game: a wrong guess corrupts the next ~60 bytes of nearly every file.
+const XML_HEAD = '<?xml version=\\"1.0\\" encoding=\\"UTF-8\\" standalone=\\"';
 const run = (file, ...a) => {
   const r = spawnSync(process.execPath, [path.join(__dirname, file), ...a], { stdio: ['ignore', 'ignore', 'inherit'], maxBuffer: 1 << 28 });
   if (r.status !== 0) { console.error(`${file} failed (${r.status})`); process.exit(1); }
