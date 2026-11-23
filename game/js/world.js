@@ -6,9 +6,9 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { buildTerrain } from './terrain.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { kindOf } from './water.js';
+import { kindOf, SEA_SURFACE } from './water.js';
 import { fogUniforms, fogFn } from './chunks.js';
-import { newColl, addCollision, finishColl } from './collision.js';
+import { newColl, addCollision, surfacesAt, finishColl } from './collision.js';
 
 const OBJ_DIR = '/converted/maps/';
 
@@ -24,10 +24,12 @@ export class World {
       // game (x, z) -> three (x, -z)
       this.tiles.set(name, { name, info: t, display: names[name] || name,
         rect: { x0: t.x0, x1: t.x1, z0: -t.z1, z1: -t.z0 }, hasTerrain: t.empty > 0, hasObjects: t.base > 330000,
-        hasWater: !!t.liquids, tState: 0, oState: 0, terrain: null, objects: null, fade: { value: 0 }, fadeO: { value: 0 }, heights: null, dist: 1e9,
+        hasWater: !!t.liquids, sea: t.zone === 'border' || Object.keys(t.liquids || {}).some(n => /water_level_textured|waterplain_coast/.test(n)), liquid: null, tState: 0, oState: 0, terrain: null, objects: null, fade: { value: 0 }, fadeO: { value: 0 }, heights: null, dist: 1e9,
         lights: props[name]?.l?.length ? new Float32Array(props[name].l) : null, trees: props[name]?.t?.length ? new Float32Array(props[name].t) : null, coll: null });
     }
     this.byXZ = new Map(); for (const t of this.tiles.values()) this.byXZ.set(Math.round(t.rect.x0 / 1024) + ',' + Math.round(t.rect.z0 / 1024), t);
+    const SN = 36; this.sea = { x0: -SN * 512, z0: -SN * 512, n: SN, data: new Uint8Array(SN * SN).fill(255) };   // visibility of the open-ocean plane per tile
+    this.sea.tex = new THREE.DataTexture(this.sea.data, SN, SN, THREE.RedFormat); this.sea.tex.needsUpdate = true;
     this.workers = Array.from({ length: this.opts.workers }, () => ({ w: new Worker('/js/terrain-worker.js'), busy: null }));
     this.workers.forEach(wk => { wk.w.onmessage = e => this._terrainDone(wk, e.data); });
     this.qT = []; this.qM = []; this.meshBusy = false; this.objBusy = false; this.gltf = new GLTFLoader();
@@ -67,6 +69,33 @@ export class World {
     return false;
   }
 
+  // Highest liquid surface at (x, z) with no terrain between it and y; -1e9 if none. Until a tile's objects are streamed in, its sea plane is assumed.
+  waterAt(x, z, y) {
+    const t = this.tileAt(x, z); let best = -1e9;
+    if (!t) return SEA_SURFACE;
+    const ys = t.liquid ? surfacesAt(t.liquid, x, z) : [];
+    if (t.sea && (!t.liquid || t.info.zone === 'border')) ys.push(SEA_SURFACE);
+    for (const s of ys) if (s > best && !this._roofBetween(t, x, z, y, s)) best = s;
+    return best;
+  }
+  _roofBetween(t, x, z, y0, y1) {
+    if (!t.layers) return false;
+    const i0 = this._layerIndex(t, x, z);
+    for (let i = 0; i < 6; i++) { const v = t.layers[i0 + i]; if (v > y0 + 3 && v < y1) return true; }
+    return false;
+  }
+  _layerIndex(t, x, z) { return (Math.round((z - t.rect.z0) / 4) * 257 + Math.round((x - t.rect.x0) / 4)) * 6; }
+  // The open-ocean plane stands in for tiles whose own sea plane is not loaded, and stays out of tiles that have no sea.
+  _updateSea() {
+    const { data, n, x0, z0, tex } = this.sea; let dirty = false;
+    for (const t of this.tiles.values()) {
+      const k = Math.round((t.rect.z0 - z0) / 1024) * n + Math.round((t.rect.x0 - x0) / 1024);
+      const v = !t.sea ? 0 : t.info.zone === 'border' ? 255 : Math.round(255 * (1 - t.fadeO.value));
+      if (data[k] !== v) { data[k] = v; dirty = true; }
+    }
+    if (dirty) tex.needsUpdate = true;
+  }
+
   rectDist(t, x, z) { const r = t.rect, dx = Math.max(r.x0 - x, 0, x - r.x1), dz = Math.max(r.z0 - z, 0, z - r.z1); return Math.hypot(dx, dz); }
 
   update(dt, cam) {
@@ -75,6 +104,7 @@ export class World {
       if (t.terrain && t.fade.value < 1) t.fade.value = Math.min(1, t.fade.value + dt / 1.6);
       if (t.objects && t.fadeO.value < 1) t.fadeO.value = Math.min(1, t.fadeO.value + dt / 1.2);
     }
+    this._updateSea();
     this.timer -= dt; if (this.timer > 0) { this._pump(); return; }
     this.timer = 0.2;
     const { terrainRadius: TR, objectRadius: OR } = this.opts;
@@ -226,7 +256,7 @@ export class World {
       const seen = new Map();
       root.traverse(o => {
         if (!o.isMesh) return;
-        o.matrixAutoUpdate = false;
+        o.updateMatrix(); o.matrixAutoUpdate = false;   // compose first: a single-primitive object is its own node and carries the placement
         let top = o; while (top.parent && top.parent !== root) top = top.parent;
         if (top.userData.liquid) { o.material = this.water.material(kindOf(top.userData.liquid), t.fadeO); this.water.bind(o.material, t); o.renderOrder = 2; return; }
         const mats = Array.isArray(o.material) ? o.material : [o.material], out = [];
@@ -247,7 +277,7 @@ export class World {
   }
   // One draw call per material per tile instead of one per placed object
   _mergeStatic(root, tile) {
-    const coll = newColl(tile), buckets = new Map(), keep = [];
+    const coll = newColl(tile), liquid = newColl(tile), buckets = new Map(), keep = [];
     root.traverse(o => {
       if (!o.isMesh) return;
       if (o.material.userData?.water || Array.isArray(o.material) || o.material.vertexColors || !o.geometry.attributes.position) { keep.push(o); return; }
@@ -262,6 +292,7 @@ export class World {
     });
     // detach everything, then add merged meshes + untouched ones
     const kept = keep.map(o => ({ o, m: o.matrixWorld.clone() }));
+    for (const { o, m } of kept) if (o.material.userData?.water) { const g = o.geometry.clone().applyMatrix4(m); addCollision(liquid, g); g.dispose(); }
     root.clear();
     for (const [mat, geos] of buckets) {
       const idx = geos.filter(g => g.index).length;
@@ -272,7 +303,7 @@ export class World {
       if (!mat.alphaTest && !mat.transparent) addCollision(coll, merged);
       for (const g of geos) g.dispose();
     }
-    finishColl(coll); tile.coll = coll;
+    finishColl(coll); tile.coll = coll; finishColl(liquid, Infinity); tile.liquid = liquid;
     for (const { o, m } of kept) { root.add(o); o.matrix.copy(m); o.matrixAutoUpdate = false; o.matrixWorld.copy(m); }
   }
   _sharedTexture(tex, assoc, json, t) {
@@ -291,6 +322,6 @@ export class World {
   _dropObjects(t) {
     if (t.objects) { this.sceneObjects.remove(t.objects); this._disposeScene(t.objects); t.objects = null; }
     for (const u of t.uris || []) { const e = this.texCache.get(u); if (e && --e.refs <= 0) { e.tex.dispose(); this.texCache.delete(u); } }
-    t.uris = []; t.oState = 0; t.fadeO.value = 0; t.coll = null;
+    t.uris = []; t.oState = 0; t.fadeO.value = 0; t.coll = null; t.liquid = null;
   }
 }

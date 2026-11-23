@@ -5,6 +5,7 @@ import { DDSLoader } from 'three/addons/loaders/DDSLoader.js';
 import { fogUniforms, fogFn } from './chunks.js';
 
 export const SEA_LEVEL = 215;   // SFDarkfallConfig.DARKFALL_SEA_LEVEL
+export const SEA_SURFACE = 214.84;   // height of the game's sea planes (water_level_textured, terrain_*_waterplain_coast)
 
 const vs = `
 varying vec3 vWorld; varying vec3 vView;
@@ -15,6 +16,7 @@ ${fogUniforms}${fogFn}
 uniform sampler2D tNormal; uniform float uTime; uniform float uFade; uniform vec3 uSunDir; uniform vec3 uAmbSky; uniform vec3 uZenith;
 uniform sampler2D tDepth; uniform vec3 uRect;   // per-tile terrain height grid (x0, z0, has) -> real water depth
 uniform vec3 uShallow; uniform vec3 uDeep; uniform vec3 uScatter; uniform float uWave; uniform float uOpacity; uniform float uKind; uniform vec3 uWind;
+uniform sampler2D tSea; uniform vec3 uSea;   // open-ocean plane only: how visible it is per 1 km tile (x0, z0, tiles per side; 0 tiles = not the ocean plane)
 varying vec3 vWorld; varying vec3 vView;
 // 4 Gerstner components, constants from the game's shader
 const vec4 GAmp = vec4(0.05, 0.076, 0.063, 0.47);
@@ -35,6 +37,12 @@ vec3 gerstnerNormal(vec2 p, float t) {
   return normalize(vec3(-g.x * uWave * 1.1, 1.0, -g.y * uWave * 1.1));
 }
 void main() {
+  float sea = 1.0;
+  if (uSea.z > 0.5) {
+    vec2 su = (vWorld.xz - uSea.xy) / (1024.0 * uSea.z);
+    if (all(greaterThanEqual(su, vec2(0.0))) && all(lessThan(su, vec2(1.0)))) sea = texture2D(tSea, su).r;
+    if (sea <= 0.0) discard;
+  }
   vec3 V = normalize(-vView);                       // view space; bring normal to view space below
   vec2 wp = vWorld.xz;
   vec3 N = gerstnerNormal(wp, uTime);
@@ -88,7 +96,7 @@ void main() {
     col = mix(col, uShallow * (1.2 + f * 2.0), 0.85); alpha = 1.0;
   }
   col = dfFog(col, vView, uFade);
-  gl_FragColor = vec4(col, alpha * mix(0.0, 1.0, uFade));
+  gl_FragColor = vec4(col, alpha * uFade * sea);
   #include <colorspace_fragment>
 }`;
 
@@ -114,7 +122,7 @@ export class WaterFactory {
       vertexShader: vs, fragmentShader: fs, transparent: true, depthWrite: false, side: THREE.DoubleSide,
       uniforms: { ...this.env.u, tNormal: { value: this.normal }, uFade: fade || { value: 1 }, uZenith: this.zenith,
         uShallow: { value: new THREE.Color(...k.shallow) }, uDeep: { value: new THREE.Color(...k.deep) }, uScatter: { value: new THREE.Color(0.05, 0.45, 0.42) },
-        tDepth: { value: this.blank }, uRect: { value: new THREE.Vector3() }, uWave: { value: k.wave }, uOpacity: { value: k.op }, uKind: { value: k.kind } },
+        tDepth: { value: this.blank }, uRect: { value: new THREE.Vector3() }, tSea: { value: this.blank }, uSea: { value: new THREE.Vector3() }, uWave: { value: k.wave }, uOpacity: { value: k.op }, uKind: { value: k.kind } },
     });
     m.userData.water = true; return m;
   }

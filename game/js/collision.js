@@ -3,7 +3,6 @@
 //  - statics  : per-tile triangle grid (8 m cells) built from the merged object geometry (solid materials only)
 //  - trees    : trunk cylinders from the level placements (leaf-card meshes are alpha-tested, so they are skipped above)
 import * as THREE from "three";
-import { SEA_LEVEL } from "./water.js";
 
 // The architecture is ~1.5-2x human scale (benches have 0.5 m seats, house doors are ~3.7 m), so the player is scaled up to match.
 // Base values: r_Player Races in gamelogicinfo/creaturemovementspeedlist.xml (walk 2.5, run 3.7, sprint 5.5 m/s) and worldconfig camera offset 1.54.
@@ -61,7 +60,7 @@ export function addCollision(coll, geo) {
 }
 const cellOf = (coll, v, o) =>
   Math.max(0, Math.min(N - 1, Math.floor((v - o) / CELL)));
-export function finishColl(coll) {
+export function finishColl(coll, maxCells = 160) {
   const A = (coll.f32 = new Float32Array(coll.tris));
   coll.tris = null;
   const T = A.length / 9;
@@ -77,7 +76,7 @@ export function finishColl(coll) {
       x1 = cellOf(coll, maxx, coll.x0),
       z0 = cellOf(coll, minz, coll.z0),
       z1 = cellOf(coll, maxz, coll.z0);
-    if ((x1 - x0 + 1) * (z1 - z0 + 1) > 160) {
+    if ((x1 - x0 + 1) * (z1 - z0 + 1) > maxCells) {
       range[t * 4] = -1;
       continue;
     } // huge slabs: terrain handles those
@@ -104,6 +103,32 @@ export function finishColl(coll) {
 function cellRange(coll, x, z) {
   const k = cellOf(coll, z, coll.z0) * N + cellOf(coll, x, coll.x0);
   return [coll.start[k], coll.start[k + 1]];
+}
+
+// heights of the near-horizontal triangles of a collision set under/over (x, z), in no particular order
+export function surfacesAt(coll, x, z, out = []) {
+  const [r0, r1] = cellRange(coll, x, z),
+    A = coll.f32;
+  for (let q = r0; q < r1; q++) {
+    const i = coll.list[q] * 9,
+      ax = A[i],
+      ay = A[i + 1],
+      az = A[i + 2],
+      bx = A[i + 3] - ax,
+      by = A[i + 4] - ay,
+      bz = A[i + 5] - az,
+      cx = A[i + 6] - ax,
+      cy = A[i + 7] - ay,
+      cz = A[i + 8] - az;
+    const ny = bz * cx - bx * cz;
+    if (Math.abs(ny) < 0.9 * Math.hypot(by * cz - bz * cy, ny, bx * cy - by * cx) || ny === 0) continue; // waterfalls are not swimmable
+    const px = x - ax,
+      pz = z - az,
+      u = (pz * cx - px * cz) / ny,
+      v = (bz * px - bx * pz) / ny;
+    if (u >= -1e-4 && v >= -1e-4 && u + v <= 1.0001) out.push(ay + by * u + cy * v);
+  }
+  return out;
 }
 
 const tmp = new THREE.Vector3();
@@ -349,14 +374,15 @@ export class Player {
       fl = p.y = f > -1e8 ? f : th;
       this.vy = 0;
     } // pushed below the surface: pop back up to the nearest floor
-    const water = SEA_LEVEL - 0.2;
+    const water = w.waterAt(p.x, p.z, p.y + this.eye);
+    const floatY = water - 1.2 * PLAYER_SCALE;
     this.swim =
-      fl < water - 1.3 * PLAYER_SCALE &&
       fl > -1e8 &&
-      !w.covered(p.x, p.y + this.eye, p.z); // no swimming up through a cavern roof
+      fl < water - 1.3 * PLAYER_SCALE &&
+      p.y < floatY + (this.swim ? 0.5 : 0.05); // in the water, not falling towards it
     if (this.swim) {
       this.vy = 0;
-      p.y += (water - 1.2 * PLAYER_SCALE - p.y) * Math.min(1, dt * 5);
+      p.y += (floatY - p.y) * Math.min(1, dt * 5);
       this.onGround = false;
     } else {
       this.vy -= 9.81 * dt;
