@@ -17,7 +17,8 @@ fi
 echo "[df] building server"
 cargo build --release --bin server || { echo "[df] build failed"; exit 1; }
 
-if [ -z "$(ls data/nav 2>/dev/null)" ] && [ -d ../converted ]; then
+# byte 4 of a baked tile is the format version (VERSION in server/src/nav.rs)
+if [ "$(cat data/nav/u19.nav 2>/dev/null | head -c 5 | tail -c 1 | od -An -tu1 | tr -d " ")" != 2 ] && [ -d ../converted ]; then
   echo "[df] baking nav data (once, a few minutes)"
   node ../game/tools/build_nav.js || echo "[df] nav bake failed, NPCs will run without it"
 fi

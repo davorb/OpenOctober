@@ -13,6 +13,8 @@ use std::sync::Arc;
 pub const F_STEEP: u8 = 1;
 pub const F_WATER: u8 = 2;
 pub const F_WALL: u8 = 4;
+/// Version of the baked files (`build_nav.js`); older bakes are refused.
+pub const VERSION: u32 = 2;
 pub const BLOCKED: u8 = 0xFF;
 
 const TILE: f32 = 1024.0;
@@ -22,11 +24,23 @@ const W: usize = G + 1;
 pub const CELL: f32 = TILE / N as f32;
 const HEADER: usize = 20;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hazard {
+    Lava,
+    Acid,
+    Tar,
+}
+
+/// How far below the surface of a harmful liquid it still counts: a swimmer's feet hang 1.8 m down, caves further below are safe.
+const HAZARD_DEPTH: f32 = 5.0;
+
 pub struct NavTile {
     pub x0: i32,
     pub z0: i32,
     heights: Vec<u16>,
     flags: Vec<u8>,
+    /// Cell index -> surface height and kind of the harmful liquid there.
+    hazards: HashMap<u32, (f32, Hazard)>,
     /// Connected region of every free cell (0 = blocked, regions count from 1) and whether that region touches the tile's border. A region that
     /// does not is closed: nothing outside it can be reached from inside it, which `find_path` knows without searching.
     comp: Vec<u32>,
@@ -77,14 +91,34 @@ fn label(flags: &[u8]) -> (Vec<u32>, Vec<bool>) {
 impl NavTile {
     /// Parse a baked file.
     pub fn parse(b: &[u8]) -> Result<NavTile, String> {
-        if b.len() != HEADER + W * W * 2 + N * N || &b[0..4] != b"DNAV" || u32::from_le_bytes(b[4..8].try_into().unwrap()) != 1 {
-            return Err("not a v1 nav tile".into());
+        const FLAGS_END: usize = HEADER + W * W * 2 + N * N;
+        if b.len() < FLAGS_END + 4 || &b[0..4] != b"DNAV" || u32::from_le_bytes(b[4..8].try_into().unwrap()) != VERSION {
+            return Err(format!("not a v{VERSION} nav tile"));
+        }
+        let count = u32::from_le_bytes(b[FLAGS_END..FLAGS_END + 4].try_into().unwrap()) as usize;
+        if (b.len() - FLAGS_END - 4) / 8 != count || (b.len() - FLAGS_END - 4) % 8 != 0 {
+            return Err("truncated nav tile".into());
+        }
+        let mut hazards = HashMap::with_capacity(count);
+        for c in b[FLAGS_END + 4..].chunks_exact(8) {
+            let u = |i: usize| u16::from_le_bytes([c[i], c[i + 1]]);
+            let (x, z) = (u(0) as usize, u(2) as usize);
+            let kind = match u(6) {
+                1 => Hazard::Lava,
+                2 => Hazard::Acid,
+                3 => Hazard::Tar,
+                k => return Err(format!("unknown hazard {k}")),
+            };
+            if x >= N || z >= N {
+                return Err("hazard outside the tile".into());
+            }
+            hazards.insert((z * N + x) as u32, (u(4) as f32 / 20.0 - 500.0, kind));
         }
         let i32_at = |o: usize| i32::from_le_bytes(b[o..o + 4].try_into().unwrap());
         let heights = b[HEADER..HEADER + W * W * 2].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        let flags = b[HEADER + W * W * 2..].to_vec();
+        let flags = b[HEADER + W * W * 2..FLAGS_END].to_vec();
         let (comp, closed) = label(&flags);
-        Ok(NavTile { x0: i32_at(8), z0: i32_at(12), heights, flags, comp, closed })
+        Ok(NavTile { x0: i32_at(8), z0: i32_at(12), heights, flags, hazards, comp, closed })
     }
 
     /// A tile of flat ground at `height` with the given blocked cells (local cell x, z, flag); for tests.
@@ -94,7 +128,7 @@ impl NavTile {
             flags[z * N + x] = f;
         }
         let (comp, closed) = label(&flags);
-        NavTile { x0, z0, heights: vec![((height + 500.0) * 20.0) as u16; W * W], flags, comp, closed }
+        NavTile { x0, z0, heights: vec![((height + 500.0) * 20.0) as u16; W * W], flags, hazards: HashMap::new(), comp, closed }
     }
 }
 
@@ -139,6 +173,9 @@ impl Nav {
             let mut head = [0u8; HEADER];
             let ok = std::fs::File::open(&p).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head)).is_ok();
             if ok && &head[0..4] == b"DNAV" {
+                if u32::from_le_bytes(head[4..8].try_into().unwrap()) != VERSION {
+                    return Err(format!("{}: baked by an older game/tools/build_nav.js, run it again", p.display()));
+                }
                 let (x0, z0) = (i32::from_le_bytes(head[8..12].try_into().unwrap()), i32::from_le_bytes(head[12..16].try_into().unwrap()));
                 files.insert((x0.div_euclid(TILE as i32), z0.div_euclid(TILE as i32)), p);
             }
@@ -204,6 +241,14 @@ impl Nav {
         let (tx, tz) = (fx - x0 as f32, fz - z0 as f32);
         let h = |x: usize, z: usize| t.heights[z * W + x] as f32 / 20.0 - 500.0;
         Some((h(x0, z0) * (1.0 - tx) + h(x0 + 1, z0) * tx) * (1.0 - tz) + (h(x0, z0 + 1) * (1.0 - tx) + h(x0 + 1, z0 + 1) * tx) * tz)
+    }
+
+    /// The harmful liquid somebody with his feet at (x, y, z) is standing or swimming in.
+    pub fn hazard(&self, x: f32, y: f32, z: f32) -> Option<Hazard> {
+        let t = self.tile(tile_key(x, z))?;
+        let (cx, cz) = (((x - t.x0 as f32) / CELL) as usize, ((z - t.z0 as f32) / CELL) as usize);
+        let &(surface, kind) = t.hazards.get(&((cz.min(N - 1) * N + cx.min(N - 1)) as u32))?;
+        (y < surface - 0.1 && y > surface - HAZARD_DEPTH).then_some(kind)
     }
 
     fn center(c: (i32, i32)) -> (f32, f32) {

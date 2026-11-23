@@ -17,6 +17,14 @@ pub const BODY_RADIUS: f32 = 0.55;
 /// Fraction of the swing clip at which the blow lands.
 pub const HIT_AT: f32 = 0.45;
 pub const PLAYER_HP: f32 = 120.0;
+/// INVENTED: damage per second of standing or swimming in a harmful liquid, and the weapon group its hits are reported under.
+pub fn hazard_damage(h: crate::nav::Hazard) -> (f32, &'static str) {
+    match h {
+        crate::nav::Hazard::Lava => (30.0, "lava"),
+        crate::nav::Hazard::Acid => (10.0, "acid"),
+        crate::nav::Hazard::Tar => (4.0, "tar"),
+    }
+}
 /// Arrows and bolts: gravity (the viewer uses 35% of g on arrows) and the vertical slack of the hit test (the server does not know the terrain: mobs report y = 0).
 pub const ARROW_GRAVITY: f32 = 9.8 * 0.35;
 pub const VERTICAL_SLACK: f32 = 14.0;
